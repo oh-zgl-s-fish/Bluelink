@@ -40,6 +40,24 @@ class GattServer(
     private val subscribedDevices = ConcurrentHashMap<String, Boolean>()
     private val pendingNotify = ConcurrentHashMap<String, ByteArray>()
 
+    /** 查询某地址是否已连接本机 GATT Server（用于握手仲裁，避免同一设备双连接）。 */
+    fun isDeviceConnected(address: String): Boolean = connectedDevices.containsKey(address)
+
+    /** 断开某地址在本机 Server 上的连接（对端反连），并从状态表移除，防双连接。 */
+    fun disconnectDevice(address: String) {
+        val device = connectedDevices[address] ?: return
+        DiagLogger.log(TAG, "握手仲裁：断开对端反连 $address")
+        try {
+            gattServer?.cancelConnection(device)
+        } catch (e: Exception) {
+            Log.w(TAG, "cancelConnection 异常: $e")
+            DiagLogger.log(TAG, "cancelConnection 异常: $e")
+        }
+        connectedDevices.remove(address)
+        subscribedDevices.remove(address)
+        pendingNotify.remove(address)
+    }
+
     fun start(bluetoothManager: BluetoothManager) {
         stop()
         val server = bluetoothManager.openGattServer(context, serverCallback)

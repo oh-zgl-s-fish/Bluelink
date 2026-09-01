@@ -156,7 +156,16 @@ class BluelinkEngine(private val context: Context) {
         ui.handshaking = true
         ui.handshakeError = null
         DiagLogger.log(TAG, "点设备发起握手 ${device.address}")
-        gattClient.connect(device)
+        // 握手连接仲裁：若本机 Server 已与该设备建立反连接，先断开对端反连，
+        // 避免同一设备 Client→对端 + 对端 Client→本机 Server 双 GATT 连接并发（蓝牙栈写入挂起根因）；
+        // 断开后延迟 200ms 等栈稳定再发起 Client 连接。
+        if (gattServer.isDeviceConnected(device.address)) {
+            DiagLogger.log(TAG, "为避免双连接，已断开对端反连 ${device.address}")
+            gattServer.disconnectDevice(device.address)
+            mainHandler.postDelayed({ gattClient.connect(device) }, 200L)
+        } else {
+            gattClient.connect(device)
+        }
     }
 
     fun dismissSheet() {

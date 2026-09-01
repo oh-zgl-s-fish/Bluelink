@@ -25,11 +25,22 @@ class BleScanner(
 
     private var scanner: BluetoothLeScanner? = null
 
+    /** 设备级扫描日志限频：同一 device.address 距上次记录 < [LOG_DEBOUNCE_MS] 则跳过日志（业务回调不受影响）。 */
+    private val lastLogAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val msg = "onScanResult device=${result.device?.address} rssi=${result.rssi}"
-            Log.i(TAG, msg)
-            DiagLogger.log(TAG, msg)
+            val device = result.device
+            val addr = device?.address
+            // 去抖：同一设备 <1s 内重复上报只保留业务回调，不刷 DiagLogger 内存缓冲，也不刷 logcat
+            val now = System.currentTimeMillis()
+            val shouldLog = addr == null || now - (lastLogAt[addr] ?: 0L) >= LOG_DEBOUNCE_MS
+            if (shouldLog) {
+                if (addr != null) lastLogAt[addr] = now
+                val msg = "onScanResult device=$addr rssi=${result.rssi}"
+                Log.i(TAG, msg)
+                DiagLogger.log(TAG, msg)
+            }
             mainHandler.post { callbacks.onScanResult(result) }
         }
 
@@ -90,5 +101,8 @@ class BleScanner(
 
     companion object {
         private const val TAG = "BleScanner"
+
+        /** 扫描日志去抖窗口：同一设备两次记录的最小间隔。 */
+        private const val LOG_DEBOUNCE_MS = 1000L
     }
 }

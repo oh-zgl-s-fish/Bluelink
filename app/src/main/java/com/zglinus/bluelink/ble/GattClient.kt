@@ -44,6 +44,11 @@ class GattClient(
         fail("握手超时(${Constants.HANDSHAKE_TIMEOUT_MS}ms)")
     }
 
+    /** 写入兜底：握手写发起后 3s 内 onCharacteristicWrite 未回调（蓝牙栈写入挂起）则判失败。 */
+    private val writeTimeoutRunnable = Runnable {
+        fail("握手写入 3s 无回调(status 未返回)")
+    }
+
     fun connect(device: BluetoothDevice) {
         if (gatt != null) {
             Log.w(TAG, "已有进行中的握手会话，忽略 ${device.address}")
@@ -110,9 +115,10 @@ class GattClient(
                 if (cleaned) return@post
                 // 成功取协商值；失败兜底默认 23（ATT 标准最小 MTU）。无论结果都继续服务发现
                 this@GattClient.mtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else DEFAULT_ATT_MTU
-                Log.d(TAG, "MTU 协商: mtu=${this@GattClient.mtu} status=$status，继续服务发现")
-                DiagLogger.log(TAG, "onMtuChanged: mtu=${this@GattClient.mtu} status=$status，继续服务发现")
-                gatt.discoverServices()
+                Log.d(TAG, "MTU 协商: mtu=${this@GattClient.mtu} status=$status，200ms 后服务发现")
+                // MTU 协商后给蓝牙栈 200ms 稳定窗口再 discoverServices，降低写入挂起概率
+                DiagLogger.log(TAG, "onMtuChanged: mtu=${this@GattClient.mtu} status=$status，延迟 200ms 服务发现（栈稳定窗口）")
+                mainHandler.postDelayed({ gatt.discoverServices() }, MTU_SETTLE_DELAY_MS)
             }
         }
 
@@ -165,6 +171,8 @@ class GattClient(
             status: Int,
         ) {
             mainHandler.post {
+                // 写入兜底：无论 status 都撤掉 3s 写入超时（status 已返回，栈未挂起）
+                mainHandler.removeCallbacks(writeTimeoutRunnable)
                 // 握手写入结果确认：失败立即终止，避免干等 10s 超时；
                 // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
                 if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -223,10 +231,14 @@ class GattClient(
                 gatt.writeCharacteristic(ch)
             }
         } catch (e: Exception) {
+            mainHandler.removeCallbacks(writeTimeoutRunnable)
             Log.w(TAG, "writeCharacteristic 异常: $e")
             DiagLogger.log(TAG, "writeCharacteristic 异常: $e")
             fail("写入异常: ${e.message}")
         }
+        // 写入兜底：发起写后 3s 无 onCharacteristicWrite 回调（栈挂起）则判失败；回调/cleanup 撤除
+        mainHandler.postDelayed(writeTimeoutRunnable, WRITE_TIMEOUT_MS)
+        DiagLogger.log(TAG, "握手写入已发起，3s 写入兜底超时已启动")
     }
 
     private fun writeDescriptorCompat(gatt: BluetoothGatt, desc: BluetoothGattDescriptor, bytes: ByteArray) {
@@ -256,6 +268,7 @@ class GattClient(
 
     private fun cleanup() {
         mainHandler.removeCallbacks(timeoutRunnable)
+        mainHandler.removeCallbacks(writeTimeoutRunnable)
         val g = gatt
         gatt = null
         cleaned = true
@@ -286,5 +299,11 @@ class GattClient(
 
         /** BLE 默认 ATT MTU（未协商/协商失败兜底，载荷上限 = mtu - 3 = 20B）。 */
         private const val DEFAULT_ATT_MTU = 23
+
+        /** MTU 协商后给蓝牙栈的稳定窗口，之后才 discoverServices。 */
+        private const val MTU_SETTLE_DELAY_MS = 200L
+
+        /** 握手写入兜底超时：发起写后 3s 无回调判失败（早于 10s 总超时先失败）。 */
+        private const val WRITE_TIMEOUT_MS = 3000L
     }
 }

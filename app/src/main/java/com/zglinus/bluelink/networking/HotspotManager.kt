@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [HotspotStartLevel.L2_LOCAL_ONLY] 对应仲裁 L2_LOCAL_ONLY，[HotspotStartLevel.MANUAL] 对应仲裁 MANUAL。
  */
 enum class HotspotStartLevel {
-    /** ① L1 自动热点：root 通道（su 提权创建系统热点；B1 已实现真路径，全矩阵穷举）。 */
+    /** ① L1 自动热点：root 通道（已停用：B1 移除，A15/root 路径废弃；HotspotManager 返回失败 stub，状态机自动降级 ②）。 */
     L1_ROOT,
 
     /** ② L1 自动热点：私有 API 通道（反射系统隐藏接口；一期按 `sdkInt in 26..33` 可尝试启发，与 [Arbiter] 一致；真实可行性由 B2 反射 try 实测收口）。 */
@@ -47,9 +47,9 @@ enum class HotspotStartLevel {
  *
  * @param success 是否成功开启热点；false 时 [error] 给出降级/等待原因。
  * @param ssid 热点 SSID（成功时返回，供对端连接；手动路径由 UI 回填）。
- * @param pwd 热点密码（成功时返回；root 路径由本包自设随机密码；手动路径由 UI 回填）。
- * @param ip 热点本机 IPv4（B1：root 真热点启动后采集；B2：私有 API 路径启动后采集；未取到为空串 ""，一期允许）。
- * @param error 失败/等待原因（如 "本包实现(B包)" 降级、root 全矩阵失败聚合串、`"AwaitingManual"` 等待手动、
+ * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；手动路径由 UI 回填）。
+ * @param ip 热点本机 IPv4（② 私有 API 路径启动后采集；未取到为空串 ""，一期允许）。
+ * @param error 失败/等待原因（如 "本包实现(B包)" 降级、root 路径已停用(B1 移除) 降级、`"AwaitingManual"` 等待手动、
  *   `"AwaitingWriteSettings"` 等待 WRITE_SETTINGS 授权）。
  */
 data class HotspotResult(
@@ -79,31 +79,20 @@ interface HotspotListener {
 }
 
 /**
- * 热启动管理器（A3b，单文件瘦身版；① root 真热点经 [RootSoftAp] 全矩阵穷举执行）。
+ * 热启动管理器（A3b，单文件瘦身版；① root 真热点已停用——B1 移除，A15/root 路径废弃）。
  *
  * 对应设计文档 docs/networking.md §2「热点角色仲裁」：仲裁器 [Arbiter] 决策 who/level 后，
  * 由本管理器按 [HotspotStartLevel] 实际启动热点。
  *
- * - ①（[HotspotStartLevel.L1_ROOT]，B1 真实现）：
- *   - 前置：复用 [ble.HandshakeProtocol] 内 [RootDetector.isRoot]（应用启动时后台探测缓存），
- *     false → 如实返回失败，交状态机降级试下一级 ②；
- *   - root 为 true 后：委托 [RootSoftAp.start] 执行**配置 × 启动双矩阵穷举**——
- *     配置矩阵 A1 apex WifiConfigStore.xml / A2 传统 WifiConfigStore.xml / A3 softap.conf /
- *     A4 cmd wifi set-softap 系列 / A5 反射 setSoftApConfiguration（写 SSID=Bluelink-XXXX 与随机
- *     8 位密码）；启动矩阵 B1 cmd wifi start-softap / B2 cmd wifi set-softap enabled /
- *     B3 反射 setWifiApEnabled / B4 LocalSocket @android:wpa_wlan0 / B5 service call wifi；
- *     每个启动尝试后延时 600ms 走校验矩阵（cmd wifi status / dumpsys softap / ip link ap 接口 /
- *     isWifiApEnabled 反射），任一判定 started 即成功；不再按 `sdkInt in 26..28 / >=29` 硬分版本，
- *     版本仅作探测顺序偏好（8.0 优先 A3）；
- *   - 成功：`HotspotResult(success=true, ssid, pwd, ip=热点本机 IPv4)`（IP 四级采集：ip addr 定向
- *     ap 接口 → 全量打分 → ifconfig → NetworkInterface）；
- *   - 失败：聚合每条失败原因（策略名 + exit + 输出摘要，密码脱敏不回显）返回 error 串，
- *     状态机照旧降级 ②；
- * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现）：私有 API 反射热点（root 之后的降级方案）——
+ * - ①（[HotspotStartLevel.L1_ROOT]，已停用）：B1 root 真热点穷举矩阵已整体移除（A15/root 路径废弃），
+ *   本等级为失败 stub——[startSyncInternal] 直接返回
+ *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`，不启动线程、不生成凭据；
+ *   状态机 L1_ROOT 异步桥收到 false 照旧降级 ②（L1_PRIVATE_API），状态机无需改动；
+ * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现）：私有 API 反射热点（① 停用后的降级主路径）——
  *   - 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 未授权 → 回调
  *     [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」（Android 10+ 反射
  *     `setWifiApEnabled` 需此 AppOps），返回 `HotspotResult(false, error="AwaitingWriteSettings")`
- *     待授权后重试；ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（同 [RootSoftAp]）；
+ *     待授权后重试；ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（见 [resolveContext]）；
  *   - 反射 `WifiManager.setWifiApEnabled(config, true)`（`java.lang.Boolean.TYPE` 精匹配），
  *     构造 WifiConfiguration：SSID=Bluelink-XXXX（4 位随机）/ 随机 8 位密码 / WPA2
  *     （`allowedKeyManagement` 置位 4，即 KeyMgmt.WPA2_PSK）/ `isAccessible=true`；
@@ -121,18 +110,18 @@ interface HotspotListener {
  * 边界：只做「启动 + 取信息 + 返回 Result」；关闭/收尾（stop）留 B4；
  * B2 起状态机侧同步接线（② 也走异步桥 onPrivateApiAsyncResult，见 NetworkingStateMachine）。
  * 线程模型（Bluelink ANR 修复）：[start] 保留同步契约（MANUAL/其他调用方不破）；新增
- * [startAsync] 把矩阵体（含 L1_ROOT 的 su/IO、L1_PRIVATE_API 的反射/轮询 sleep）放到后台线程
- * 执行、结果经主线程回调——状态机 L1_ROOT / L1_PRIVATE_API 均改走 [startAsync]，真机点击
- * 「组建临时局域网」不再因 root 穷举矩阵 / 私有 API 轮询卡死主线程（RootSoftAp 总预算护栏
- * ≤10s、② 轮询 ≤5s，均不超状态机 15s 步骤超时窗口，超时兜底 abort）。
+ * [startAsync] 把②（L1_PRIVATE_API）的反射/轮询 sleep 放到后台线程执行、结果经主线程回调——
+ * 状态机 L1_ROOT（stub 立即返回 false）/ L1_PRIVATE_API 均走 [startAsync]，真机点击
+ * 「组建临时局域网」不再因私有 API 轮询卡死主线程（② 轮询 ≤5s，不超状态机 15s 步骤
+ * 超时窗口，超时兜底 abort）。
  *
  * 私有 API 一期按 `sdkInt in 26..33` 启发（可尝试范围，与 [Arbiter.buildLocalCapability] 的
  * `privateApiCapable` 判定一致）；真实可行性由 B2 反射 try 实测收口（见 [tryPrivateApiHotspot]）。
  *
  * @param listener 生命周期回调（UI / 引擎注入）。
  * @param context 反射路径取 WifiManager 需要（经 Context.getSystemService）；缺省 null 时
- *   [RootSoftAp] 会经 `ActivityThread.currentApplication()` 反射兜底（② 的 [resolveContext] 同法），
- *   仍取不到则该路径如实失败，待接线方注入 applicationContext。
+ *   [resolveContext] 会经 `ActivityThread.currentApplication()` 反射兜底，仍取不到则该路径
+ *   如实失败，待接线方注入 applicationContext。
  */
 class HotspotManager(
     private val listener: HotspotListener,
@@ -160,8 +149,8 @@ class HotspotManager(
     /**
      * 按仲裁结果 [level] 启动热点。
      *
-     * - [HotspotStartLevel.L1_ROOT]：B1 真路径（root 探测前置 + 委托 [RootSoftAp] 全矩阵穷举，
-     *   见 [startL1Root]）；
+     * - [HotspotStartLevel.L1_ROOT]：已停用（B1 移除）——失败 stub，立即返回
+     *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`；
      * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（私有 API 反射热点，见 [tryPrivateApiHotspot]）；
      * - [HotspotStartLevel.L2_LOCAL_ONLY]：③ 真实现留 B3，本包 stub 降级
      *   `HotspotResult(false, error = "本包实现(B包)")`；
@@ -176,9 +165,9 @@ class HotspotManager(
     /**
      * 异步启动热点（Bluelink ANR 修复：root 热点穷举矩阵 / 私有 API 反射轮询异步桥）。
      *
-     * 矩阵体（含 [HotspotStartLevel.L1_ROOT] 的 su/IO，[RootSoftAp] 总预算护栏 ≤10s；以及
-     * [HotspotStartLevel.L1_PRIVATE_API] 的反射 + 轮询 sleep，≤5s）在后台线程 [hotspotExecutor]
-     * 执行，不占用 UI 主线程；结果经主线程 [mainHandler] 回调 [cb]，成功/失败均回调。
+     * 矩阵体（[HotspotStartLevel.L1_PRIVATE_API] 的反射 + 轮询 sleep，≤5s；L1_ROOT 为失败 stub
+     * 无后台耗时）在后台线程 [hotspotExecutor] 执行，不占用 UI 主线程；结果经主线程 [mainHandler]
+     * 回调 [cb]，成功/失败均回调。
      * 所有等级统一走此异步包装（②③④ 结果同样经主线程 cb 回传）；
      * [asyncRunning] 防重入：上一次启动仍在进行中时重复调用直接忽略。
      *
@@ -195,7 +184,7 @@ class HotspotManager(
             val result = try {
                 startSyncInternal(level)
             } catch (e: Exception) {
-                // 不吞异常：记录 + 如实透传（startL1Root 内部已有 catch，此处为最外层兜底）
+                // 不吞异常：记录 + 如实透传（② tryPrivateApiHotspot 内部已有 catch，此处为最外层兜底）
                 DiagLogger.log(tag, "startAsync 后台执行异常（不吞）: $e")
                 HotspotResult(
                     success = false,
@@ -214,8 +203,10 @@ class HotspotManager(
      * 同步启动执行体（[start] 与 [startAsync] 共用；行为与历史 [start] 完全一致）。
      */
     private fun startSyncInternal(level: HotspotStartLevel): HotspotResult = when (level) {
-        // ① root 真热点（B1）：root 探测前置 + RootSoftAp 配置×启动全矩阵穷举
-        HotspotStartLevel.L1_ROOT -> startL1Root()
+        // ① root 真热点（B1 已移除）：失败 stub——不启动线程、不生成凭据；
+        // 状态机 L1_ROOT 异步桥收到 false 照旧降级 ②（L1_PRIVATE_API），无需改状态机
+        HotspotStartLevel.L1_ROOT ->
+            HotspotResult(success = false, error = "root 热点路径已停用(B1 移除)，降级 ②")
 
         // ② 私有 API 反射热点（B2 真实现）：WRITE_SETTINGS 前置 + 反射 setWifiApEnabled + 轮询校验 + 取 IP
         HotspotStartLevel.L1_PRIVATE_API -> tryPrivateApiHotspot()
@@ -256,45 +247,6 @@ class HotspotManager(
      */
     fun isRootAvailable(): Boolean = RootDetector.isRoot()
 
-    // ================= ① L1_ROOT 真路径（B1） =================
-
-    /**
-     * ① root 真热点（B1，全矩阵穷举版）：
-     * 1) 前置：[RootDetector.isRoot] 为 false → 如实返回失败（交状态机试下一级 ②）；
-     * 2) root 为 true → 生成 SSID/密码，委托 [RootSoftAp.start] 执行
-     *    「配置 5 × 启动 5 + 校验 4」全矩阵（不再按版本硬分路径，版本仅作探测顺序偏好）；
-     * 3) 成功返回 `HotspotResult(success=true, ssid, pwd, ip=热点本机 IPv4)`；
-     * 4) 失败如实返回聚合原因串（策略名 + exit + 输出摘要，密码脱敏），不吞异常。
-     */
-    private fun startL1Root(): HotspotResult {
-        // 前置：root 不可用 → 返回失败，交状态机降级试下一级 ②（L1_PRIVATE_API）
-        if (!RootDetector.isRoot()) {
-            DiagLogger.log(
-                tag,
-                "L1_ROOT 前置失败：RootDetector.isRoot()=false（无 su / 探测未授权），返回失败降级下一级",
-            )
-            return HotspotResult(success = false, error = "root 不可用（RootDetector.isRoot()=false），降级")
-        }
-
-        val ssid = generateSsid()
-        val pwd = generatePassword()
-        DiagLogger.log(tag, "L1_ROOT：sdk=${Build.VERSION.SDK_INT} ssid=$ssid pwdLen=${pwd.length}（密码不回显）")
-
-        return try {
-            // 全矩阵穷举：配置×启动+校验（版本不再硬分，统一走 RootSoftAp 矩阵）
-            RootSoftAp.start(ssid, pwd, context)
-        } catch (e: Exception) {
-            // 不吞异常：记录 + 如实透传原因
-            DiagLogger.log(tag, "L1_ROOT 启动异常（不吞）: $e")
-            HotspotResult(
-                success = false,
-                ssid = ssid,
-                pwd = pwd,
-                error = "root 热点启动异常: ${e.message ?: e.javaClass.simpleName}",
-            )
-        }
-    }
-
     // ================= ② L1_PRIVATE_API 真路径（B2：私有 API 反射热点） =================
 
     /**
@@ -302,7 +254,7 @@ class HotspotManager(
      * 1) 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 为 false → 经主线程回调
      *    [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」授权（复用现有
      *    WriteSettingsDialog / openWriteSettings 语义），返回 `AwaitingWriteSettings` 待授权后重试；
-     *    ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（同 [RootSoftAp]）；
+     *    ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（见 [resolveContext]）；
      * 2) 反射 `WifiManager.setWifiApEnabled(config, true)`（`java.lang.Boolean.TYPE` 精匹配），
      *    构造 WifiConfiguration：SSID=Bluelink-XXXX（4 位随机）、preSharedKey=随机 8 位、
      *    WPA2（`allowedKeyManagement` 置位 4，即 KeyMgmt.WPA2_PSK）、`isAccessible=true`
@@ -403,7 +355,7 @@ class HotspotManager(
 
     /**
      * Context 兜底：优先构造注入的 [context]；null 时经 `ActivityThread.currentApplication()` 反射
-     * （同 [RootSoftAp] 的兜底法；P+ 可能被 hidden API 拦截，失败如实返回 null）。
+     * （P+ 可能被 hidden API 拦截，失败如实返回 null）。
      */
     private fun resolveContext(): Context? {
         context?.let { return it }
@@ -465,7 +417,7 @@ class HotspotManager(
     }
 
     /**
-     * 取热点本机 IPv4（简化版，复用 RootSoftAp 四级采集思路的 NetworkInterface 环节）：
+     * 取热点本机 IPv4（② 用；NetworkInterface 枚举按热点网段打分）：
      * 枚举全部接口，按接口名/网段打分（ap 系 +100、192.168.43.x 默认热点网段 +50、
      * 192.168.x +20、wlan +10、10./172. +5）取最优；无候选返回空串 ""（一期允许占位）。
      * 本路径免 root（② 为 root 降级后的非 root 通道），故不执行 su 命令采集。
@@ -493,7 +445,7 @@ class HotspotManager(
         return ip
     }
 
-    /** 接口名/网段打分（与 RootSoftAp 同思路）：ap 系 +100、192.168.43.x +50、192.168.x +20、wlan +10、10./172. +5。 */
+    /** 接口名/网段打分（② 用）：ap 系 +100、192.168.43.x +50、192.168.x +20、wlan +10、10./172. +5。 */
     private fun scoreHotspotIface(iface: String, ip: String): Int {
         val n = iface.lowercase(Locale.US)
         var s = 0

@@ -2,10 +2,15 @@ package com.zglinus.bluelink.networking
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import com.zglinus.bluelink.ble.RootDetector
 import com.zglinus.bluelink.diag.DiagLogger
 import java.security.SecureRandom
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 热点等级（A3b 热启动维度）：
@@ -89,8 +94,10 @@ interface HotspotListener {
  *   供后续 offer（热点信息广播）使用。
  *
  * 边界（B1）：只做「启动 + 取信息 + 返回 Result」；关闭/收尾（stop）留 B4；不改状态机。
- * 线程模型：与状态机一致，[start] 同步执行（root shell / 轮询有 [RootSoftAp] 总预算护栏
- * ≤10s，不超状态机 15s 步骤超时窗口）。
+ * 线程模型（Bluelink ANR 修复）：[start] 保留同步契约（MANUAL/其他调用方不破）；新增
+ * [startAsync] 把矩阵体（含 L1_ROOT 的 su/IO）放到后台线程执行、结果经主线程回调——
+ * 状态机 L1_ROOT 改走 [startAsync]，真机点击「组建临时局域网」不再因 root 穷举矩阵卡死
+ * 主线程（RootSoftAp 总预算护栏 ≤10s，不超状态机 15s 步骤超时窗口，超时兜底 abort）。
  *
  * 私有 API 一期按 `sdkInt in 26..33` 启发（可尝试范围，与 [Arbiter.buildLocalCapability] 的
  * `privateApiCapable` 判定一致）；真实可行性由 B 包反射 try 实测收口。
@@ -111,6 +118,18 @@ class HotspotManager(
     @Volatile
     private var manualPwd: String? = null
 
+    /** 异步桥：矩阵（含 L1_ROOT su/IO）专用后台单线程（daemon，不阻止进程退出）。 */
+    private val hotspotExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "Bluelink-HotspotManager-async").apply { isDaemon = true }
+        }
+
+    /** 主线程 Handler（Looper.getMainLooper() 取主 Handler）：startAsync 结果统一回主线程回调。 */
+    private val mainHandler: Handler = Handler(Looper.getMainLooper())
+
+    /** 异步启动进行中标志（防重入：上一次启动未完成时重复 startAsync 直接忽略）。 */
+    private val asyncRunning = AtomicBoolean(false)
+
     /**
      * 按仲裁结果 [level] 启动热点。
      *
@@ -124,20 +143,62 @@ class HotspotManager(
      */
     fun start(level: HotspotStartLevel): HotspotResult {
         DiagLogger.log(tag, "start(level=$level) 调用")
-        return when (level) {
-            // ① root 真热点（B1）：root 探测前置 + RootSoftAp 配置×启动全矩阵穷举
-            HotspotStartLevel.L1_ROOT -> startL1Root()
+        return startSyncInternal(level)
+    }
 
-            // ②③ 真实现与私有 API / Local-only 按机型实测为 B 包范围，本包一律降级
-            HotspotStartLevel.L1_PRIVATE_API, HotspotStartLevel.L2_LOCAL_ONLY ->
-                HotspotResult(success = false, error = "本包实现(B包)")
-
-            // ④ 手动路径：请求 UI 引导用户手动配网；密码回填后走 onHotspotReady
-            HotspotStartLevel.MANUAL -> {
-                DiagLogger.log(tag, "MANUAL：请求 UI 手动配网")
-                listener.onManualRequest()
-                HotspotResult(success = false, error = "AwaitingManual")
+    /**
+     * 异步启动热点（Bluelink ANR 修复：root 热点穷举矩阵异步桥）。
+     *
+     * 矩阵体（含 [HotspotStartLevel.L1_ROOT] 的 su/IO，[RootSoftAp] 总预算护栏 ≤10s）在后台
+     * 线程 [hotspotExecutor] 执行，不占用 UI 主线程；结果经主线程 [mainHandler] 回调 [cb]，
+     * 成功/失败均回调。所有等级统一走此异步包装（②③④ 结果同样经主线程 cb 回传）；
+     * [asyncRunning] 防重入：上一次启动仍在进行中时重复调用直接忽略。
+     *
+     * @param level 启动等级（语义与 [start] 一致）。
+     * @param cb 主线程回调（携带最终 [HotspotResult]；调用方需自行校验当前状态防时序漂移）。
+     */
+    fun startAsync(level: HotspotStartLevel, cb: (HotspotResult) -> Unit) {
+        if (!asyncRunning.compareAndSet(false, true)) {
+            DiagLogger.log(tag, "startAsync(level=$level) 忽略：上一次异步启动仍在进行中（isRunning）")
+            return
+        }
+        DiagLogger.log(tag, "startAsync(level=$level) 提交后台线程（矩阵 su/IO 不在主线程执行）")
+        hotspotExecutor.execute {
+            val result = try {
+                startSyncInternal(level)
+            } catch (e: Exception) {
+                // 不吞异常：记录 + 如实透传（startL1Root 内部已有 catch，此处为最外层兜底）
+                DiagLogger.log(tag, "startAsync 后台执行异常（不吞）: $e")
+                HotspotResult(
+                    success = false,
+                    error = "startAsync 后台异常: ${e.message ?: e.javaClass.simpleName}",
+                )
             }
+            // 结果统一回主线程回调（状态机按主线程契约消费；回调前释放 isRunning 供下次启动）
+            mainHandler.post {
+                asyncRunning.set(false)
+                cb(result)
+            }
+        }
+    }
+
+    /**
+     * 同步启动执行体（[start] 与 [startAsync] 共用；行为与历史 [start] 完全一致）。
+     */
+    private fun startSyncInternal(level: HotspotStartLevel): HotspotResult = when (level) {
+        // ① root 真热点（B1）：root 探测前置 + RootSoftAp 配置×启动全矩阵穷举
+        HotspotStartLevel.L1_ROOT -> startL1Root()
+
+        // ②③ 真实现与私有 API / Local-only 按机型实测为 B 包范围，本包一律降级
+        HotspotStartLevel.L1_PRIVATE_API, HotspotStartLevel.L2_LOCAL_ONLY ->
+            HotspotResult(success = false, error = "本包实现(B包)")
+
+        // ④ 手动路径：请求 UI 引导用户手动配网；密码回填后走 onHotspotReady。
+        // onManualRequest 触达 UI：经主线程 post（startAsync 后台线程调用该分支时也安全）。
+        HotspotStartLevel.MANUAL -> {
+            DiagLogger.log(tag, "MANUAL：请求 UI 手动配网（主线程 post）")
+            mainHandler.post { listener.onManualRequest() }
+            HotspotResult(success = false, error = "AwaitingManual")
         }
     }
 

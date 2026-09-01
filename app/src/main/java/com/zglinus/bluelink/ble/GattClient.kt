@@ -19,6 +19,9 @@ import com.zglinus.bluelink.diag.DiagLogger
  * - 同一时间只处理一个握手会话，忙时直接拒绝新请求；
  * - MTU 协商先行：默认 ATT MTU=23 单包载荷仅 20B，150B 握手 JSON 传不过去，连接成功后先
  *   requestMtu(512)，onMtuChanged 后再 discoverServices；写入前按协商 MTU 做长度校验；
+ * - ATT 操作串行化：服务发现后只写 CCC 订阅，主握手写入等 onDescriptorWrite 确认
+ *   CCC 写完后才发起，避免背靠背发起 CCC 与 WRITE 被蓝牙栈单请求串行模型静默丢弃
+ *   （onCharacteristicWrite 永不回调）；
  * - 回调运行在 Binder 线程，统一切回主线程；disconnect/close 防泄漏。
  */
 class GattClient(
@@ -34,6 +37,9 @@ class GattClient(
     private var gatt: BluetoothGatt? = null
     private var targetAddress: String? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
+
+    /** 服务发现时暂存的 WRITE 特征，供 onDescriptorWrite（CCC 写完）后发起主握手写入。 */
+    private var pendingWriteChar: BluetoothGattCharacteristic? = null
     private var handshakeDone = false
     private var cleaned = false
 
@@ -140,28 +146,38 @@ class GattClient(
                     return@post
                 }
                 notifyChar = notify
-                // 先订阅 NOTIFY（写 CCC），随后写入本机握手
+                pendingWriteChar = write
+                // 串行化 ATT 操作：这里只做订阅（写 CCC），主握手写入等 onDescriptorWrite
+                // 确认 CCC 写完后才发起，避免背靠背发起 CCC 与 WRITE 被蓝牙栈
+                // 单请求串行模型静默丢弃（onCharacteristicWrite 永不回调）
                 gatt.setCharacteristicNotification(notify, true)
                 val ccc = notify.getDescriptor(Constants.CLIENT_CHARACTERISTIC_CONFIG_UUID)
                 if (ccc != null) {
                     writeDescriptorCompat(gatt, ccc, byteArrayOf(0x01, 0x00))
+                } else {
+                    // 无 CCC 描述符：没有可串行等待的写，直接发起主握手写入
+                    DiagLogger.log(TAG, "NOTIFY 特征无 CCC 描述符，跳过订阅写入，直接发起主握手写入")
+                    sendHandshake(gatt, write)
                 }
-                val bytes = HandshakeProtocol.encode(HandshakeProtocol.buildLocal(context))
-                // 写入前长度校验（防御）：ATT 层 3 字节头开销，单包载荷上限 = mtu - 3
-                val maxPayload = mtu - 3
-                if (bytes.size > maxPayload) {
-                    fail("握手消息 ${bytes.size}B 超出当前 MTU ${maxPayload}B")
-                    return@post
-                }
-                writeCharacteristicCompat(gatt, write, bytes)
-                DiagLogger.log(TAG, "握手写入已发起: ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
             }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "CCC 写入失败 status=$status")
-                DiagLogger.log(TAG, "CCC 写入失败 status=$status")
+            mainHandler.post {
+                // status 失败仅记录并继续：Server 端有订阅挂起补发兜底，主握手写入仍按序发起
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    Log.w(TAG, "CCC 写入失败 status=$status")
+                    DiagLogger.log(TAG, "CCC 写入失败 status=$status（仅记录，继续发起主写入）")
+                }
+                // 串行化：CCC 写回调确认后（无论成功与否）再发起主握手写入
+                DiagLogger.log(TAG, "CCC 写完(status=$status)，发起主写入")
+                val write = pendingWriteChar
+                if (write != null) {
+                    sendHandshake(gatt, write)
+                } else {
+                    Log.w(TAG, "onDescriptorWrite 无暂存写入特征，跳过握手写入")
+                    DiagLogger.log(TAG, "onDescriptorWrite 无暂存写入特征，跳过握手写入")
+                }
             }
         }
 
@@ -214,6 +230,25 @@ class GattClient(
                 DiagLogger.log(TAG, "对方握手通知解析失败（${value.size}B）")
             }
         }
+    }
+
+    /**
+     * 串行化后的主握手写入：仅在 CCC 写完成后调用（onDescriptorWrite），
+     * 避免与描述符写入背靠背被蓝牙栈单请求模型静默丢弃。
+     */
+    private fun sendHandshake(gatt: BluetoothGatt, write: BluetoothGattCharacteristic) {
+        // 可能在 cleanup 之后才被回调触发（CCC 写回调延迟到达），入口先拦截
+        if (cleaned) return
+        val bytes = HandshakeProtocol.encode(HandshakeProtocol.buildLocal(context))
+        // 写入前长度校验（防御）：ATT 层 3 字节头开销，单包载荷上限 = mtu - 3
+        val maxPayload = mtu - 3
+        if (bytes.size > maxPayload) {
+            fail("握手消息 ${bytes.size}B 超出当前 MTU ${maxPayload}B")
+            return
+        }
+        // 内部含返回值检查与 3s 写入兜底启动
+        writeCharacteristicCompat(gatt, write, bytes)
+        DiagLogger.log(TAG, "握手写入已发起: ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
     }
 
     private fun writeCharacteristicCompat(
@@ -287,6 +322,7 @@ class GattClient(
         gatt = null
         cleaned = true
         notifyChar = null
+        pendingWriteChar = null
         targetAddress = null
         if (g != null) {
             try {

@@ -34,6 +34,9 @@
          缺失抛 SecurityException「was not granted either of: CHANGE_NETWORK_STATE, WRITE_SETTINGS」 -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- 修改系统设置（AppOps）：②私有API反射setWifiApEnabled 前置要求 / 8-10 addNetwork 接入
+         （app-op 权限须声明才会出现在「修改系统设置」授权页并可启用；不设 maxSdkVersion 上限） -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
 
     <!-- 通知与前台服务（传输状态通知） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

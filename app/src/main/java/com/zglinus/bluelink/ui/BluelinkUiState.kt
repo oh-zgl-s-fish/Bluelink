@@ -141,4 +141,18 @@ class BluelinkUiState {
 
     /** ③ LocalOnly 自测（sdk 33+）：用户已按系统弹窗回填并确认登记密码（完成标记；UI 据此显示「密码已登记」）。 */
     var localOnlyTestPasswordSet by mutableStateOf(false)
+
+    // ============ T3 LocalSend 传输（发送/接收） ============
+
+    /** 发送确认框是否可见（SAF 选文件后展示文件名/大小/目标；确认后 engine 后台发送）。 */
+    var sendDialog by mutableStateOf(false)
+
+    /**
+     * 传输状态行文本（null=无传输）：发送侧「发送中 文件名 45%」/「发送完成/失败/已取消：…」；
+     * 接收侧「接收中 文件名 45%」（Engine 轮询 LocalSendServer.getActiveSessions 映射）。
+     */
+    var transferState by mutableStateOf<String?>(null)
+
+    /** 收到的文件列表（服务端落盘完成回调 + 启动扫描 filesDir/localsend/ 初始化；按文件名展示）。 */
+    var receivedFiles by mutableStateOf<List<String>>(emptyList())
 }

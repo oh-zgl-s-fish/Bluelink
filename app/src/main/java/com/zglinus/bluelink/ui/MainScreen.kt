@@ -1,8 +1,11 @@
 package com.zglinus.bluelink.ui
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -73,6 +76,13 @@ fun MainScreen(
     onRefreshNetwork: () -> Unit,
     onRequestPermissions: () -> Unit,
 ) {
+    // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）
+    val sendFileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) BluelinkEngine.current()?.onSendFilePicked(uri)
+    }
+
     Scaffold { innerPadding ->
         Column(
             modifier = Modifier
@@ -96,6 +106,7 @@ fun MainScreen(
                 advertisingWanted = advertisingWanted,
                 onAdvertisingWantedChange = onAdvertisingWantedChange,
                 onRefreshNetwork = onRefreshNetwork,
+                onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
             )
 
             Spacer(Modifier.height(8.dp))
@@ -142,6 +153,11 @@ fun MainScreen(
     BluelinkEngine.current()?.let { engine ->
         if (ui.loTestPwdDialog) LoTestPwdDialog(engine)
     }
+
+    // T3 LocalSend：发送确认框（SAF 选文件后展示文件名/大小/目标；确认后后台发送）
+    BluelinkEngine.current()?.let { engine ->
+        if (ui.sendDialog) SendConfirmDialog(engine)
+    }
 }
 
 /** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）+ 信令自测 + ③ LocalOnly 自测。 */
@@ -151,6 +167,7 @@ private fun LocalStatusCard(
     advertisingWanted: Boolean,
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onRefreshNetwork: () -> Unit,
+    onSendFileClick: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -261,6 +278,51 @@ private fun LocalStatusCard(
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
+                    )
+                }
+            }
+
+            // ============ T3 LocalSend 传输（发送入口 / 进度 / 接收列表） ============
+            BluelinkEngine.current()?.let { engine ->
+                // 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
+                val canSend = engine.transportPeerIp.isNotBlank() ||
+                    ui.devices.values.any { it.handshake != null }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = onSendFileClick,
+                        enabled = canSend,
+                    ) { Text("发送文件") }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (engine.transportPeerIp.isNotBlank()) {
+                            "目标: ${engine.transportPeerIp}"
+                        } else {
+                            "组网就绪后可发送"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                ui.transferState?.let { state ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = state,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (state.startsWith("发送完成") || state.startsWith("✅")) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
+                    }
+                }
+                if (ui.receivedFiles.isNotEmpty()) {
+                    Text(
+                        text = "收到文件：" + ui.receivedFiles.joinToString("、"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             }
@@ -836,4 +898,50 @@ private fun exportDiagnosticFile(context: Context, text: String) {
     } catch (e: Exception) {
         Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
     }
+}
+
+/** T3 LocalSend 发送确认框：SAF 选文件后展示文件名/大小/目标；确认 → engine.confirmSend()（后台发送），取消 → engine.dismissSendDialog()。 */
+@Composable
+private fun SendConfirmDialog(engine: BluelinkEngine) {
+    AlertDialog(
+        onDismissRequest = { engine.dismissSendDialog() },
+        title = { Text("发送文件") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "文件：${engine.pendingSendName ?: "未知"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = "大小：${formatFileSize(engine.pendingSendSize)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "目标：${engine.transportPeerIp.ifBlank { "未知对端" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "确认后将经 LocalSend 直连传输（文件内容不经过 BLE/日志）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmSend() }) { Text("发送") }
+        },
+        dismissButton = {
+            TextButton(onClick = { engine.dismissSendDialog() }) { Text("取消") }
+        },
+    )
+}
+
+/** 文件大小人类可读格式化（B/KB/MB/GB）。 */
+private fun formatFileSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024 * 1024 -> String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024 * 1024))
+    bytes >= 1024L * 1024 -> String.format(Locale.US, "%.2f MB", bytes / (1024.0 * 1024))
+    bytes >= 1024L -> String.format(Locale.US, "%.2f KB", bytes / 1024.0)
+    else -> "$bytes B"
 }

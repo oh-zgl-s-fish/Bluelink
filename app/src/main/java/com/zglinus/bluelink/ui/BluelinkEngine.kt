@@ -14,6 +14,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -26,8 +27,12 @@ import com.zglinus.bluelink.ble.RootDetector
 import com.zglinus.bluelink.ble.SessionManager
 import com.zglinus.bluelink.ble.SignalMessage
 import com.zglinus.bluelink.ble.SignalProtocol
+import com.zglinus.bluelink.ble.Constants
 import com.zglinus.bluelink.ble.SignalTest
 import com.zglinus.bluelink.diag.DiagLogger
+import com.zglinus.bluelink.transport.LocalSendClient
+import com.zglinus.bluelink.transport.LocalSendServer
+import com.zglinus.bluelink.transport.SendFile
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.NetworkSummary
 import com.zglinus.bluelink.net.SameLanChecker
@@ -41,6 +46,9 @@ import com.zglinus.bluelink.networking.NetworkingStateMachine
 import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
 import org.json.JSONObject
+import java.io.File
+import java.io.IOException
+import java.util.UUID
 
 /**
  * 一期 BLE 链路接线（生命周期由 MainActivity 持有）：
@@ -72,6 +80,11 @@ import org.json.JSONObject
  * offer 会被状态机分发忽略 → 无人 join、无人回 joined、热点方等 joined 超时。
  * 补丁在 onRemoteSignal 分发点拦截：状态机不在等 offer → [handlePeerOffer] 直接接管
  * （WifiJoiner.join 接入 + 回 joined{ip}），复用 [SignalProtocol.TYPE_JOINED] 协议载荷。
+ *
+ * T3 LocalSend 传输接线：TRANSPORT 后自动启动 [LocalSendServer]（alias=Build.MODEL）并扫描收件目录
+ * 初始化接收列表；「发送文件」SAF 选文件 → [confirmSend] 后台线程 [LocalSendClient.send]，进度/结果写
+ * transferState + DiagLogger（内容不回显）；服务端文件接收完成（[LocalSendServer.onFileReceived]）入
+ * receivedFiles，轮询 getActiveSessions 映射「接收中 …」到 transferState；中止/停止时停服务与轮询。
  *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
@@ -157,6 +170,51 @@ class BluelinkEngine(private val context: Context) {
     private lateinit var signalTest: SignalTest
 
     val ui = BluelinkUiState()
+
+    // ============ T3 LocalSend 传输（发送/接收） ============
+
+    /** LocalSend 服务（T1）：TRANSPORT 就绪后自动启动，供对端经 53317 发送文件到本机（alias=Build.MODEL）。 */
+    val localsendServer = LocalSendServer(appContext, Build.MODEL)
+
+    /** 传输就绪时记录的对端 IPv4（TRANSPORT 后发送目标；一期可能为占位 ""）。 */
+    @Volatile
+    internal var transportPeerIp: String = ""
+
+    /** 进行中的发送客户端（transferState 旁「取消」→ cancel()）。 */
+    @Volatile
+    private var activeSendClient: LocalSendClient? = null
+
+    /** SAF 选文件后、发送确认前的待发文件（引擎内部持有；确认框经 ui.sendDialog 展示）。 */
+    private var pendingSendUri: Uri? = null
+
+    /** 待发文件名（发送确认框展示用；同包 MainScreen 读取）。 */
+    internal var pendingSendName: String? = null
+
+    /** 待发文件大小（发送确认框展示用；同包 MainScreen 读取）。 */
+    internal var pendingSendSize: Long = 0L
+
+    /**
+     * 接收进度轮询（T3）：服务运行期间每 [RECEIVE_POLL_INTERVAL_MS] 读一次
+     * [LocalSendServer.getActiveSessions]，映射到 ui.transferState「接收中 文件名 xx%」；
+     * 无进行中会话且此前为接收状态时清空。服务停止时自停。
+     */
+    private val receivePoller = object : Runnable {
+        override fun run() {
+            if (!localsendServer.isRunning) {
+                mainHandler.removeCallbacks(this)
+                return
+            }
+            val sessions = localsendServer.getActiveSessions()
+            if (sessions.isEmpty()) {
+                if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+            } else {
+                val progress = sessions.entries.first().value
+                val pct = if (progress.size > 0) (progress.received * 100 / progress.size).toInt() else 0
+                ui.transferState = "接收中 ${progress.fileName.ifBlank { "文件" }} $pct%"
+            }
+            mainHandler.postDelayed(this, RECEIVE_POLL_INTERVAL_MS)
+        }
+    }
 
     // ============ A5 组网接线 ============
 
@@ -360,8 +418,17 @@ class BluelinkEngine(private val context: Context) {
         }
 
         override fun onTransportReady(peerIp: String) {
-            // 传输就绪（一期 peerIp 可为占位 ""）；A 包仅展示，传输为 B 包范围
-            DiagLogger.log(TAG, "组网传输就绪 peerIp=${peerIp.ifEmpty { "<空>" }}（A 包仅提示，传输为 B 包范围）")
+            // T3：传输就绪（peerIp 可为占位 ""）→ 记录对端 IP + 自动启动 LocalSend 服务（alias=Build.MODEL），
+            // 对端即可经 53317 发送文件到本机；同时扫描 filesDir/localsend 初始化接收列表
+            DiagLogger.log(TAG, "组网传输就绪 peerIp=${peerIp.ifEmpty { "<空>" }}")
+            transportPeerIp = peerIp
+            if (!localsendServer.isRunning) {
+                val ok = localsendServer.start()
+                DiagLogger.log(TAG, "T3 LocalSend 服务自动启动：ok=$ok alias=${Build.MODEL}")
+            }
+            refreshReceivedFiles()
+            mainHandler.removeCallbacks(receivePoller)
+            mainHandler.post(receivePoller)
         }
 
         override fun onAbort(reason: String) {
@@ -379,6 +446,12 @@ class BluelinkEngine(private val context: Context) {
                 ui.manualPwdDialog = false
             }
             ui.localOnlyPwdDialog = false
+            // T3：组网中止/停止时停止 LocalSend 服务（已收文件保留在磁盘）、停接收轮询并清接收态；
+            // 对端 IP 复位（发送入口随之回到「组网就绪后可发送」）
+            mainHandler.removeCallbacks(receivePoller)
+            localsendServer.stop()
+            if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+            transportPeerIp = ""
             ui.netActive = false
             ui.netState = "组网已中止：$reason"
         }
@@ -480,6 +553,15 @@ class BluelinkEngine(private val context: Context) {
         // 握手进行中（发起置 true / 完成或失败置 false 由现有逻辑维护）对端新连接一律掐断。
         // ui 声明在 gattServer 之后，故在此 init（ui 已初始化）注册，lambda 每次查询实时值。
         gattServer.setHandshakingProvider { ui.handshaking }
+        // T3：LocalSend 服务文件接收完成 → 主线程更新接收列表（Server 回调在 worker 线程触发）
+        localsendServer.onFileReceived = { _, fileName, _ ->
+            mainHandler.post {
+                if (fileName !in ui.receivedFiles) {
+                    ui.receivedFiles = ui.receivedFiles + fileName
+                    DiagLogger.log(TAG, "T3 收到文件已入接收列表: $fileName")
+                }
+            }
+        }
     }
 
     private val bleStateReceiver = object : BroadcastReceiver() {
@@ -947,6 +1029,170 @@ class BluelinkEngine(private val context: Context) {
         netStateMachine?.cancel()
     }
 
+    // ============ T3 LocalSend 传输（发送入口 / 取消 / 接收列表） ============
+
+    /**
+     * SAF 选文件回调（主线程，MainScreen OpenDocument launcher 触发）：读取文件名/大小 →
+     * 记录待发文件并弹发送确认框（[BluelinkUiState.sendDialog]）；读取失败 → transferState 报错。
+     * 文件内容不在此读取（发送时才懒打开流），也不回显。
+     */
+    fun onSendFilePicked(uri: Uri) {
+        var name: String? = null
+        var size: Long = -1L
+        try {
+            appContext.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null,
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0) name = c.getString(nameIdx)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                }
+            }
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "读取所选文件元数据异常（内容不回显）: ${e.javaClass.simpleName} ${e.message}")
+            ui.transferState = "发送失败：无法读取文件信息（${e.javaClass.simpleName}）"
+            return
+        }
+        if (name.isNullOrBlank() || size <= 0L) {
+            DiagLogger.log(TAG, "SAF 文件元数据缺失/大小为 0：name=$name size=$size（不可发送）")
+            ui.transferState = "发送失败：无法获取文件名或文件大小为 0"
+            return
+        }
+        pendingSendUri = uri
+        pendingSendName = name
+        pendingSendSize = size
+        ui.sendDialog = true
+    }
+
+    /**
+     * 发送确认框「发送」（主线程）：构造 [SendFile]（input 懒打开流）→ 后台线程
+     * [LocalSendClient.send]（peer=transportPeerIp, port=53317）；回调（进度/单文件完成/全部完成/
+     * 失败/取消）写 [BluelinkUiState.transferState] + DiagLogger（只记文件名/元数据，文件内容不回显）。
+     */
+    fun confirmSend() {
+        ui.sendDialog = false
+        val uri = pendingSendUri ?: run {
+            ui.transferState = "发送失败：文件选择已失效，请重新选择"
+            return
+        }
+        val name = pendingSendName
+        val size = pendingSendSize
+        val peer = transportPeerIp
+        if (name.isNullOrBlank() || size <= 0L) {
+            ui.transferState = "发送失败：待发文件信息缺失"
+            return
+        }
+        if (peer.isBlank()) {
+            DiagLogger.log(TAG, "发送取消：transportPeerIp 为空（未处于 TRANSPORT）")
+            ui.transferState = "发送失败：对端 IP 未知（请先完成组网）"
+            return
+        }
+        val mimeType = try {
+            appContext.contentResolver.getType(uri) ?: "application/octet-stream"
+        } catch (e: Exception) {
+            "application/octet-stream"
+        }
+        ui.transferState = "发送中 $name 0%"
+        DiagLogger.log(
+            TAG,
+            "T3 发送开始：peer=$peer port=${Constants.DEFAULT_TCP_PROBE_PORT} name=$name size=${size}B mime=$mimeType",
+        )
+        val sendFile = SendFile(
+            id = UUID.randomUUID().toString(),
+            name = name,
+            size = size,
+            mimeType = mimeType,
+            input = {
+                appContext.contentResolver.openInputStream(uri)
+                    ?: throw IOException("无法打开所选文件（openInputStream 返回 null）")
+            },
+        )
+        val client = LocalSendClient(peer, Constants.DEFAULT_TCP_PROBE_PORT, Build.MODEL)
+        activeSendClient = client
+        var lastPct = -1
+        client.onProgress = { _, fname, sent, total ->
+            // 节流：仅百分比变化时更新 UI/日志（客户端每 64KB 分块回调过密）
+            val pct = if (total > 0) (sent * 100 / total).toInt() else 0
+            if (pct != lastPct) {
+                lastPct = pct
+                mainHandler.post {
+                    ui.transferState = "发送中 $fname $pct%"
+                    DiagLogger.log(TAG, "T3 发送进度：$fname $pct%（$sent/${total}B）")
+                }
+            }
+        }
+        client.onFileDone = { _, fname ->
+            mainHandler.post { DiagLogger.log(TAG, "T3 单文件发送完成：$fname") }
+        }
+        client.onAllDone = { total ->
+            mainHandler.post {
+                ui.transferState = "发送完成：$name（${total}B）"
+                DiagLogger.log(TAG, "T3 发送全部完成：$name total=${total}B")
+                activeSendClient = null
+            }
+        }
+        client.onError = { stage, msg ->
+            mainHandler.post {
+                ui.transferState = "发送失败：$msg"
+                DiagLogger.log(TAG, "T3 发送失败：stage=$stage err=$msg")
+                activeSendClient = null
+            }
+        }
+        client.onCancelled = {
+            mainHandler.post {
+                ui.transferState = "发送已取消：$name"
+                DiagLogger.log(TAG, "T3 发送已取消：$name")
+                activeSendClient = null
+            }
+        }
+        Thread({ client.send(listOf(sendFile)) }, "localsend-send")
+            .apply { isDaemon = true }
+            .start()
+    }
+
+    /** 发送确认框「取消」/dismiss：清除待发文件，不发送。 */
+    fun dismissSendDialog() {
+        ui.sendDialog = false
+        pendingSendUri = null
+        pendingSendName = null
+        pendingSendSize = 0L
+    }
+
+    /** transferState 旁「取消」：取消进行中的发送（client.cancel() 中断写/读 + 尽力发 cancel API）。 */
+    fun cancelSend() {
+        DiagLogger.log(TAG, "T3 用户取消发送")
+        activeSendClient?.cancel()
+    }
+
+    /**
+     * 扫描收件根目录 filesDir/localsend/<sessionId>/<fileName> 的已有文件，增量补全
+     * [BluelinkUiState.receivedFiles]（TRANSPORT 启动服务时初始化；历史收件跨会话保留展示）。
+     */
+    private fun refreshReceivedFiles() {
+        val root = File(appContext.filesDir, "localsend")
+        if (!root.isDirectory) return
+        val names = root.listFiles()?.filter { it.isDirectory }?.flatMap { d ->
+            d.listFiles()?.map { it.name } ?: emptyList()
+        } ?: emptyList()
+        if (names.isEmpty()) return
+        val existing = ui.receivedFiles.toMutableList()
+        var added = false
+        for (n in names) {
+            if (n !in existing) {
+                existing.add(n)
+                added = true
+            }
+        }
+        if (added) {
+            ui.receivedFiles = existing
+            DiagLogger.log(TAG, "T3 扫描收件目录初始化接收列表：共 ${existing.size} 个文件")
+        }
+    }
+
     /**
      * ④ 手动配网确认：登记密码 → 打开系统热点设置 → 回填状态机 onManualConfigured。
      *
@@ -1119,6 +1365,11 @@ class BluelinkEngine(private val context: Context) {
     private fun stopAllBle() {
         DiagLogger.log(TAG, "停止 BLE：广播/扫描/GATT Server/客户端")
         netStateMachine?.cancel() // A5：收尾/关停时取消组网（发 abort → 置空机器）
+        // T3：停止/关停时停止 LocalSend 服务（服务端停止；已收文件保留）并停接收轮询、清接收态
+        mainHandler.removeCallbacks(receivePoller)
+        localsendServer.stop()
+        if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+        transportPeerIp = ""
         // ③ L2 本地热点收尾预留（B4 正式收尾前释放入口；幂等；stopAllBle 覆盖 release() 收尾路径）
         hotspotManager.stopLocalOnly()
         // ② Binder 直呼（v0.3.4）收尾兜底：状态机为 null 但登记框仍悬挂时释放待收敛 Binder 结果（幂等）
@@ -1240,6 +1491,9 @@ class BluelinkEngine(private val context: Context) {
 
         /** 组网阶段轮询间隔。 */
         private const val NET_POLL_INTERVAL_MS = 500L
+
+        /** T3 接收进度轮询间隔。 */
+        private const val RECEIVE_POLL_INTERVAL_MS = 1000L
 
         /**
          * A5：当前引擎实例（MainActivity 创建，init 注册 / release 注销）。

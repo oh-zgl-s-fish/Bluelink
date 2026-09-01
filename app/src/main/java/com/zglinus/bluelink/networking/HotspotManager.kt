@@ -1,6 +1,8 @@
 package com.zglinus.bluelink.networking
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback
@@ -20,10 +22,13 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.security.SecureRandom
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 热点等级（A3b 热启动维度）：
@@ -40,7 +45,7 @@ enum class HotspotStartLevel {
     /** ① L1 自动热点：root 通道（已停用：B1 移除，A15/root 路径废弃；HotspotManager 返回失败 stub，状态机自动降级 ②）。 */
     L1_ROOT,
 
-    /** ② L1 自动热点：私有 API 通道（v0.3.4 增强：Binder 直呼系统热点优先——sdk 26-33 执行、sdk34+ 快失败 → 反射 setWifiApEnabled 降级；真实可行性由反射 try 实测收口）。 */
+    /** ② L1 自动热点：私有 API 通道（v0.3.5 修正：public ConnectivityManager.startTethering 第一手段 → Binder 直呼兜底 → 反射 setWifiApEnabled 降级，见 [tryPrivateApiHotspot]）。 */
     L1_PRIVATE_API,
 
     /** ③ L2 本地热点：Local-only 无密码局域网（Android 8-9 或 13+，10-12 盲区禁用）。 */
@@ -100,6 +105,14 @@ interface HotspotListener {
      * [HotspotManager.completeSystemHotspotPassword] 完成 ② 成功结果（ip 现采）。
      */
     fun onSystemHotspotPasswordRequest()
+
+    /**
+     * ② public startTethering（v0.3.5 第一手段）前置缺失：NEARBY_WIFI_DEVICES（Android 13+，
+     * Manifest 已声明 neverForLocation）未授权 / startTethering 抛 SecurityException——请求
+     * UI/引擎发起系统运行时授权（复用现有 requestedPermission 授权链，Engine 已接），授权后自动
+     * 重试本等级；未授权时本等级失败透传、照旧降级 ③。
+     */
+    fun onNeedNearbyPermission()
 }
 
 /**
@@ -112,9 +125,10 @@ interface HotspotListener {
  *   本等级为失败 stub——[startSyncInternal] 直接返回
  *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`，不启动线程、不生成凭据；
  *   状态机 L1_ROOT 异步桥收到 false 照旧降级 ②（L1_PRIVATE_API），状态机无需改动；
- * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现 + v0.3.4 Binder 直呼增强）：私有 API 热点
- *   （① 停用后的降级主路径）——优先级定案：**Binder 直呼系统热点（系统预配热点自动开）→ 反射
- *   setWifiApEnabled 降级 → 失败透传**（见 [tryPrivateApiHotspot]）：
+ * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现 + v0.3.5 优先级修正）：私有 API 热点
+ *   （① 停用后的降级主路径）——优先级定案：**public `ConnectivityManager.startTethering`
+ *   （第一手段，v0.3.5；API 26+ 公开，Android 13+ 需 NEARBY_WIFI_DEVICES）→ Binder 直呼系统热点
+ *   （兜底，parcel 带参构造修正）→ 反射 setWifiApEnabled 降级（8-9）→ 失败透传**（见 [tryPrivateApiHotspot]）：
  *   - 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 未授权 → 回调
  *     [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」（Android 10+ 反射
  *     `setWifiApEnabled` 需此 AppOps），返回 `HotspotResult(false, error="AwaitingWriteSettings")`
@@ -148,7 +162,9 @@ interface HotspotListener {
  * 超时窗口，超时兜底 abort）。
  *
  * 私有 API 一期按 `sdkInt in 26..33` 启发（可尝试范围，与 [Arbiter.buildLocalCapability] 的
- * `privateApiCapable` 判定一致）；真实可行性由 B2 反射 try 实测收口（见 [tryPrivateApiHotspot]）。
+ * `privateApiCapable` 判定一致）；v0.3.5 起第一手段改 public startTethering（minSdk 26 全版本可用、
+ * 无需版本门），Binder 直呼保留为兜底（parcel 带参构造修正），真实可行性由运行时 try 实测收口
+ * （见 [tryPublicStartTethering] / [tryPrivateApiHotspot]）。
  *
  * @param listener 生命周期回调（UI / 引擎注入）。
  * @param context 反射路径取 WifiManager 需要（经 Context.getSystemService）；缺省 null 时
@@ -178,7 +194,7 @@ class HotspotManager(
     @Volatile
     private var pendingLocalOnlySsid: String? = null
 
-    /** ② Binder 直呼系统热点（v0.3.4）：成功后待收敛的异步回调（等待用户登记本机系统热点 SSID+密码，经 [dispatchBinderTetherResult] 收敛；登记被中止时经 [stopBinderTetherPending] 清理）。 */
+    /** ② 系统预配热点（v0.3.5 public 第一手段 / Binder 兜底）：成功后待收敛的异步回调（等待用户登记本机系统热点 SSID+密码，经 [dispatchBinderTetherResult] 收敛；登记被中止时经 [stopBinderTetherPending] 清理）。 */
     @Volatile
     private var pendingBinderTetherCb: ((HotspotResult) -> Unit)? = null
 
@@ -186,6 +202,14 @@ class HotspotManager(
     private val hotspotExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { r ->
             Thread(r, "Bluelink-HotspotManager-async").apply { isDaemon = true }
+        }
+
+    /** ② public startTethering（v0.3.5 第一手段）回调投递线程（单线程 daemon）：**必须独立于 [hotspotExecutor]**
+     * ——后者在 tryPublicStartTethering 的 5s 等待期间正被本任务占用（单线程串行），回调若排同一线程
+     * 会等不到执行、5s 等待超时误判降级；独立线程保证 onTetheringStarted/onTetheringFailed 及时投递。 */
+    private val tetherCallbackExecutor: ExecutorService =
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "Bluelink-PublicTether-cb").apply { isDaemon = true }
         }
 
     /** 主线程 Handler（Looper.getMainLooper() 取主 Handler）：startAsync 结果统一回主线程回调。 */
@@ -199,7 +223,7 @@ class HotspotManager(
      *
      * - [HotspotStartLevel.L1_ROOT]：已停用（B1 移除）——失败 stub，立即返回
      *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`；
-     * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（私有 API 反射热点，见 [tryPrivateApiHotspot]）；
+     * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（public startTethering 第一手段 + Binder 直呼兜底 + 反射降级，见 [tryPrivateApiHotspot]）；
      * - [HotspotStartLevel.L2_LOCAL_ONLY]：③ B3 真实现（Local-only 本地热点，见 [tryLocalOnlyHotspot]；
      *   真异步——同步返回 [LOCAL_ONLY_PENDING] 标记，最终结果经 LocalOnlyHotspotCallback 主线程收敛；
      *   状态机 L2 分支走 [startAsync]）；
@@ -234,9 +258,10 @@ class HotspotManager(
         if (level == HotspotStartLevel.L2_LOCAL_ONLY) {
             pendingLocalOnlyCb = cb
         }
-        // ★ ② Binder 直呼（v0.3.4）：L1_PRIVATE_API 成功路径（系统预配热点已开）需用户登记
-        // 本机系统热点 SSID+密码——先在本线程登记待收敛 cb（与 L2 同语义，登记先于后台提交），
-        // 成功路径经 dispatchBinderTetherResult 收敛；失败/降级反射路径照旧走下方主线程 cb。
+        // ★ ② 系统预配热点（v0.3.5 public 第一手段 / Binder 兜底）：L1_PRIVATE_API 成功路径
+        // （系统预配热点已开）需用户登记本机系统热点 SSID+密码——先在本线程登记待收敛 cb（与 L2
+        // 同语义，登记先于后台提交），成功路径经 dispatchBinderTetherResult 收敛；失败/降级路径照旧
+        // 走下方主线程 cb。
         if (level == HotspotStartLevel.L1_PRIVATE_API) {
             pendingBinderTetherCb = cb
         }
@@ -263,12 +288,12 @@ class HotspotManager(
                 )
                 return@execute
             }
-            // ★ ② Binder 直呼（v0.3.4）：成功→等待系统热点密码登记（与 L2 同语义：不回调、
+            // ★ ② 系统预配热点（v0.3.5）：成功→等待系统热点密码登记（与 L2 同语义：不回调、
             // 不释放 isRunning——登记完成经 dispatchBinderTetherResult 统一收敛，防登记等待期重复启动）
-            if (result.error == BINDER_TETHER_PENDING) {
+            if (result.error == PUBLIC_TETHER_PENDING) {
                 DiagLogger.log(
                     tag,
-                    "startAsync(level=$level)：② Binder 直呼成功，等待 completeSystemHotspotPassword 登记收敛（不重复回调）",
+                    "startAsync(level=$level)：② 系统预配热点成功，等待 completeSystemHotspotPassword 登记收敛（不重复回调）",
                 )
                 return@execute
             }
@@ -290,8 +315,8 @@ class HotspotManager(
         HotspotStartLevel.L1_ROOT ->
             HotspotResult(success = false, error = "root 热点路径已停用(B1 移除)，降级 ②")
 
-        // ② 私有 API 热点（B2 真实现 + v0.3.4 Binder 直呼增强）：WRITE_SETTINGS 前置 +
-        // Binder 直呼（sdk 26-33，系统预配热点自动开）→ 反射 setWifiApEnabled 降级 → 失败透传，见 [tryPrivateApiHotspot]
+        // ② 私有 API 热点（B2 真实现 + v0.3.5 优先级修正）：WRITE_SETTINGS 前置 +
+        // public startTethering（第一手段）→ Binder 直呼（兜底）→ 反射 setWifiApEnabled 降级 → 失败透传，见 [tryPrivateApiHotspot]
         HotspotStartLevel.L1_PRIVATE_API -> tryPrivateApiHotspot()
 
         // ③ L2 本地热点（Local-only，无密码局域网）：B3 真实现——三版本分流
@@ -333,28 +358,35 @@ class HotspotManager(
     // ================= ② L1_PRIVATE_API 真路径（B2：私有 API 反射热点） =================
 
     /**
-     * ② 私有 API 热点（① 停用后的降级主路径；v0.3.4 增强——优先级定案：**Binder 直呼系统热点
-     * （系统预配热点自动开）→ 反射 setWifiApEnabled 降级 → 失败透传**）：
+     * ② 私有 API 热点（① 停用后的降级主路径；v0.3.5 优先级修正——**public startTethering（第一
+     * 手段）→ Binder 直呼系统热点（兜底）→ 反射 setWifiApEnabled 降级 → 失败透传**）：
      * 0) 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 为 false → 经主线程回调
      *    [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」授权（复用现有
      *    WriteSettingsDialog / openWriteSettings 语义），返回 `AwaitingWriteSettings` 待授权后重试；
      *    ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（见 [resolveContext]）；
-     * 1) ★ 第一步 [tryBinderTether]（逆向骨架照抄 MakroDroid T1——sdk31+ 开）：sdk 26–33 直呼
-     *    Binder（ServiceManager.getService("tethering") → ITetheringConnector$Stub.asInterface →
-     *    TetheringRequestParcel{tetheringType=0, showProvisioningUi=false} → startTethering 反射调用；
-     *    IIntResultListener 真实现记录错误码；回调码 0 / 状态轮询确认 / 8s 超时兜底）；
-     *    sdk ≥34 直接失败（「sdk34+ 不裸调 startTethering（逆向结论）」）；
-     *    成功 → 系统预配热点已开（SSID/密码为系统配置、App 不可读）→ 触发
-     *    [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记 → 返回 BinderTetherPending
+     * 1) ★ 第一手段 [tryPublicStartTethering]（v0.3.5）：public `ConnectivityManager.startTethering`
+     *    （API 26+ 公开，minSdk 26 无需版本门；Android 13+ 前置 NEARBY_WIFI_DEVICES，Manifest 已
+     *    声明 neverForLocation）：WRITE_SETTINGS 前置一致 + NEARBY 预检（sdk≥33）/SecurityException
+     *    catch 兜底 → `startTethering(TYPE_WIFI, executor, OnStartTetheringCallback)`；
+     *    onTetheringStarted → 系统热点已开（密码=系统预配，App 不可读）→ 触发
+     *    [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记 → 返回 [PUBLIC_TETHER_PENDING]
      *    标记待 [completeSystemHotspotPassword] 收敛（startAsync 持有异步闸）；
-     * 2) ★ 第二步（降级）：原反射 `WifiManager.setWifiApEnabled(config, true)`
+     *    onTetheringFailed(reason) / 5s 超时 → 失败降级；
+     * 2) ★ 第二手段（兜底）[tryBinderTether]（逆向骨架照抄 MakroDroid T1——sdk31+ 开）：sdk 26–33 直呼
+     *    Binder（ServiceManager.getService("tethering") → ITetheringConnector$Stub.asInterface →
+     *    TetheringRequestParcel{...} → startTethering 反射调用；parcel 用**带参构造**
+     *    (int, boolean) 修正——真机实测 newInstance() 抛 InstantiationException「no zero argument
+     *    constructor」；IIntResultListener 真实现记录错误码；回调码 0 / 状态轮询确认 / 8s 超时兜底）；
+     *    sdk ≥34 直接失败（「sdk34+ 不裸调 startTethering（逆向结论）」）；
+     *    成功 → 系统预配热点已开 → 同上触发登记 → [PUBLIC_TETHER_PENDING] 标记；
+     * 3) ★ 第三手段（降级）：原反射 `WifiManager.setWifiApEnabled(config, true)`
      *    （`java.lang.Boolean.TYPE` 精匹配），构造 WifiConfiguration：SSID=Bluelink-XXXX（4 位随机）、
      *    preSharedKey=随机 8 位、WPA2（`allowedKeyManagement` 置位 4，即 KeyMgmt.WPA2_PSK）、
      *    `isAccessible=true`（hidden 字段经反射设置，缺失忽略）——8-9 机型 setWifiApEnabled 仍有效；
-     * 3) 轮询校验：反射 `isWifiApEnabled` ≤5s / 400ms，置 true 即成功；超时或异常 → 失败；
-     * 4) 取 IP：NetworkInterface 枚举按热点网段打分（定向 ap 接口优先，192.168.43.x 默认热点网段
+     * 4) 轮询校验：反射 `isWifiApEnabled` ≤5s / 400ms，置 true 即成功；超时或异常 → 失败；
+     * 5) 取 IP：NetworkInterface 枚举按热点网段打分（定向 ap 接口优先，192.168.43.x 默认热点网段
      *    加分），取不到为空串 ""（一期允许占位）；
-     * 失败原因透传（含异常类 + Binder 直呼失败原因）；密码全程不回显。
+     * 失败原因透传（含异常类 + Binder 直呼失败原因 + public 失败原因）；密码全程不回显。
      * 运行时 try 实测降级、不预验：真机（A15/KernelSU）大概率 NoSuchMethodException →
      * 如实失败交状态机降级 ③；8-13 部分机型/ROM 仍可（压力路径）。
      *
@@ -388,11 +420,27 @@ class HotspotManager(
             return HotspotResult(success = false, error = err)
         }
 
-        // ★ 第一步（v0.3.4 新优先级）：Binder 直呼系统热点（系统预配热点自动开）——
-        // sdk 26-33 执行；sdk≥34 快失败；失败 → 降级原反射 setWifiApEnabled（8-9 有效）
+        // ★ 第一手段（v0.3.5）：public ConnectivityManager.startTethering（API 26+ 公开，minSdk 26
+        // 无需版本门；Android 13+ 前置 NEARBY_WIFI_DEVICES）——成功（PUBLIC_TETHER_PENDING 等待
+        // 系统热点密码登记）或失败均先收敛；失败 → 降级 Binder 直呼（兜底）
+        val publicResult = tryPublicStartTethering(ctx)
+        if (publicResult.error == PUBLIC_TETHER_PENDING || publicResult.success) {
+            // PUBLIC_TETHER_PENDING：系统热点已开，等待用户登记本机系统热点 SSID+密码收敛
+            // （startAsync 持有异步闸；登记经 completeSystemHotspotPassword → dispatchBinderTetherResult）
+            return publicResult
+        }
+        val publicFailReason = publicResult.error ?: "public startTethering 失败（无原因）"
+        DiagLogger.log(
+            tag,
+            "L1_PRIVATE_API：public startTethering 未成功（$publicFailReason），降级 Binder 直呼（兜底）",
+        )
+
+        // ★ 第二手段（v0.3.4 引入、v0.3.5 降为兜底）：Binder 直呼系统热点（系统预配热点自动开）——
+        // sdk 26-33 执行；sdk≥34 快失败；parcel 带参构造修正（真机 newInstance() 抛
+        // InstantiationException）；失败 → 降级原反射 setWifiApEnabled（8-9 有效）
         val binder = tryBinderTether(ctx, wm)
-        if (binder.error == BINDER_TETHER_PENDING || binder.success) {
-            // BINDER_TETHER_PENDING：系统热点已开，等待用户登记本机系统热点 SSID+密码收敛
+        if (binder.error == PUBLIC_TETHER_PENDING || binder.success) {
+            // PUBLIC_TETHER_PENDING：系统热点已开，等待用户登记本机系统热点 SSID+密码收敛
             // （startAsync 持有异步闸；登记经 completeSystemHotspotPassword → dispatchBinderTetherResult）
             return binder
         }
@@ -450,19 +498,181 @@ class HotspotManager(
             )
         }
         if (!legacy.success) {
-            return legacy.copy(error = "${legacy.error}；Binder 直呼失败：$binderFailReason")
+            return legacy.copy(
+                error = "${legacy.error}；Binder 直呼失败：$binderFailReason；public startTethering 失败：$publicFailReason",
+            )
         }
         return legacy
     }
 
     /**
-     * ★ ② 第一步：Binder 直呼系统热点（v0.3.4 新优先级；逆向骨架照抄 MakroDroid T1——sdk31+ 开，
-     * 依据已逆向确证的 FINAL-REPORT-SetHotspotAction.md §2.3）：
+     * ★ ② 第一手段（v0.3.5 修正）：public `ConnectivityManager.startTethering`（API 26+ 公开，
+     * minSdk 26 无需版本门；Android 13+ 需 NEARBY_WIFI_DEVICES，Manifest 已声明 neverForLocation）：
+     * - 前置（与现有前一致）：WRITE_SETTINGS `Settings.System.canWrite` 未授权 → 回调
+     *   [HotspotListener.onWriteSettingsPermission]，返回 `AwaitingWriteSettings` 待授权后重试；
+     * - sdk≥31 顺带检查/提示 NEARBY_WIFI_DEVICES：**预检仅在 sdk≥33 执行**（权限为 API 33 引入
+     *   并被系统强制执行；Android 12/31-32 无此权限、startTethering 仅需 CHANGE_NETWORK_STATE
+     *   normal 权限——预检会误判未授，故 31-32 跳过预检）——未授 → 主线程回调
+     *   [HotspotListener.onNeedNearbyPermission]（Engine 复用 requestedPermission 授权链，授权后
+     *   重试），返回 `NeedNearbyPermission` 失败透传；31-32 / OEM 变体以 catch SecurityException 兜底
+     *   （「最简单：catch SecurityException 透传并提示授权」语义）；
+     * - 调用：`cm.startTethering(ConnectivityManager.TYPE_WIFI, executor(单线程 daemon),
+     *   OnStartTetheringCallback{ onTetheringStarted()/onTetheringFailed(reason) })`——回调 executor
+     *   独立于 [hotspotExecutor]（后者正被本任务占用，同线程串行会导致回调等不到执行、5s 等待超时误判）；
+     * - 成功判定：onTetheringStarted → 系统热点已开（密码=系统预配，App 不可读）→ 触发
+     *   [HotspotListener.onSystemHotspotPasswordRequest] 登记（复用现有 pending 机制）→ 返回
+     *   [PUBLIC_TETHER_PENDING] 标记待 [completeSystemHotspotPassword] 收敛（startAsync 持有异步闸）；
+     * - onTetheringFailed(reason) → 失败降级（reason 映射见 [publicTetherErrorText]）；
+     * - 5s 超时（回调与超时竞速，先到者生效）：无回调 → 失败透传（回调迟到时无副作用——仅 set+latch，
+     *   无 UI 动作，降级已发生）；
+     * - 调用异常：SecurityException（NEARBY_WIFI_DEVICES 未授/系统拒绝）→ onNeedNearbyPermission +
+     *   失败透传；其他异常 → 失败透传（不吞）。
+     *
+     * 线程：随 [startAsync] 后台线程执行（5s 等待不占主线程）；回调在 [tetherCallbackExecutor]
+     * 投递、经 latch 同步收敛（AtomicBoolean/AtomicReference 可见性安全）；UI 回调统一主线程 post。
+     */
+    private fun tryPublicStartTethering(ctx: Context): HotspotResult {
+        val sdk = Build.VERSION.SDK_INT
+
+        // 前置（与现有前一致）：WRITE_SETTINGS「修改系统设置」AppOps——缺 → AwaitingWriteSettings
+        if (!Settings.System.canWrite(ctx)) {
+            DiagLogger.log(
+                tag,
+                "L1_PRIVATE_API public 前置失败：WRITE_SETTINGS 未授权（canWrite=false），" +
+                    "回调 onWriteSettingsPermission 引导授权，返回 AwaitingWriteSettings 待授权后重试",
+            )
+            mainHandler.post { listener.onWriteSettingsPermission() }
+            return HotspotResult(success = false, error = AWAITING_WRITE_SETTINGS)
+        }
+
+        // sdk≥31 顺带检查/提示 NEARBY_WIFI_DEVICES：预检按 sdk≥33 执行（权限 API 33 引入并被强制；
+        // 31-32 无此权限、startTethering 仅需 CHANGE_NETWORK_STATE（normal 已声明），预检会误判）；
+        // 未授 → onNeedNearbyPermission（Engine 复用 requestedPermission 授权链，授权后重试）+ 失败透传
+        if (sdk >= 33) {
+            val nearbyGranted = try {
+                ctx.checkSelfPermission(NEARBY_WIFI_DEVICES_PERMISSION) == PackageManager.PERMISSION_GRANTED
+            } catch (e: Exception) {
+                DiagLogger.log(tag, "NEARBY_WIFI_DEVICES 权限检查异常（按未授权处理，catch 兜底）: $e")
+                false
+            }
+            if (!nearbyGranted) {
+                DiagLogger.log(
+                    tag,
+                    "L1_PRIVATE_API public 前置：NEARBY_WIFI_DEVICES 未授权（sdk=$sdk，Manifest 已声明 neverForLocation），" +
+                        "回调 onNeedNearbyPermission 走 requestedPermission 授权链，返回 NeedNearbyPermission 失败透传",
+                )
+                mainHandler.post { listener.onNeedNearbyPermission() }
+                return HotspotResult(success = false, error = NEED_NEARBY_PERMISSION)
+            }
+        }
+
+        val cm = try {
+            ctx.applicationContext.getSystemService(ConnectivityManager::class.java)
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "取 ConnectivityManager 异常: $e")
+            null
+        }
+        if (cm == null) {
+            val err = "L1_PRIVATE_API public：ConnectivityManager 不可用（getSystemService 失败）"
+            DiagLogger.log(tag, err)
+            return HotspotResult(success = false, error = err)
+        }
+
+        // 回调结果（系统回调线程写入、本线程 latch 同步读；与 5s 超时竞速，先到者生效）
+        val started = AtomicBoolean(false)
+        val failedReason = AtomicReference<Int?>(null)
+        val latch = CountDownLatch(1)
+        val cb = object : ConnectivityManager.OnStartTetheringCallback() {
+            override fun onTetheringStarted() {
+                DiagLogger.log(tag, "public startTethering onTetheringStarted：系统热点已开启（系统预配，SSID/密码 App 不可读）")
+                started.set(true)
+                latch.countDown()
+            }
+
+            override fun onTetheringFailed(reason: Int) {
+                DiagLogger.log(tag, "public startTethering onTetheringFailed(reason=$reason:${publicTetherErrorText(reason)})")
+                failedReason.set(reason)
+                latch.countDown()
+            }
+        }
+        try {
+            cm.startTethering(ConnectivityManager.TYPE_WIFI, tetherCallbackExecutor, cb)
+            DiagLogger.log(
+                tag,
+                "public startTethering(TYPE_WIFI, tetherCallbackExecutor, callback) 已调用（sdk=$sdk，API 26+ 公开），等待回调/5s 超时竞速",
+            )
+        } catch (e: SecurityException) {
+            DiagLogger.log(tag, "public startTethering 抛 SecurityException（NEARBY_WIFI_DEVICES 未授/系统拒绝），回调 onNeedNearbyPermission 并失败透传: $e")
+            mainHandler.post { listener.onNeedNearbyPermission() }
+            return HotspotResult(success = false, error = NEED_NEARBY_PERMISSION)
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "public startTethering 调用异常（不吞）: $e")
+            return HotspotResult(
+                success = false,
+                error = "public startTethering 调用异常: ${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
+
+        // 5s 超时竞速：回调与超时先到者生效
+        val done = try {
+            latch.await(PUBLIC_TETHER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return HotspotResult(success = false, error = "public startTethering 等待回调被中断")
+        }
+        if (done && started.get()) {
+            DiagLogger.log(tag, "public startTethering 成功：onTetheringStarted（系统预配热点已开），触发系统热点密码登记")
+            return systemTetherSuccess()
+        }
+        if (done) {
+            val reason = failedReason.get() ?: -1
+            val err = "public startTethering 失败(onTetheringFailed reason=$reason:${publicTetherErrorText(reason)})，降级 Binder 直呼"
+            DiagLogger.log(tag, "L1_PRIVATE_API：$err")
+            return HotspotResult(success = false, error = err)
+        }
+        val err = "public startTethering ${PUBLIC_TETHER_TIMEOUT_MS / 1000}s 超时：onTetheringStarted/onTetheringFailed 均未达，降级 Binder 直呼"
+        DiagLogger.log(tag, "L1_PRIVATE_API：$err")
+        return HotspotResult(success = false, error = err)
+    }
+
+    /**
+     * ② public startTethering onTetheringFailed reason → 可读文案（AOSP ConnectivityManager.TETHER_ERROR_*；
+     * compileSdk37 jar 常量对 Kotlin 不可见，改用 AOSP 字面量 0-19，API 26+ 稳定）。
+     */
+    private fun publicTetherErrorText(reason: Int): String = when (reason) {
+        0 -> "TETHER_ERROR_NO_ERROR"
+        1 -> "TETHER_ERROR_UNKNOWN_IFACE"
+        2 -> "TETHER_ERROR_SERVICE_UNAVAIL"
+        3 -> "TETHER_ERROR_UNSUPPORTED"
+        4 -> "TETHER_ERROR_UNAVAIL_IFACE"
+        5 -> "TETHER_ERROR_INTERNAL_ERROR"
+        6 -> "TETHER_ERROR_ENTITLEMENT_UNKNOWN"
+        7 -> "TETHER_ERROR_ENTITLEMENT_DISALLOWED"
+        8 -> "TETHER_ERROR_ENTITLEMENT_DOWN"
+        9 -> "TETHER_ERROR_MASTER_ERROR"
+        10 -> "TETHER_ERROR_PROVISION_FAILED"
+        11 -> "TETHER_ERROR_TETHERING_UNAVAILABLE"
+        12 -> "TETHER_ERROR_DISABLED"
+        13 -> "TETHER_ERROR_IFACE_CFG_ERROR"
+        14 -> "TETHER_ERROR_SECURITY_POLICY"
+        15 -> "TETHER_ERROR_UNAVAILABLE"
+        16 -> "TETHER_ERROR_PROVISIONING_FAILED"
+        17 -> "TETHER_ERROR_TETHERING_UNSUPPORTED"
+        18 -> "TETHER_ERROR_UNAVAILABLE_LOCALLY"
+        19 -> "TETHER_ERROR_WIFI_IFACE_ERROR"
+        else -> "未知($reason)"
+    }
+
+    /**
+     * ★ ② 兜底（v0.3.5 降为第二手段；v0.3.4 曾为第一优先级）：Binder 直呼系统热点（逆向骨架照抄
+     * MakroDroid T1——sdk31+ 开，依据已逆向确证的 FINAL-REPORT-SetHotspotAction.md §2.3）：
      * - 版本门控：sdk 26–33 执行；**sdk ≥34 直接返回失败**（原因「sdk34+ 不裸调 startTethering（逆向结论），降级 ③」）；
      * - 取服务：反射 `ServiceManager.getService("tethering")` → IBinder →
      *   `Class.forName("android.net.ITetheringConnector$Stub").getMethod("asInterface", IBinder)` → connector；
-     * - Parcel：`Class.forName("android.net.TetheringRequestParcel").newInstance()` →
-     *   `tetheringType`=0（WIFI）/ `showProvisioningUi`=false（getDeclaredField + setInt/setBoolean）；
+     * - Parcel：`Class.forName("android.net.TetheringRequestParcel")` → 反射**带参构造**
+     *   `TetheringRequestParcel(int, boolean)`（v0.3.5 修正：真机实测 newInstance() 抛
+     *   InstantiationException「no zero argument constructor」——AIDL 结构类无无参构造）→
+     *   `tetheringType`=0（WIFI）/ `showProvisioningUi`=false（构造后 getDeclaredField 写字段兜底）；
      * - 回调：`Proxy.newProxyInstance(cl, [IIntResultListener], handler)`——MakroDroid（ua0/ta0）为
      *   空实现，**我们做真实现**：onResult 错误码写入 AtomicInteger（binder 回调线程 → 后台轮询线程
      *   可见，线程安全）；
@@ -473,7 +683,7 @@ class HotspotManager(
      *   （8.x 可用）或 `getWifiApState`∈{13=WIFI_AP_STATE_ENABLED}；状态不可读（hidden API 拦截）
      *   则以「回调码 0 即成功」为准；全程 8s 超时兜底；
      * - 成功 → 系统预配热点已开（SSID/密码为系统配置、App 不可读）→ 主线程触发
-     *   [HotspotListener.onSystemHotspotPasswordRequest]，返回 [BINDER_TETHER_PENDING] 标记，
+     *   [HotspotListener.onSystemHotspotPasswordRequest]，返回 [PUBLIC_TETHER_PENDING] 标记，
      *   [completeSystemHotspotPassword] 登记后经 [dispatchBinderTetherResult] 收敛成功结果；
      * - 失败（快失败/异常/回调错误码非 0/8s 超时）→ 失败透传（不吞），上层降级原反射 setWifiApEnabled。
      *
@@ -496,11 +706,26 @@ class HotspotManager(
             if (sdk >= 30) {
                 // ---- sdk 30-33：ITetheringConnector.startTethering（MakroDroid T1 骨架照抄） ----
                 val parcelCls = Class.forName("android.net.TetheringRequestParcel")
-                val parcel = parcelCls.newInstance()
-                parcelCls.getDeclaredField("tetheringType").apply { isAccessible = true }
-                    .setInt(parcel, TETHERING_TYPE_WIFI) // 0=WIFI（AOSP TetheringManager.TETHERING_WIFI）
-                parcelCls.getDeclaredField("showProvisioningUi").apply { isAccessible = true }
-                    .setBoolean(parcel, false)
+                // ★ v0.3.5 parcel 构造修正：AIDL 结构类无无参构造（真机实测 newInstance() 抛
+                // InstantiationException「no zero argument constructor」）——改反射**带参构造**
+                // TetheringRequestParcel(int, boolean)（getConstructor 精匹配）；构造后再写字段
+                // （现有 getDeclaredField 方式，值相同、防构造签名差异漏设）；带参构造不可用 →
+                // 如实失败（public 路径已失败才会到这，交由上层 catch 收敛降级）
+                val parcel = try {
+                    val ctor = parcelCls.getConstructor(java.lang.Integer.TYPE, java.lang.Boolean.TYPE)
+                    ctor.isAccessible = true
+                    val p = ctor.newInstance(TETHERING_TYPE_WIFI, false)
+                    parcelCls.getDeclaredField("tetheringType").apply { isAccessible = true }
+                        .setInt(p, TETHERING_TYPE_WIFI) // 0=WIFI（AOSP TetheringManager.TETHERING_WIFI）
+                    parcelCls.getDeclaredField("showProvisioningUi").apply { isAccessible = true }
+                        .setBoolean(p, false)
+                    p
+                } catch (e: Exception) {
+                    throw IllegalStateException(
+                        "TetheringRequestParcel 构造失败（带参构造 (int, boolean) 不可用）: ${e.javaClass.simpleName}: ${e.message}",
+                        e,
+                    )
+                }
 
                 val binder = serviceBinder("tethering")
                     ?: throw IllegalStateException("ServiceManager.getService(\"tethering\") 返回 null")
@@ -577,7 +802,7 @@ class HotspotManager(
                 val code = binderCode.get()
                 if (code == TETHER_ERROR_NO_ERROR) {
                     DiagLogger.log(tag, "Binder 直呼成功：回调错误码 0（系统预配热点已开启，SSID/密码为系统配置）")
-                    return binderSuccess()
+                    return systemTetherSuccess()
                 }
                 if (code != CODE_NOT_RECEIVED) {
                     val err = "Binder 直呼回调错误码=$code（非 0，系统拒绝/失败）"
@@ -587,7 +812,7 @@ class HotspotManager(
                 when (pollHotspotStateOnce(wm)) {
                     STATE_ON -> {
                         DiagLogger.log(tag, "Binder 直呼成功（回调未达，状态轮询确认热点已开启）")
-                        return binderSuccess()
+                        return systemTetherSuccess()
                     }
                     STATE_UNAVAILABLE -> if (!stateApiWarned) {
                         stateApiWarned = true
@@ -651,18 +876,19 @@ class HotspotManager(
     }
 
     /**
-     * ② Binder 直呼成功收敛：系统预配热点已开启（SSID/密码为系统配置、App 不可读）——
-     * 主线程触发 [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记本机系统热点
-     * SSID+密码；返回 [BINDER_TETHER_PENDING] 标记（startAsync 持有异步闸，等待
+     * ② 系统预配热点成功收敛（public startTethering onTetheringStarted / Binder 直呼回调码 0 共用）：
+     * 系统预配热点已开启（SSID/密码为系统配置、App 不可读）——主线程触发
+     * [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记本机系统热点 SSID+密码；
+     * 返回 [PUBLIC_TETHER_PENDING] 标记（startAsync 持有异步闸，等待
      * [completeSystemHotspotPassword] 经 [dispatchBinderTetherResult] 收敛成功结果，ip 现采）。
      */
-    private fun binderSuccess(): HotspotResult {
+    private fun systemTetherSuccess(): HotspotResult {
         DiagLogger.log(
             tag,
-            "Binder 直呼成功：系统预配热点已开启（SSID/密码为系统配置、App 不可读），请求用户登记本机系统热点 SSID+密码",
+            "系统预配热点已开启（SSID/密码为系统配置、App 不可读），请求用户登记本机系统热点 SSID+密码",
         )
         mainHandler.post { listener.onSystemHotspotPasswordRequest() }
-        return HotspotResult(success = false, error = BINDER_TETHER_PENDING)
+        return HotspotResult(success = false, error = PUBLIC_TETHER_PENDING)
     }
 
     /** 反射取 WifiManager（② 用；ctx 已由 [resolveContext] 保证非 null）。 */
@@ -947,12 +1173,13 @@ class HotspotManager(
         dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
     }
 
-    // ================= ② Binder 直呼系统热点（v0.3.4 增强：系统预配热点自动开） =================
+    // ================= ② 系统预配热点（v0.3.5 public 第一手段 / Binder 兜底：系统预配热点自动开） =================
 
     /**
-     * ② 系统预配热点（Binder 直呼成功）SSID+密码登记（引擎在用户按提示填写本机系统热点名称与密码后调用，主线程）：
-     * 校验非空后组装成功结果（ssid=用户登记值、pwd=登记值、ip=现采）并收敛 [pendingBinderTetherCb]
-     * （状态机 onPrivateApiAsyncResult → onHotspotReady 发 offer）。密码全程不回显。
+     * ② 系统预配热点（public startTethering / Binder 直呼成功）SSID+密码登记（引擎在用户按提示填写
+     * 本机系统热点名称与密码后调用，主线程）：校验非空后组装成功结果（ssid=用户登记值、pwd=登记值、
+     * ip=现采）并收敛 [pendingBinderTetherCb]（状态机 onPrivateApiAsyncResult → onHotspotReady 发
+     * offer）。密码全程不回显。
      */
     fun completeSystemHotspotPassword(ssid: String, pwd: String) {
         val cb = pendingBinderTetherCb
@@ -973,7 +1200,7 @@ class HotspotManager(
     }
 
     /**
-     * ② Binder 直呼结果收敛（主线程）：释放待收敛状态与异步闸 → 回调 [pendingBinderTetherCb]
+     * ② 系统预配热点结果收敛（public/Binder 共用，主线程）：释放待收敛状态与异步闸 → 回调 [pendingBinderTetherCb]
      * （状态机 onPrivateApiAsyncResult；回调侧自行校验状态防时序漂移）。
      */
     private fun dispatchBinderTetherResult(result: HotspotResult) {
@@ -1114,8 +1341,17 @@ class HotspotManager(
         /** ② 轮询 isWifiApEnabled 间隔（任务约定 400ms）。 */
         private const val PRIVATE_AP_POLL_INTERVAL_MS: Long = 400L
 
-        /** ② Binder 直呼成功待登记标记（error 字段；等待用户登记本机系统热点 SSID+密码后经 [completeSystemHotspotPassword] 收敛）。 */
-        private const val BINDER_TETHER_PENDING = "BinderTetherPending"
+        /** ② 系统预配热点成功待登记标记（error 字段，现役语义：public startTethering 第一手段 / Binder 直呼兜底共用；等待用户登记本机系统热点 SSID+密码后经 [completeSystemHotspotPassword] 收敛）。 */
+        private const val PUBLIC_TETHER_PENDING = "PublicTetherPending"
+
+        /** ② public startTethering 前置缺失标记（error 字段，NEARBY_WIFI_DEVICES 未授；Engine 走 requestedPermission 授权链，授权后自动重试热点）。 */
+        private const val NEED_NEARBY_PERMISSION = "NeedNearbyPermission"
+
+        /** ② public startTethering 回调（onTetheringStarted/onTetheringFailed）最长等待（任务约定 5s；回调与超时竞速，先到者生效）。 */
+        private const val PUBLIC_TETHER_TIMEOUT_MS: Long = 5_000L
+
+        /** ② NEARBY_WIFI_DEVICES 权限名字面量（sdk≥33 强制，Manifest 已声明 neverForLocation）。 */
+        private const val NEARBY_WIFI_DEVICES_PERMISSION = "android.permission.NEARBY_WIFI_DEVICES"
 
         /** ② Binder 直呼回调/状态轮询确认最长等待（任务约定 8s 超时兜底）。 */
         private const val BINDER_CONFIRM_TIMEOUT_MS: Long = 8_000L

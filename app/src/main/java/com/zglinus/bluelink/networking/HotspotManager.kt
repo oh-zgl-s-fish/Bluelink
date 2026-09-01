@@ -2,6 +2,7 @@ package com.zglinus.bluelink.networking
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback
@@ -9,10 +10,10 @@ import android.net.wifi.WifiManager.LocalOnlyHotspotReservation
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
 import android.os.ResultReceiver
 import android.provider.Settings
+import android.widget.Toast
 import com.zglinus.bluelink.ble.RootDetector
 import com.zglinus.bluelink.diag.DiagLogger
 import java.lang.reflect.InvocationHandler
@@ -41,7 +42,7 @@ enum class HotspotStartLevel {
     /** ① L1 自动热点：root 通道（已停用：B1 移除，A15/root 路径废弃；HotspotManager 返回失败 stub，状态机自动降级 ②）。 */
     L1_ROOT,
 
-    /** ② L1 自动热点：私有 API 通道（v0.3.6 修正：Binder 直呼 ITetheringConnector（@SystemApi startTethering 不可用，逆向结论）→ 反射 setWifiApEnabled 降级，见 [tryPrivateApiHotspot]）。 */
+    /** ② L1 自动热点：私有 API 通道（v0.3.7 照抄移植：Binder 直呼 IConnectivityManager.startTethering（MakroDroid WifiHotspotService 逐 smali 翻译，无 parcel）→ 反射 setWifiApEnabled 降级，见 [tryPrivateApiHotspot]）。 */
     L1_PRIVATE_API,
 
     /** ③ L2 本地热点：Local-only 无密码局域网（Android 8-9 或 13+，10-12 盲区禁用）。 */
@@ -121,10 +122,11 @@ interface HotspotListener {
  *   本等级为失败 stub——[startSyncInternal] 直接返回
  *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`，不启动线程、不生成凭据；
  *   状态机 L1_ROOT 异步桥收到 false 照旧降级 ②（L1_PRIVATE_API），状态机无需改动；
- * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现 + v0.3.6 修正）：私有 API 热点
- *   （① 停用后的降级主路径）——优先级定案：**Binder 直呼 ITetheringConnector
- *   （第一手段，v0.3.6；@SystemApi `ConnectivityManager.startTethering` 对普通 App 编译不可见
- *   （Unresolved，逆向结论，MacroDroid 因而走 Binder 直呼）；parcel 带参构造修正）
+ * - ②（[HotspotStartLevel.L1_PRIVATE_API]，B2 真实现 + v0.3.7 照抄移植）：私有 API 热点
+ *   （① 停用后的降级主路径）——优先级定案：**Binder 直呼 IConnectivityManager
+ *   （第一手段，v0.3.7；`IConnectivityManager.startTethering(int=0, ResultReceiver, boolean=false)`
+ *   老签名——MakroDroid WifiHotspotService（sdk<34）逐 smali 翻译，**根本不用 parcel**（前几轮
+ *   TetheringRequestParcel/ITetheringConnector 折腾是绕路，已删））
  *   → 反射 setWifiApEnabled 降级（8-9）→ 失败透传**（见 [tryPrivateApiHotspot]）：
  *   - 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 未授权 → 回调
  *     [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」（Android 10+ 反射
@@ -162,9 +164,9 @@ interface HotspotListener {
  * 超时窗口，超时兜底 abort）。
  *
  * 私有 API 一期按 `sdkInt in 26..33` 启发（可尝试范围，与 [Arbiter.buildLocalCapability] 的
- * `privateApiCapable` 判定一致）；v0.3.6 起第一手段为 Binder 直呼（@SystemApi startTethering
- * 对普通 App 编译不可见（Unresolved，逆向结论），public 路径已整体移除），parcel 带参构造
- * (int, boolean) 修正，真实可行性由运行时 try 实测收口（见 [tryBinderTether] / [tryPrivateApiHotspot]）。
+ * `privateApiCapable` 判定一致）；v0.3.7 起第一手段为 Binder 直呼（MakroDroid
+ * WifiHotspotService 逐 smali 翻译的 IConnectivityManager.startTethering 老签名，无 parcel），
+ * 真实可行性由运行时 try 实测收口（见 [tryBinderTether] / [tryPrivateApiHotspot]）。
  *
  * @param listener 生命周期回调（UI / 引擎注入）。
  * @param context 反射路径取 WifiManager 需要（经 Context.getSystemService）；缺省 null 时
@@ -215,7 +217,7 @@ class HotspotManager(
      *
      * - [HotspotStartLevel.L1_ROOT]：已停用（B1 移除）——失败 stub，立即返回
      *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`；
-     * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（Binder 直呼 ITetheringConnector 第一手段 + 反射降级，见 [tryPrivateApiHotspot]）；
+     * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（Binder 直呼 IConnectivityManager（v0.3.7 照抄移植）第一手段 + 反射降级，见 [tryPrivateApiHotspot]）；
      * - [HotspotStartLevel.L2_LOCAL_ONLY]：③ B3 真实现（Local-only 本地热点，见 [tryLocalOnlyHotspot]；
      *   真异步——同步返回 [LOCAL_ONLY_PENDING] 标记，最终结果经 LocalOnlyHotspotCallback 主线程收敛；
      *   状态机 L2 分支走 [startAsync]）；
@@ -349,20 +351,23 @@ class HotspotManager(
     // ================= ② L1_PRIVATE_API 真路径（B2：私有 API 反射热点） =================
 
     /**
-     * ② 私有 API 热点（① 停用后的降级主路径；v0.3.6 优先级修正——**Binder 直呼系统热点
+     * ② 私有 API 热点（① 停用后的降级主路径；v0.3.7 照抄移植修正——**Binder 直呼系统热点
      * （第一手段）→ 反射 setWifiApEnabled 降级 → 失败透传**）：
      * 0) 前置 WRITE_SETTINGS：`Settings.System.canWrite(ctx)` 为 false → 经主线程回调
      *    [HotspotListener.onWriteSettingsPermission] 引导「修改系统设置」授权（复用现有
      *    WriteSettingsDialog / openWriteSettings 语义），返回 `AwaitingWriteSettings` 待授权后重试；
      *    ctx 缺省时经 `ActivityThread.currentApplication()` 反射兜底（见 [resolveContext]）；
-     * 1) ★ 第一手段 [tryBinderTether]（v0.3.6 起；逆向骨架照抄 MacroDroid T1——sdk31+ 开）：
-     *    @SystemApi public `ConnectivityManager.startTethering`（含配套回调）对普通 App 编译不可见
-     *    （Unresolved，逆向结论），public 路径已整体移除、直接 Binder 直呼：sdk 26–33 直呼 Binder
-     *    （ServiceManager.getService("tethering") → ITetheringConnector$Stub.asInterface →
-     *    TetheringRequestParcel{...} → startTethering 反射调用；parcel 用**带参构造**
-     *    (int, boolean) 修正——真机实测 newInstance() 抛 InstantiationException「no zero argument
-     *    constructor」；IIntResultListener 真实现记录错误码；回调码 0 / 状态轮询确认 / 8s 超时兜底）；
-     *    sdk ≥34 直接失败（「sdk34+ 不裸调 startTethering（逆向结论）」）；
+     * 1) ★ 第一手段 [tryBinderTether]（v0.3.7 起；MakroDroid WifiHotspotService 逐 smali 翻译——
+     *    权威照抄源 md-in/wifi_hotspot_service.txt：服务走 `IConnectivityManager.startTethering`
+     *    老签名，**根本不用 parcel**（前几轮 TetheringRequestParcel/(int,boolean) 构造/ITetheringConnector
+     *    折腾是绕路，已整体删除，以造型为准）：sdk 26–33 直呼 Binder
+     *    （`context.getSystemService("connectivity")` → ConnectivityManager →
+     *    `Class.forName("android.net.IConnectivityManager")`
+     *    `.getDeclaredMethod("startTethering", int, ResultReceiver, boolean)` invoke 在
+     *    ConnectivityManager 实例上（非 ServiceManager/mService）；参数 int=0 / new ResultReceiver(null)
+     *    （smali 无 Handler；我们覆写 onReceiveResult 记录回调码）/ boolean=false；3 参失败 → 4 参
+     *    (int, ResultReceiver, boolean, String pkg) 兜底；回调码 0 / getWifiApState 轮询确认 / 8s 超时兜底）；
+     *    sdk ≥34 直接失败（「sdk34+ 不裸调 startTethering（逆向结论）」）；sdk<26 无此路径（smali 分段落 f() 反射）；
      *    成功 → 系统预配热点已开（SSID/密码系统配置、App 不可读）→ 触发
      *    [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记 → [PUBLIC_TETHER_PENDING]
      *    标记待 [completeSystemHotspotPassword] 收敛（startAsync 持有异步闸）；
@@ -431,10 +436,9 @@ class HotspotManager(
             return HotspotResult(success = false, error = err)
         }
 
-        // ★ 第一手段（v0.3.6）：Binder 直呼系统热点（系统预配热点自动开）——@SystemApi public
-        // startTethering 不可用（普通 App 编译 Unresolved，逆向结论），直呼 ITetheringConnector：
-        // sdk 26-33 执行；sdk≥34 快失败；parcel 带参构造修正（真机 newInstance() 抛
-        // InstantiationException）；成功 → PUBLIC_TETHER_PENDING 等待系统热点密码登记；
+        // ★ 第一手段（v0.3.7 照抄移植）：MakroDroid WifiHotspotService 直呼
+        // IConnectivityManager.startTethering 老签名（无 parcel；旧 parcel 带参构造已删）：
+        // sdk 26-33 执行；sdk≥34 快失败；成功 → PUBLIC_TETHER_PENDING 等待系统热点密码登记；
         // 失败 → 降级原反射 setWifiApEnabled（8-9 有效）
         val binder = tryBinderTether(ctx, wm)
         if (binder.error == PUBLIC_TETHER_PENDING || binder.success) {
@@ -505,40 +509,62 @@ class HotspotManager(
 
 
     /**
-     * ★ ② 第一手段（v0.3.6 起；v0.3.5 曾为兜底）：Binder 直呼系统热点（逆向骨架照抄
-     * MakroDroid T1——sdk31+ 开，依据已逆向确证的 FINAL-REPORT-SetHotspotAction.md §2.3；
-     * @SystemApi `ConnectivityManager.startTethering` 对普通 App 编译不可见（Unresolved，逆向结论），
-     * public 路径已整体移除、直呼 Binder 为本等级第一手段）：
-     * - 版本门控：sdk 26–33 执行；**sdk ≥34 直接返回失败**（原因「sdk34+ 不裸调 startTethering（逆向结论），降级 ③」）；
-     * - 取服务：反射 `ServiceManager.getService("tethering")` → IBinder →
-     *   `Class.forName("android.net.ITetheringConnector$Stub").getMethod("asInterface", IBinder)` → connector；
-     * - Parcel：`Class.forName("android.net.TetheringRequestParcel")` → 反射**带参构造**
-     *   `TetheringRequestParcel(int, boolean)`（v0.3.5 修正：真机实测 newInstance() 抛
-     *   InstantiationException「no zero argument constructor」——AIDL 结构类无无参构造）→
-     *   `tetheringType`=0（WIFI）/ `showProvisioningUi`=false（构造后 getDeclaredField 写字段兜底）；
-     * - 回调：`Proxy.newProxyInstance(cl, [IIntResultListener], handler)`——MakroDroid（ua0/ta0）为
-     *   空实现，**我们做真实现**：onResult 错误码写入 AtomicInteger（binder 回调线程 → 后台轮询线程
-     *   可见，线程安全）；
-     * - 调用分段：sdk≥31 `startTethering([TetheringRequestParcel, String, String, IIntResultListener])`
-     *   args={parcel, 包名, null, proxy}；sdk 30 三参（无 String）；sdk 26-29 反射
-     *   `IConnectivityManager.startTethering(int=0, ResultReceiver, boolean=false)`（分段兼容）；
-     * - 成功判定：回调 onResult 错误码 0 即成功；回调未达时轮询确认 `WifiManager.isWifiApEnabled`
-     *   （8.x 可用）或 `getWifiApState`∈{13=WIFI_AP_STATE_ENABLED}；状态不可读（hidden API 拦截）
-     *   则以「回调码 0 即成功」为准；全程 8s 超时兜底；
+     * ★ ② 第一手段（v0.3.7 照抄移植；v0.3.6 曾为 ITetheringConnector+parcel、v0.3.5 曾为兜底）：
+     * Binder 直呼系统热点——MakroDroid `WifiHotspotService`（sdk<34，含 Android 12）**逐 smali 翻译**
+     * （权威照抄源 md-in/wifi_hotspot_service.txt：关键串 "connectivity" "startTethering"
+     * "android.net.IConnectivityManager" "getWifiApState" "setWifiApEnabled" "Failed to set hotspot on
+     * API25+" "Cannot start tethering: " 均已核定）：
+     * 服务走 `IConnectivityManager.startTethering(int=0, ResultReceiver, boolean=false)` **老签名，
+     * 根本不用 parcel**——前几轮 TetheringRequestParcel / (int,boolean) 构造 / ITetheringConnector
+     * 折腾是绕路，已整体删除（SetHotspotAction.T1/V1 对 sdk≥31 才走 ITetheringConnector+parcel，
+     * 与本服务无关，不做兜底，以造型为准）：
+     * - 版本门控：sdk 26–33 执行；**sdk ≥34 直接返回失败**（MakroDroid sdk<34 才 startService
+     *   本服务，逆向结论）；sdk <26 无此路径（smali 分段落 f() 反射 setWifiApEnabled）→ 返回明确
+     *   reason 交上层降级反射；
+     * - 拿服务（smali `d(Z)` / `a(Object)` 原样）：`context.getSystemService("connectivity")` →
+     *   ConnectivityManager；`Class.forName("android.net.IConnectivityManager")`
+     *   `.getDeclaredMethod("startTethering", int, ResultReceiver, boolean)` **invoke 在
+     *   ConnectivityManager 实例上**（非 ServiceManager、非 mService 字段反射）；
+     * - 参数构造（smali 原样）：int=0（TETHERING_TYPE_WIFI）/ `new ResultReceiver(null)`（smali 无
+     *   Handler；我们覆写 onReceiveResult 记录回调码——任务要求回调确认）/ boolean=false；
+     * - 异常回退链（smali a() 三个 try 原样）：3 参失败 → 再 3 参（dexdump 原样 dup，等价一次）→
+     *   4 参 `(int, ResultReceiver, boolean, String pkg)`（smali 第三 try 传 "com.arlosoft.macrodroid"
+     *   字面量，我们用 ctx.packageName）→ 全部失败 log "Cannot start tethering: "（smali 串）；
+     * - 执行顺序（smali onHandleIntent WifiAPState=0/ForceLegacy=false → `c(true,false)` → `e(true)`）：
+     *   [mdTetherModern]（e()）先试 hidden `ConnectivityManager.startTethering(int, OnStartTetheringCallback,
+     *   Handler)`（MacroDroid 用 DexMaker 运行时生成回调子类——com.android.dx 外部基础设施不移植；
+     *   AOSP 该回调为 abstract class、Proxy 不可用 → 直接落 IConnectivityManager 兜底）→ sleep 2s →
+     *   `b()` 状态检查（getWifiApState 归一化 ∈{2,3} 即已开，跳过直呼）→ 未达则 `d(true)` 直呼
+     *   IConnectivityManager.startTethering；
+     * - 成功判定（任务要求回调/轮询确认）：回调错误码 0 即成功（AOSP TETHER_ERROR_NO_ERROR）；回调
+     *   未达时轮询 `getWifiApState`（smali Lu3/a.a 归一化：>10 减 10）∈{2=ENABLING,3=ENABLED} 即成功
+     *   （smali b() 判定）；状态不可读（hidden 拦截）以「回调码 0」为准；8s 超时兜底；
      * - 成功 → 系统预配热点已开（SSID/密码为系统配置、App 不可读）→ 主线程触发
      *   [HotspotListener.onSystemHotspotPasswordRequest]，返回 [PUBLIC_TETHER_PENDING] 标记，
-     *   [completeSystemHotspotPassword] 登记后经 [dispatchBinderTetherResult] 收敛成功结果；
+     *   [completeSystemHotspotPassword] 登记后经 [dispatchBinderTetherResult] 收敛成功结果（登记机制不动）；
      * - 失败（快失败/异常/回调错误码非 0/8s 超时）→ 失败透传（不吞），上层降级原反射 setWifiApEnabled。
      *
-     * 线程：随 [startAsync] 后台线程执行（8s 确认等待不占主线程）；回调在 binder 线程写
+     * 线程：随 [startAsync] 后台线程执行（2s/8s 等待不占主线程）；回调在 binder 线程写
      * AtomicInteger（可见性安全）；UI 回调统一主线程 post。
      */
     private fun tryBinderTether(ctx: Context, wm: WifiManager?): HotspotResult {
         val sdk = Build.VERSION.SDK_INT
-        // 版本门控：sdk ≥34 不裸调 startTethering（MakroDroid 已切换无障碍点磁贴/Shizuku，逆向结论）
+        // 版本门控：sdk ≥34 不裸调 startTethering（MakroDroid sdk<34 才 startService WifiHotspotService）
         if (sdk >= 34) {
             val err = "sdk34+ 不裸调 startTethering（逆向结论），降级 ③"
             DiagLogger.log(tag, "L1_PRIVATE_API Binder 直呼快失败：sdk=$sdk → $err")
+            return HotspotResult(success = false, error = err)
+        }
+        // sdk <26：smali 分段 sdk<26 落 f()（反射 setWifiApEnabled），无 IConnectivityManager 直呼——
+        // 返回明确 reason，上层降级反射
+        if (sdk < 26) {
+            val err = "sdk=$sdk 无 IConnectivityManager.startTethering（smali 分段走反射），降级反射"
+            DiagLogger.log(tag, "L1_PRIVATE_API Binder 直呼快失败：$err")
+            return HotspotResult(success = false, error = err)
+        }
+        if (wm == null) {
+            val err = "L1_PRIVATE_API：WifiManager 不可用（Binder 直呼状态确认需要）"
+            DiagLogger.log(tag, err)
             return HotspotResult(success = false, error = err)
         }
 
@@ -546,133 +572,11 @@ class HotspotManager(
         val binderCode = AtomicInteger(CODE_NOT_RECEIVED)
 
         return try {
-            if (sdk >= 30) {
-                // ---- sdk 30-33：ITetheringConnector.startTethering（MakroDroid T1 骨架照抄） ----
-                val parcelCls = Class.forName("android.net.TetheringRequestParcel")
-                // ★ v0.3.5 parcel 构造修正（v0.3.6 沿用）：AIDL 结构类无无参构造（真机实测
-                // newInstance() 抛 InstantiationException「no zero argument constructor」）——改反射
-                // **带参构造** TetheringRequestParcel(int, boolean)（getConstructor 精匹配）；构造后
-                // 再写字段（现有 getDeclaredField 方式，值相同、防构造签名差异漏设）；带参构造不可用
-                // → 如实失败（交由上层 catch 收敛降级）
-                val parcel = try {
-                    val ctor = parcelCls.getConstructor(java.lang.Integer.TYPE, java.lang.Boolean.TYPE)
-                    ctor.isAccessible = true
-                    val p = ctor.newInstance(TETHERING_TYPE_WIFI, false)
-                    parcelCls.getDeclaredField("tetheringType").apply { isAccessible = true }
-                        .setInt(p, TETHERING_TYPE_WIFI) // 0=WIFI（AOSP TetheringManager.TETHERING_WIFI）
-                    parcelCls.getDeclaredField("showProvisioningUi").apply { isAccessible = true }
-                        .setBoolean(p, false)
-                    p
-                } catch (e: Exception) {
-                    throw IllegalStateException(
-                        "TetheringRequestParcel 构造失败（带参构造 (int, boolean) 不可用）: ${e.javaClass.simpleName}: ${e.message}",
-                        e,
-                    )
-                }
+            // ==== 照抄 smali：onHandleIntent（WifiAPState=0 turn on / ForceLegacy=false）→ c(true,false) → e(true) ====
+            mdTetherDispatch(ctx, wm, turnOn = true, forceLegacy = false, turnWifiOn = true, binderCode)
 
-                val binder = serviceBinder("tethering")
-                    ?: throw IllegalStateException("ServiceManager.getService(\"tethering\") 返回 null")
-                val connector = Class.forName("android.net.ITetheringConnector\$Stub")
-                    .getMethod("asInterface", IBinder::class.java)
-                    .invoke(null, binder)
-                    ?: throw IllegalStateException("ITetheringConnector\$Stub.asInterface 返回 null")
-
-                // 回调：Proxy 动态代理（MakroDroid 的 ua0/ta0 为空实现；我们做真实现——记录错误码）
-                val listenerCls = Class.forName("android.net.IIntResultListener")
-                val listenerProxy = Proxy.newProxyInstance(
-                    listenerCls.classLoader ?: ClassLoader.getSystemClassLoader(),
-                    arrayOf(listenerCls),
-                    InvocationHandler { _, method, args ->
-                        if (method.name == "onResult" && args != null && args.isNotEmpty()) {
-                            val code = args[0] as? Int
-                            if (code != null) {
-                                binderCode.set(code)
-                                DiagLogger.log(tag, "Binder 直呼 onResult 回调：错误码=$code")
-                            }
-                        }
-                        null // 其余方法（含 toString/equals）返回 null（照抄 MakroDroid 空 handler 语义）
-                    },
-                )
-
-                val pkg = ctx.packageName
-                val connectorIfaceCls = Class.forName("android.net.ITetheringConnector")
-                if (sdk >= 31) {
-                    // sdk≥31：四参 startTethering(TetheringRequestParcel, String, String, IIntResultListener)
-                    val m = connectorIfaceCls.getMethod(
-                        "startTethering",
-                        parcelCls, String::class.java, String::class.java, listenerCls,
-                    )
-                    m.isAccessible = true
-                    m.invoke(connector, parcel, pkg, null, listenerProxy)
-                    DiagLogger.log(tag, "Binder 直呼：已调用 startTethering(parcel, pkg=$pkg, null, proxy)（sdk=$sdk 四参）")
-                } else {
-                    // sdk 30：三参 startTethering(TetheringRequestParcel, String, IIntResultListener)
-                    val m = connectorIfaceCls.getMethod(
-                        "startTethering",
-                        parcelCls, String::class.java, listenerCls,
-                    )
-                    m.isAccessible = true
-                    m.invoke(connector, parcel, pkg, listenerProxy)
-                    DiagLogger.log(tag, "Binder 直呼：已调用 startTethering(parcel, pkg=$pkg, proxy)（sdk=$sdk 三参）")
-                }
-            } else {
-                // ---- sdk 26-29：IConnectivityManager.startTethering(int=0, ResultReceiver, boolean=false) 分段兼容 ----
-                val binder = serviceBinder("connectivity")
-                    ?: throw IllegalStateException("ServiceManager.getService(\"connectivity\") 返回 null")
-                val cmCls = Class.forName("android.net.IConnectivityManager")
-                val cm = cmCls.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
-                    ?: throw IllegalStateException("IConnectivityManager\$Stub.asInterface 返回 null")
-                val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
-                    override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
-                        binderCode.set(resultCode)
-                        DiagLogger.log(tag, "IConnectivityManager.startTethering 结果回调：resultCode=$resultCode")
-                    }
-                }
-                val m = cmCls.getMethod(
-                    "startTethering",
-                    java.lang.Integer.TYPE, ResultReceiver::class.java, java.lang.Boolean.TYPE,
-                )
-                m.isAccessible = true
-                m.invoke(cm, TETHERING_TYPE_WIFI, receiver, false)
-                DiagLogger.log(tag, "Binder 直呼：已调用 IConnectivityManager.startTethering(0, receiver, false)（sdk=$sdk）")
-            }
-
-            // 成功判定：回调错误码 0 即成功；回调未达时轮询 isWifiApEnabled / getWifiApState∈{13} 确认；
-            // 状态不可读以「回调码 0」为准；8s 超时兜底
-            val deadline = System.currentTimeMillis() + BINDER_CONFIRM_TIMEOUT_MS
-            var stateApiWarned = false
-            while (System.currentTimeMillis() < deadline) {
-                val code = binderCode.get()
-                if (code == TETHER_ERROR_NO_ERROR) {
-                    DiagLogger.log(tag, "Binder 直呼成功：回调错误码 0（系统预配热点已开启，SSID/密码为系统配置）")
-                    return systemTetherSuccess()
-                }
-                if (code != CODE_NOT_RECEIVED) {
-                    val err = "Binder 直呼回调错误码=$code（非 0，系统拒绝/失败）"
-                    DiagLogger.log(tag, "L1_PRIVATE_API：$err")
-                    return HotspotResult(success = false, error = err)
-                }
-                when (pollHotspotStateOnce(wm)) {
-                    STATE_ON -> {
-                        DiagLogger.log(tag, "Binder 直呼成功（回调未达，状态轮询确认热点已开启）")
-                        return systemTetherSuccess()
-                    }
-                    STATE_UNAVAILABLE -> if (!stateApiWarned) {
-                        stateApiWarned = true
-                        DiagLogger.log(tag, "Binder 直呼状态轮询不可用（hidden API 拦截），以「回调码 0 即成功」为准")
-                    }
-                    else -> { /* STATE_OFF：继续等待回调/轮询 */ }
-                }
-                try {
-                    Thread.sleep(BINDER_POLL_INTERVAL_MS)
-                } catch (e: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return HotspotResult(success = false, error = "Binder 直呼确认等待被中断")
-                }
-            }
-            val err = "Binder 直呼 ${BINDER_CONFIRM_TIMEOUT_MS / 1000}s 超时：无回调且状态未确认"
-            DiagLogger.log(tag, "L1_PRIVATE_API：$err")
-            HotspotResult(success = false, error = err)
+            // ==== 成功判定（smali e() 的 2s+b() 检查之后；任务要求回调/轮询确认）====
+            confirmBinderTether(ctx, wm, binderCode)
         } catch (e: Exception) {
             // 不吞异常：记录 + 如实透传（含异常类；hidden API 拦截 / 服务端拒绝均在此落）
             DiagLogger.log(tag, "L1_PRIVATE_API Binder 直呼异常（不吞）: $e")
@@ -683,38 +587,397 @@ class HotspotManager(
         }
     }
 
-    /** 反射 `ServiceManager.getService(name)` → IBinder（② Binder 直呼用；失败返回 null 由调用方抛 IllegalStateException 收敛）。 */
-    private fun serviceBinder(name: String): IBinder? = try {
-        val m = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java)
-        m.isAccessible = true
-        m.invoke(null, name) as? IBinder
-    } catch (e: Exception) {
-        DiagLogger.log(tag, "ServiceManager.getService($name) 反射异常: $e")
-        null
+    /**
+     * 照抄 smali `WifiHotspotService.c(ZZ)V`（onHandleIntent 的 WifiAPState 分支执行体）：
+     * 1) turnOn 且缓存字段 a==-1 时缓存 `WifiManager.getWifiState()`（smali 字段 a，写后未读——死缓存，
+     *    port 为局部变量，语义等价）；
+     * 2) sdk<29 且 turnOn 且当前连接着 wifi → `setWifiEnabled(false)`（SecurityException → 提示
+     *    "Could not change wifi state"；其他异常 → log "Could not change wifi state: "），随后轮询
+     *    10×500ms 等 `getWifiState()==1(DISABLED)`；
+     * 3) sdk 分段（smali 005d-0073 原样）：sdk≥26 且 !forceLegacy → [mdTetherModern]（e()）；
+     *    sdk==25 且 !forceLegacy → [mdTetherBinder]（d()）；否则 → [mdTetherLegacy]（f() 反射
+     *    setWifiApEnabled）；分支后缓存复位 -1（smali 0076：a=-1）；
+     * 4) !turnOn（关热点）收尾（smali 0078-00ad）：[mdApState] 读 AP state（**仅读一次**，smali 原样
+     *    陈旧值），循环 10×500ms 等待（state∈{0,3,4} 时继续）→ sleep 1s → TurnOnWifi 为 true 时重开
+     *    wifi（sdk<29 `setWifiEnabled(true)`；sdk≥29 [mdEnableWifi]（Lu3/a.b 等价））。
+     *
+     * 线程：随 [startAsync] 后台线程执行（所有 sleep 不占主线程）。
+     */
+    private fun mdTetherDispatch(
+        ctx: Context,
+        wm: WifiManager,
+        turnOn: Boolean,
+        forceLegacy: Boolean,
+        turnWifiOn: Boolean,
+        binderCode: AtomicInteger,
+    ) {
+        val sdk = Build.VERSION.SDK_INT
+        // smali 0000-000d：缓存 wifi state（仅 turnOn 且未缓存；写后未读，smali 原样死缓存）
+        var cachedWifiState = -1
+        if (turnOn && cachedWifiState == -1) cachedWifiState = wm.wifiState
+        // smali 001b-005c：sdk<29 且 turnOn 且已连接 wifi → 先关 wifi（释放射频），等 DISABLED
+        if (sdk < 29 && turnOn) {
+            val info = try {
+                wm.connectionInfo // smali 001f：getConnectionInfo()
+            } catch (e: Exception) {
+                null
+            }
+            if (info != null) {
+                try {
+                    wm.setWifiEnabled(false) // smali 0029
+                } catch (e: SecurityException) {
+                    mdToast(ctx, SMALI_TOAST_TITLE, SMALI_TOAST_DRIVER_MSG) // smali 0047：SecurityException 提示
+                } catch (e: Exception) {
+                    DiagLogger.log(tag, "Could not change wifi state: $e") // smali 0033 串
+                }
+                var n = 10
+                while (n > 0 && wm.wifiState != SMALI_WIFI_STATE_DISABLED) {
+                    try {
+                        Thread.sleep(500) // smali 0057
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                    n--
+                }
+            }
+        }
+        // smali 005d-0073：sdk 分段分支（e() / d() / f()）
+        when {
+            sdk >= 26 && !forceLegacy -> mdTetherModern(ctx, wm, turnOn, binderCode) // e()
+            sdk >= 25 && !forceLegacy -> mdTetherBinder(ctx, turnOn, binderCode) // d()（sdk==25）
+            else -> mdTetherLegacy(ctx, wm, turnOn) // f()（sdk<25 或 ForceLegacy）
+        }
+        cachedWifiState = -1 // smali 0076：a = -1（分支后复位）
+        // smali 0078-00ad：关热点收尾（仅 !turnOn）
+        if (!turnOn) {
+            // smali 007c：Lu3/a.a 读一次（陈旧值，原样）——异常（RuntimeException）不捕获，冒泡由外层收敛
+            val st = mdApState(wm)
+            var n = 10
+            while (n > 0 && (st == 0 || st == SMALI_AP_ENABLED || st == SMALI_AP_FAILED)) {
+                try {
+                    Thread.sleep(500) // smali 0080
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+                n--
+            }
+            try {
+                Thread.sleep(1_000L) // smali 0091
+            } catch (e: Exception) {
+                mdToast(ctx, SMALI_TOAST_TITLE, SMALI_TOAST_DRIVER_MSG) // smali 00a8：sleep 异常提示
+                return
+            }
+            if (turnWifiOn) {
+                if (sdk < 29) {
+                    wm.setWifiEnabled(true) // smali 009e：sdk<29 直接开 wifi
+                } else {
+                    mdEnableWifi(ctx) // smali 00a4：Lu3/a.b（sdk>=29 root/Helper File 等价）
+                }
+            }
+        }
     }
 
     /**
-     * 单次状态轮询确认（② Binder 直呼成功判定辅助）：优先反射 `isWifiApEnabled`（8.x 公开可用）；
-     * 被 hidden API 拦截时退回反射 `getWifiApState` ∈ {13=WifiManager.WIFI_AP_STATE_ENABLED}；
-     * 两者均不可用返回 [STATE_UNAVAILABLE]（不判定失败——以「回调码 0 即成功」为准）。
+     * 照抄 smali `WifiHotspotService.e(Z)I`（sdk≥26 且 !forceLegacy 分支）：
+     * 1) 先试 hidden `ConnectivityManager.startTethering(int, OnStartTetheringCallback, Handler)`
+     *    （smali 经 k1/c 注册 Lk1/b 回调——MacroDroid 用 DexMaker（com.android.dx）运行时生成
+     *    OnStartTetheringCallback 子类，外部基础设施不移植；AOSP 该回调为 abstract class、Proxy 不可用
+     *    → 尝试后直接落 IConnectivityManager 兜底；失败 log "Could not modify hotspot: "）；
+     *    关热点时对应 k1/c.b()：hidden `stopTethering(int)`；
+     * 2) sleep 2s（smali 001a）；
+     * 3) `b()` 状态检查（[mdWifiApEnabled]）：getWifiApState 归一化 ∈{2,3}（ENABLING/ENABLED）== 目标
+     *    状态 → 跳过直呼；未达 → `d(turnOn)`（[mdTetherBinder]：IConnectivityManager.startTethering /
+     *    stopTethering）；返回 0（smali 固定）。
      */
-    private fun pollHotspotStateOnce(wm: WifiManager?): Int {
-        if (wm == null) return STATE_UNAVAILABLE
+    private fun mdTetherModern(ctx: Context, wm: WifiManager, turnOn: Boolean, binderCode: AtomicInteger) {
+        mdTryHiddenCmTether(ctx, turnOn) // smali 0000-0011：k1/c.a/b（DexMaker 回调桥的轻量等价）
         try {
-            val m = WifiManager::class.java.getMethod("isWifiApEnabled")
-            m.isAccessible = true
-            if (m.invoke(wm) == true) return STATE_ON
-            return STATE_OFF
-        } catch (e: Exception) {
-            // isWifiApEnabled 不可用（hidden API 拦截）→ 降级 getWifiApState
+            Thread.sleep(2_000L) // smali 001a
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
-        return try {
-            val m = WifiManager::class.java.getMethod("getWifiApState")
-            m.isAccessible = true
-            val state = (m.invoke(wm) as? Int) ?: -1
-            if (state == 13) STATE_ON else STATE_OFF // AOSP WIFI_AP_STATE_ENABLED=13（compileSdk37 jar 常量对 Kotlin 不可见）
+        // smali 0021：if (b() == turnOn) 跳过 d()；未达 → d(turnOn)
+        if (mdWifiApEnabled(wm) != turnOn) {
+            mdTetherBinder(ctx, turnOn, binderCode)
+        }
+    }
+
+    /**
+     * 照抄 smali `k1/c.a(Lk1/b, Handler)` / `k1/c.b()`（WifiHotspotService.e() 的第一步）：
+     * hidden `ConnectivityManager.startTethering(int, OnStartTetheringCallback, Handler)`（8.1+）
+     * / `stopTethering(int)`。MacroDroid 用 DexMaker2 运行时生成 OnStartTetheringCallback 子类
+     * （com.android.dx，非公开类无法 Proxy）；本移植不引入 com.android.dx 依赖——回调类为 interface
+     * 时走 Proxy，否则直接跳过（随后 2s + b() 检查 + IConnectivityManager 直呼兜底），失败 log
+     * "Could not modify hotspot: "（smali k1/c 日志串）。
+     */
+    private fun mdTryHiddenCmTether(ctx: Context, turnOn: Boolean) {
+        try {
+            val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return
+            if (turnOn) {
+                val cbClass = try {
+                    Class.forName("android.net.ConnectivityManager\$OnStartTetheringCallback")
+                } catch (e: ClassNotFoundException) {
+                    return // 无回调类 → 直接落 IConnectivityManager 兜底
+                }
+                if (!cbClass.isInterface) return // AOSP abstract class（Proxy 不可用）→ 落 IConnectivityManager 兜底
+                // 回调类为 interface 时 Proxy（空回调：MacroDroid 生成的 onStartTethering 为空实现）
+                val cb = Proxy.newProxyInstance(
+                    cbClass.classLoader ?: ClassLoader.getSystemClassLoader(),
+                    arrayOf(cbClass),
+                    InvocationHandler { _, _, _ -> null },
+                )
+                val m = cm.javaClass.getDeclaredMethod(
+                    "startTethering",
+                    java.lang.Integer.TYPE, cbClass, Handler::class.java,
+                )
+                m.isAccessible = true
+                m.invoke(cm, Integer.valueOf(TETHERING_TYPE_WIFI), cb, Handler())
+            } else {
+                // smali k1/c.b()：hidden ConnectivityManager.stopTethering(int)
+                val m = cm.javaClass.getDeclaredMethod("stopTethering", java.lang.Integer.TYPE)
+                m.isAccessible = true
+                m.invoke(cm, Integer.valueOf(TETHERING_TYPE_WIFI))
+            }
         } catch (e: Exception) {
-            STATE_UNAVAILABLE
+            DiagLogger.log(tag, "Could not modify hotspot: $e") // smali k1/c 日志串
+        }
+    }
+
+    /**
+     * 照抄 smali `WifiHotspotService.d(Z)I`（sdk==25 或 e() 状态未达时的直呼）：
+     * `context.getSystemService("connectivity")` → ConnectivityManager；
+     * turnOn → [mdTetherStart]（a()：IConnectivityManager.startTethering 反射链）；
+     * 否则 → 反射 `ConnectivityManager.getDeclaredMethod("stopTethering", int)` invoke 0（stopTethering
+     * 用法，smali 0013-0028）；异常 → log "Failed to set hotspot on API25+: "（smali 串）；返回 0（smali 固定）。
+     */
+    private fun mdTetherBinder(ctx: Context, turnOn: Boolean, binderCode: AtomicInteger) {
+        val cm = ctx.getSystemService("connectivity") as? ConnectivityManager
+        if (cm == null) {
+            DiagLogger.log(tag, "mdTetherBinder：getSystemService(\"connectivity\") 返回 null")
+            return
+        }
+        try {
+            if (turnOn) {
+                mdTetherStart(ctx, cm, binderCode) // smali 000d：a(cm)
+            } else {
+                // smali 0013-0028：ConnectivityManager.getDeclaredMethod("stopTethering", int).invoke(cm, 0)
+                val m = ConnectivityManager::class.java.getDeclaredMethod("stopTethering", java.lang.Integer.TYPE)
+                m.isAccessible = true
+                m.invoke(cm, Integer.valueOf(TETHERING_TYPE_WIFI))
+            }
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "Failed to set hotspot on API25+: $e") // smali 0031 串
+        }
+    }
+
+    /**
+     * 照抄 smali `WifiHotspotService.a(Object)`（IConnectivityManager.startTethering 反射链）：
+     * `Class.forName("android.net.IConnectivityManager")` 取接口类，参数构造
+     * `(int=0, ResultReceiver, boolean=false)`；**invoke 在 ConnectivityManager 实例上**
+     * （smali 经 d() 传入 getSystemService("connectivity") 的对象；非 ServiceManager/mService）；
+     * ResultReceiver 为 `new ResultReceiver(null)`（smali 无 Handler），我们覆写 onReceiveResult
+     * 记录回调码（任务要求回调确认；AOSP TETHER_ERROR_NO_ERROR=0）；
+     * 异常回退链（smali 三个 try 原样）：3 参失败 → 再 3 参（dexdump 原样 dup，等价一次）→
+     * 4 参 `(int, ResultReceiver, boolean, String pkg)`（smali 第三 try 传 "com.arlosoft.macrodroid"
+     * 字面量，我们用 ctx.packageName）→ 全部失败 log "Cannot start tethering: "（smali 串）。
+     */
+    private fun mdTetherStart(ctx: Context, cm: ConnectivityManager, binderCode: AtomicInteger) {
+        val receiver = object : ResultReceiver(null) {
+            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                binderCode.set(resultCode)
+                DiagLogger.log(tag, "IConnectivityManager.startTethering 回调：resultCode=$resultCode")
+            }
+        }
+        val icm = try {
+            Class.forName("android.net.IConnectivityManager")
+        } catch (e: ClassNotFoundException) {
+            DiagLogger.log(tag, "Cannot start tethering: ${e.javaClass.simpleName}: ${e.message}")
+            return
+        }
+        // smali 参数构造（001c 起）：int=0 / ResultReceiver / boolean=false；4 参追加 String pkg
+        val sig3 = arrayOf(java.lang.Integer.TYPE, ResultReceiver::class.java, java.lang.Boolean.TYPE)
+        val sig4 = arrayOf(
+            java.lang.Integer.TYPE, ResultReceiver::class.java, java.lang.Boolean.TYPE, String::class.java,
+        )
+        val zero = Integer.valueOf(TETHERING_TYPE_WIFI)
+        val flag = java.lang.Boolean.FALSE
+        val pkg = ctx.packageName
+        try {
+            // smali 001c-0032：3 参
+            val m = icm.getDeclaredMethod("startTethering", *sig3)
+            m.invoke(cm, zero, receiver, flag)
+            DiagLogger.log(tag, "Binder 直呼：已调用 IConnectivityManager.startTethering(0, receiver, false)（3 参）")
+            return
+        } catch (e1: Exception) {
+            // smali 0036-004c：同 3 参重试（dexdump 原样 dup，等价一次）→ 落 4 参兜底
+            DiagLogger.log(
+                tag,
+                "IConnectivityManager.startTethering 3 参失败（落 4 参兜底）: ${e1.javaClass.simpleName}: ${e1.message}",
+            )
+        }
+        try {
+            // smali 0051-006f：4 参 (int, ResultReceiver, boolean, String pkg)
+            val m = icm.getDeclaredMethod("startTethering", *sig4)
+            m.invoke(cm, zero, receiver, flag, pkg)
+            DiagLogger.log(tag, "Binder 直呼：已调用 IConnectivityManager.startTethering(0, receiver, false, pkg=$pkg)（4 参）")
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "Cannot start tethering: $e") // smali 0079 串
+        }
+    }
+
+    /**
+     * 照抄 smali `WifiHotspotService.b()Z`：反射 `WifiManager.getWifiApState()`（getDeclaredMethod +
+     * setAccessible(true)），归一化（>10 减 10），返回 state∈{2=ENABLING,3=ENABLED}；
+     * 异常 → log "Error getting wifi AP State: " + message 并抛 RuntimeException（smali 0051 包装）。
+     */
+    private fun mdWifiApEnabled(wm: WifiManager): Boolean {
+        try {
+            val m = wm.javaClass.getDeclaredMethod("getWifiApState")
+            m.isAccessible = true
+            var st = (m.invoke(wm) as Int)
+            if (st > 10) st -= 10 // smali 0029：>10 减 10（AP 状态与 wifi 状态同编号）
+            return st == SMALI_AP_ENABLING || st == SMALI_AP_ENABLED
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "Error getting wifi AP State: ${e.message}")
+            throw RuntimeException("Error getting wifi AP State: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 照抄 smali `u3/a.a(WifiManager)I`（WifiHotspotService 与 SetHotspotAction 共用的 AP 状态读取）：
+     * 反射 `getWifiApState()`（getMethod），归一化（>10 减 10）返回（0-4 编号与 WIFI_STATE_* 同）；
+     * 异常 → 抛 RuntimeException("WifiHotspotService: getWifiAPState failed: ...")（smali 原样）。
+     */
+    private fun mdApState(wm: WifiManager): Int {
+        try {
+            val m = wm.javaClass.getMethod("getWifiApState")
+            var st = (m.invoke(wm) as Int)
+            if (st > 10) st -= 10
+            return st
+        } catch (e: Exception) {
+            throw RuntimeException("WifiHotspotService: getWifiAPState failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 照抄 smali `WifiHotspotService.f(Z)I`（sdk<25 或 ForceLegacy 的反射降级路径）：
+     * 1) `setWifiEnabled(false)`（SecurityException → 提示 "Could not change wifi state" /
+     *    "...custom ROM..."；其他异常 → sneakyThrow 上抛（smali 0009→0051））；
+     * 2) 反射 `WifiManager.setWifiApEnabled(WifiConfiguration, boolean)`（getMethod 公开查找），
+     *    **config=null**（smali 0031 原样）；随后反射 `getWifiApState()` 取 state；
+     * 3) turnOn 时轮询（smali 0074-008f）：state 读一次（smali 原样陈旧值），state∈{1,2,4} 且
+     *    剩余次数>0 → sleep 500ms；
+     * 4) 异常（setWifiApEnabled/getWifiApState）→ sneakyThrow 上抛（smali 0051 语义：异常继续冒泡，
+     *    由外层 catch 收敛为失败 reason）。
+     */
+    private fun mdTetherLegacy(ctx: Context, wm: WifiManager, turnOn: Boolean) {
+        try {
+            wm.setWifiEnabled(false) // smali 0005
+        } catch (e: SecurityException) {
+            mdToast(ctx, SMALI_TOAST_TITLE, SMALI_TOAST_DRIVER_MSG) // smali 000b：SecurityException 提示
+        } catch (e: Exception) {
+            throw e // smali 0009 → 0051 sneakyThrow（异常上抛）
+        }
+        try {
+            val m = wm.javaClass.getMethod(
+                "setWifiApEnabled",
+                WifiConfiguration::class.java, java.lang.Boolean.TYPE,
+            )
+            m.isAccessible = true
+            m.invoke(wm, null, java.lang.Boolean.valueOf(turnOn)) // smali 0031：config=null
+            val m2 = wm.javaClass.getMethod("getWifiApState")
+            m2.isAccessible = true
+            val st = (m2.invoke(wm) as Int)
+            // smali 0074-008f：turnOn 轮询（getWifiApState 仅读一次，smali 原样陈旧值）
+            if (turnOn) {
+                var n = 10
+                while (n > 0 && (st == SMALI_WIFI_STATE_DISABLED || st == SMALI_AP_ENABLING || st == SMALI_AP_FAILED)) {
+                    try {
+                        Thread.sleep(500) // smali 0089
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
+                    }
+                    n--
+                }
+            }
+        } catch (e: Exception) {
+            // smali 0051：Lw1/a.w(e) sneakyThrow —— 异常继续上抛（其后 log/toast/-1 为死代码）
+            throw e
+        }
+    }
+
+    /**
+     * ② 成功判定（任务要求回调/轮询确认；smali 服务侧 e() 的 2s+b() 检查后叠加）：
+     * 回调错误码 0 即成功（AOSP TETHER_ERROR_NO_ERROR）；回调未达时轮询 [mdApState]
+     * （smali Lu3/a.a 归一化）∈{2=ENABLING,3=ENABLED} 即成功（smali b() 判定）；状态不可读
+     * （mdApState 抛异常，hidden 拦截）以「回调码 0」为准；8s 超时兜底 → 明确 reason。
+     */
+    private fun confirmBinderTether(ctx: Context, wm: WifiManager, binderCode: AtomicInteger): HotspotResult {
+        val deadline = System.currentTimeMillis() + BINDER_CONFIRM_TIMEOUT_MS
+        var stateApiWarned = false
+        while (System.currentTimeMillis() < deadline) {
+            val code = binderCode.get()
+            if (code == TETHER_ERROR_NO_ERROR) {
+                DiagLogger.log(tag, "Binder 直呼成功：回调错误码 0（系统预配热点已开启，SSID/密码为系统配置）")
+                return systemTetherSuccess()
+            }
+            if (code != CODE_NOT_RECEIVED) {
+                val err = "Binder 直呼回调错误码=$code（非 0，系统拒绝/失败）"
+                DiagLogger.log(tag, "L1_PRIVATE_API：$err")
+                return HotspotResult(success = false, error = err)
+            }
+            val st = try {
+                mdApState(wm)
+            } catch (e: Exception) {
+                -1 // 状态 API 不可读（hidden 拦截）→ 以「回调码 0」为准
+            }
+            if (st == SMALI_AP_ENABLING || st == SMALI_AP_ENABLED) { // smali b() 判定（归一化）
+                DiagLogger.log(tag, "Binder 直呼成功（回调未达，状态轮询确认热点已开启 state=$st）")
+                return systemTetherSuccess()
+            }
+            if (st == -1 && !stateApiWarned) {
+                stateApiWarned = true
+                DiagLogger.log(tag, "Binder 直呼状态轮询不可用（hidden API 拦截），以「回调码 0 即成功」为准")
+            }
+            try {
+                Thread.sleep(BINDER_POLL_INTERVAL_MS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return HotspotResult(success = false, error = "Binder 直呼确认等待被中断")
+            }
+        }
+        val err = "Binder 直呼 ${BINDER_CONFIRM_TIMEOUT_MS / 1000}s 超时：无回调且状态未确认"
+        DiagLogger.log(tag, "L1_PRIVATE_API：$err")
+        return HotspotResult(success = false, error = err)
+    }
+
+    /** smali `w1.u(Context, title, msg, false)` 的等价提示（"Could not change wifi state" 等 Toast 文案）。 */
+    private fun mdToast(ctx: Context, title: String, msg: String) {
+        try {
+            Toast.makeText(ctx.applicationContext, "$title\n$msg", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "mdToast 展示失败（忽略，不影响流程）: $e")
+        }
+    }
+
+    /**
+     * 照抄 smali `u3/a.b(Context, String)` 的等价（sdk≥29 关热点后重开 wifi）：
+     * MacroDroid 原实现：root → `svc wifi enable`；Helper File（外部 companion App，Bluelink 无）→
+     * 请求；均无 → log 报错。Bluelink 移植：无 Helper File 基础设施、root 通道已停用（B1），
+     * 直呼 `setWifiEnabled(true)`（sdk<29 有效；29+ 系统可能拒绝——如实记录，如需 root 恢复在此接线）。
+     */
+    private fun mdEnableWifi(ctx: Context) {
+        val wm = ctx.getSystemService(WifiManager::class.java) ?: return
+        try {
+            wm.setWifiEnabled(true)
+        } catch (e: Exception) {
+            DiagLogger.log(
+                tag,
+                "mdEnableWifi（Lu3/a.b 等价）setWifiEnabled(true) 失败（sdk>=29 常见，需 root/Helper File）: $e",
+            )
         }
     }
 
@@ -1199,22 +1462,23 @@ class HotspotManager(
         /** ② Binder 直呼回调未达时状态轮询间隔（与 ② 反射轮询同节奏 400ms）。 */
         private const val BINDER_POLL_INTERVAL_MS: Long = 400L
 
-        /** ② IIntResultListener 回调未达的初始错误码（区别于真实回调码）。 */
+        /** ② ResultReceiver/回调未达的初始错误码（区别于真实回调码；smali 侧服务无回调监听，port 增强）。 */
         private const val CODE_NOT_RECEIVED = -1
 
-        /** ② TetheringRequestParcel.tetheringType=0（WIFI，AOSP TetheringManager.TETHERING_WIFI）。 */
+        /** ② startTethering type=0（WIFI，AOSP TetheringManager.TETHERING_WIFI；smali Integer.valueOf(0) 原样）。 */
         private const val TETHERING_TYPE_WIFI = 0
 
         /** ② startTethering 成功回调码（AOSP TetherErrorCode NO_ERROR=0 / IConnectivityManager TETHER_ERROR_NO_ERROR=0）。 */
         private const val TETHER_ERROR_NO_ERROR = 0
 
-        /** ② Binder 直呼状态轮询结果：热点已开启（isWifiApEnabled=true 或 getWifiApState==WIFI_AP_STATE_ENABLED）。 */
-        private const val STATE_ON = 1
+        /** ② smali 归一化 AP 状态常量（WifiManager.getWifiApState 减 10 后与 WIFI_STATE_* 同编号；compileSdk37 jar 常量对 Kotlin 不可见，用字面量）。 */
+        private const val SMALI_WIFI_STATE_DISABLED = 1
+        private const val SMALI_AP_ENABLING = 2
+        private const val SMALI_AP_ENABLED = 3
+        private const val SMALI_AP_FAILED = 4
 
-        /** ② Binder 直呼状态轮询结果：热点未开启（继续等待回调/轮询）。 */
-        private const val STATE_OFF = 0
-
-        /** ② Binder 直呼状态轮询结果：状态 API 不可用（hidden 拦截，以「回调码 0 即成功」为准）。 */
-        private const val STATE_UNAVAILABLE = -1
+        /** ② smali 提示串（w1.u 等价 Toast 文案："Could not change wifi state" / custom ROM）。 */
+        private const val SMALI_TOAST_TITLE = "Could not change wifi state"
+        private const val SMALI_TOAST_DRIVER_MSG = "The wifi state could not be changed due to a problem with your wifi driver. This is most likely due to a problem in a custom ROM."
     }
 }

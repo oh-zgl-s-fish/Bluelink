@@ -3,6 +3,8 @@ package com.zglinus.bluelink.networking
 import android.content.Context
 import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
+import android.net.wifi.WifiManager.LocalOnlyHotspotCallback
+import android.net.wifi.WifiManager.LocalOnlyHotspotReservation
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -47,10 +49,11 @@ enum class HotspotStartLevel {
  *
  * @param success 是否成功开启热点；false 时 [error] 给出降级/等待原因。
  * @param ssid 热点 SSID（成功时返回，供对端连接；手动路径由 UI 回填）。
- * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；手动路径由 UI 回填）。
+ * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；③ L2 本地热点 26-28 由系统下发
+ *   （onStarted 读 preSharedKey）、33+ 由用户按系统弹窗回填登记；手动路径由 UI 回填）。
  * @param ip 热点本机 IPv4（② 私有 API 路径启动后采集；未取到为空串 ""，一期允许）。
- * @param error 失败/等待原因（如 "本包实现(B包)" 降级、root 路径已停用(B1 移除) 降级、`"AwaitingManual"` 等待手动、
- *   `"AwaitingWriteSettings"` 等待 WRITE_SETTINGS 授权）。
+ * @param error 失败/等待原因（如 root 路径已停用(B1 移除) 降级、③ L2 盲区禁用/系统 reason/启动异常
+ *   降级、`"AwaitingManual"` 等待手动、`"AwaitingWriteSettings"` 等待 WRITE_SETTINGS 授权）。
  */
 data class HotspotResult(
     val success: Boolean,
@@ -76,6 +79,13 @@ interface HotspotListener {
      * WriteSettingsDialog / openWriteSettings 语义），授权后重试本等级（引擎经现有孤儿兜底覆盖）。
      */
     fun onWriteSettingsPermission()
+
+    /**
+     * ③ L2 本地热点（13+，sdk 33+）：onStarted 后 App 侧密码不可读（软 AP 配置不回传密码；
+     * 系统弹窗/通知展示 SSID 与密码）——请求 UI 弹出密码登记框，请用户按系统弹窗回填密码；
+     * 回填后经 [HotspotManager.completeLocalOnlyPassword] 完成 L2 成功结果（26-28 全自动路径不触发本回调）。
+     */
+    fun onLocalOnlyPasswordRequest(ssid: String)
 }
 
 /**
@@ -101,8 +111,14 @@ interface HotspotListener {
  *   - 失败原因透传（含异常类）交状态机降级 ③；密码全程不回显；
  *   - 运行时 try 实测降级、不预验：真机（A15/KernelSU）大概率 `NoSuchMethodException` 落失败 ③，
  *     8-13 部分机型/ROM 仍可（压力路径）；
- * - ③（[HotspotStartLevel.L2_LOCAL_ONLY]）：Local-only 无密码局域网真实现留 B3，本包保持 stub
- *   降级 `HotspotResult(false, error = "本包实现(B包)")`；
+ * - ③（[HotspotStartLevel.L2_LOCAL_ONLY]，B3 真实现）：Local-only 本地热点——公开 API
+ *   `WifiManager.startLocalOnlyHotspot(callback, handler)` 三版本分流（design 定稿，见 [tryLocalOnlyHotspot]）：
+ *   sdk 26-28 全自动（onStarted 读 `reservation.wifiConfiguration` 的 SSID/preSharedKey + 采集 IP）；
+ *   sdk 29-32 本级禁用（密码盲区，直接失败 `"LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④"`）；
+ *   sdk 33+ onStarted 后密码不可读（系统弹窗展示）→ 触发 [HotspotListener.onLocalOnlyPasswordRequest]
+ *   请用户回填，[completeLocalOnlyPassword] 完成后返回成功结果。真异步：系统回调经主线程
+ *   [dispatchLocalOnlyResult] 收敛（同步返回 [LOCAL_ONLY_PENDING] 标记）；reservation 持有到组网收尾，
+ *   [stopLocalOnly] 为 B4 正式收尾前的释放入口；
  * - ④（[HotspotStartLevel.MANUAL]）：触发 [HotspotListener.onManualRequest] 走 UI 手动配网，
  *   返回骨架 `HotspotResult(false, error = "AwaitingManual")`；用户密码经 [setPassword] 登记，
  *   供后续 offer（热点信息广播）使用。
@@ -134,6 +150,18 @@ class HotspotManager(
     @Volatile
     private var manualPwd: String? = null
 
+    /** ③ L2 本地热点：onStarted 后持有中的 LocalOnlyHotspotReservation（B4 正式收尾前持有，[stopLocalOnly] 释放）。 */
+    @Volatile
+    private var localOnlyReservation: LocalOnlyHotspotReservation? = null
+
+    /** ③ L2 本地热点：待收敛的异步回调（[startAsync] L2 分支登记；onStarted/onFailed/onStopped/密码回填后经 [dispatchLocalOnlyResult] 收敛）。 */
+    @Volatile
+    private var pendingLocalOnlyCb: ((HotspotResult) -> Unit)? = null
+
+    /** ③ L2 本地热点：sdk 33+ 待用户回填密码的 SSID（onLocalOnlyPasswordRequest 已触发，等 [completeLocalOnlyPassword]）。 */
+    @Volatile
+    private var pendingLocalOnlySsid: String? = null
+
     /** 异步桥：矩阵（含 L1_ROOT su/IO、L1_PRIVATE_API 反射/轮询）专用后台单线程（daemon，不阻止进程退出）。 */
     private val hotspotExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { r ->
@@ -152,8 +180,9 @@ class HotspotManager(
      * - [HotspotStartLevel.L1_ROOT]：已停用（B1 移除）——失败 stub，立即返回
      *   `HotspotResult(false, error="root 热点路径已停用(B1 移除)，降级 ②")`；
      * - [HotspotStartLevel.L1_PRIVATE_API]：B2 真实现（私有 API 反射热点，见 [tryPrivateApiHotspot]）；
-     * - [HotspotStartLevel.L2_LOCAL_ONLY]：③ 真实现留 B3，本包 stub 降级
-     *   `HotspotResult(false, error = "本包实现(B包)")`；
+     * - [HotspotStartLevel.L2_LOCAL_ONLY]：③ B3 真实现（Local-only 本地热点，见 [tryLocalOnlyHotspot]；
+     *   真异步——同步返回 [LOCAL_ONLY_PENDING] 标记，最终结果经 LocalOnlyHotspotCallback 主线程收敛；
+     *   状态机 L2 分支走 [startAsync]）；
      * - [HotspotStartLevel.MANUAL]：触发 [HotspotListener.onManualRequest] 走 UI 手动配网，
      *   返回骨架 `HotspotResult(false, error = "AwaitingManual")`（后续 offer 由 UI 回填密码走 ready）。
      */
@@ -179,6 +208,12 @@ class HotspotManager(
             DiagLogger.log(tag, "startAsync(level=$level) 忽略：上一次异步启动仍在进行中（isRunning）")
             return
         }
+        // ③ L2 真异步（B3）：startLocalOnlyHotspot 结果经 LocalOnlyHotspotCallback 主线程回调，
+        // 与后台 executor 解耦——先在本线程（状态机主线程调用）登记待收敛 cb，保证系统回调
+        // 触发时必有收敛目标（登记先于后台 startSyncInternal 提交，系统回调经 mainHandler 排队在后）。
+        if (level == HotspotStartLevel.L2_LOCAL_ONLY) {
+            pendingLocalOnlyCb = cb
+        }
         DiagLogger.log(tag, "startAsync(level=$level) 提交后台线程（矩阵 su/IO 与反射轮询不在主线程执行）")
         hotspotExecutor.execute {
             val result = try {
@@ -190,6 +225,17 @@ class HotspotManager(
                     success = false,
                     error = "startAsync 后台异常: ${e.message ?: e.javaClass.simpleName}",
                 )
+            }
+            // ③ L2 真异步：startSyncInternal 已提交 startLocalOnlyHotspot 并返回 LOCAL_ONLY_PENDING
+            // 标记——结果由 LocalOnlyHotspotCallback（onStarted/onFailed/onStopped）经主线程
+            // dispatchLocalOnlyResult 收敛到 pendingLocalOnlyCb；此处不回调、不释放 isRunning
+            // （收敛时统一释放，防 L2 等待期重复启动）。
+            if (result.error == LOCAL_ONLY_PENDING) {
+                DiagLogger.log(
+                    tag,
+                    "startAsync(level=$level)：L2 真异步进行中，等待 LocalOnlyHotspotCallback 收敛（不重复回调）",
+                )
+                return@execute
             }
             // 结果统一回主线程回调（状态机按主线程契约消费；回调前释放 isRunning 供下次启动）
             mainHandler.post {
@@ -211,9 +257,9 @@ class HotspotManager(
         // ② 私有 API 反射热点（B2 真实现）：WRITE_SETTINGS 前置 + 反射 setWifiApEnabled + 轮询校验 + 取 IP
         HotspotStartLevel.L1_PRIVATE_API -> tryPrivateApiHotspot()
 
-        // ③ L2 本地热点（Local-only，无密码局域网）：真实现留 B3，本包保持 stub 降级
-        HotspotStartLevel.L2_LOCAL_ONLY ->
-            HotspotResult(success = false, error = "本包实现(B包)")
+        // ③ L2 本地热点（Local-only，无密码局域网）：B3 真实现——三版本分流
+        // （26-28 全自动 / 29-32 盲区禁用 / 33+ 密码回填），见 [tryLocalOnlyHotspot]
+        HotspotStartLevel.L2_LOCAL_ONLY -> tryLocalOnlyHotspot()
 
         // ④ 手动路径：请求 UI 引导用户手动配网；密码回填后走 onHotspotReady。
         // onManualRequest 触达 UI：经主线程 post（startAsync 后台线程调用该分支时也安全）。
@@ -416,6 +462,246 @@ class HotspotManager(
         return false
     }
 
+    // ================= ③ L2_LOCAL_ONLY 真路径（B3：Local-only 本地热点） =================
+
+    /**
+     * ③ L2 本地热点（Local-only，无密码局域网；B3 真实现）——三版本分流（design 定稿）：
+     * - sdk 26–28（Android 8-9）：`WifiManager.startLocalOnlyHotspot(callback, mainHandler)`（公开
+     *   API 26+）→ [LocalOnlyHotspotReservation.wifiConfiguration] 读 SSID（已含引号，去引号）与
+     *   preSharedKey（系统下发的随机密码）→ 全自动返回成功 [HotspotResult]（IP 经 [collectHotspotIp]
+     *   采集，参考 ②；此路径免人工）；
+     * - sdk 29–32（Android 10-12）：**本级禁用**（密码盲区：系统不下发可读密码，行为不可靠）→
+     *   直接返回 `HotspotResult(false, error="LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④")`
+     *   交状态机降级 ④（手动）；
+     * - sdk 33+（Android 13+）：onStarted 后系统弹窗/通知展示 SSID 与密码，App 侧
+     *   [LocalOnlyHotspotReservation.wifiConfiguration] 密码不可读（软 AP 配置不回传密码）→
+     *   触发 [HotspotListener.onLocalOnlyPasswordRequest](ssid) 请 UI 弹密码登记框、用户按系统弹窗
+     *   回填 → [completeLocalOnlyPassword] 完成后返回成功 [HotspotResult]（ssid / pwd=用户登记值 / ip）；
+     * - 失败路径：onFailed(reason)（系统 reason 映射见 [localOnlyErrorText]）/ onStopped（等待期被
+     *   系统停止）/ 异常 → 失败透传，交状态机降级 ④。
+     *
+     * 异步：startLocalOnlyHotspot 本身异步（回调线程由传入 [mainHandler] 指定）——本方法同步调用后
+     * 立即返回 [LOCAL_ONLY_PENDING] 标记；最终结果由 [localOnlyCallback]（onStarted/onFailed/onStopped）
+     * 经 [dispatchLocalOnlyResult] 收敛到 [pendingLocalOnlyCb]（状态机经 [startAsync] 传入）。
+     *
+     * 生命周期（B4 正式收尾前）：onStarted 持有 [LocalOnlyHotspotReservation] 到组网收尾，
+     * [stopLocalOnly] 为预留释放入口（引擎 onAbort / stopAllBle 接线，幂等）。
+     *
+     * 线程：startSyncInternal 由 [startAsync] 后台 executor 调用，startLocalOnlyHotspot 的系统回调
+     * 经 mainHandler 回主线程；onLocalOnlyPasswordRequest / completeLocalOnlyPassword 亦在主线程。
+     */
+    @Suppress("DEPRECATION") // startLocalOnlyHotspot(callback, handler) 自 API 33 起弃用（改无 handler 重载），26+ 统一走此重载
+    private fun tryLocalOnlyHotspot(): HotspotResult {
+        val sdk = Build.VERSION.SDK_INT
+        // sdk 29–32：本级禁用（密码盲区）——直接失败交状态机降级 ④（不调系统 API）
+        if (sdk in 29..32) {
+            val err = "LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④"
+            DiagLogger.log(tag, "L2_LOCAL_ONLY 本级禁用：sdk=$sdk → $err")
+            return HotspotResult(success = false, error = err)
+        }
+
+        val ctx = resolveContext()
+        if (ctx == null) {
+            val err = "L2_LOCAL_ONLY：Context 不可用（注入与 ActivityThread.currentApplication() 兜底均失败）"
+            DiagLogger.log(tag, err)
+            return HotspotResult(success = false, error = err)
+        }
+        val wm = resolveWifiManager(ctx)
+        if (wm == null) {
+            val err = "L2_LOCAL_ONLY：WifiManager 不可用（Context 已取得但 getSystemService 失败）"
+            DiagLogger.log(tag, err)
+            return HotspotResult(success = false, error = err)
+        }
+
+        DiagLogger.log(
+            tag,
+            "L2_LOCAL_ONLY：sdk=$sdk 调用 startLocalOnlyHotspot(callback, mainHandler)" +
+                "（26-28 全自动 / 33+ 密码回填；结果主线程回调收敛）",
+        )
+        return try {
+            wm.startLocalOnlyHotspot(localOnlyCallback, mainHandler)
+            // 真异步：同步返回 pending 标记，最终结果由 localOnlyCallback 收敛（不在此同步返回）
+            HotspotResult(success = false, error = LOCAL_ONLY_PENDING)
+        } catch (e: Exception) {
+            // 不吞异常：记录 + 如实透传（含异常类；如 SecurityException / UnsupportedOperationException）
+            DiagLogger.log(tag, "L2_LOCAL_ONLY startLocalOnlyHotspot 调用异常（不吞）: $e")
+            HotspotResult(
+                success = false,
+                error = "LocalOnlyHotspot 启动异常: ${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
+    }
+
+    /**
+     * ③ L2 系统回调（startLocalOnlyHotspot 结果；经 mainHandler 主线程回调）：
+     * onStarted → 三版本分流（26-28 全自动 / 33+ 密码回填）；onFailed → 失败透传（含系统 reason）；
+     * onStopped → 释放持有并收敛（等待期被系统停止时按失败处理）。
+     */
+    @Suppress("DEPRECATION") // LocalOnlyHotspotCallback 与 startLocalOnlyHotspot 同源弃用（API 33+），26+ 唯一公开路径
+    private val localOnlyCallback = object : LocalOnlyHotspotCallback() {
+        override fun onStarted(reservation: LocalOnlyHotspotReservation) {
+            handleLocalOnlyStarted(reservation)
+        }
+
+        override fun onStopped() {
+            handleLocalOnlyStopped()
+        }
+
+        override fun onFailed(reason: Int) {
+            handleLocalOnlyFailed(reason)
+        }
+    }
+
+    /** ③ onStarted 收敛（主线程）：持有 reservation → 三版本分流（26-28 全自动 / 33+ 请求密码回填）。 */
+    @Suppress("DEPRECATION") // reservation.wifiConfiguration 为 WifiConfiguration 旧 API（26+ 公开），软 AP 密码回传行为随版本分流
+    private fun handleLocalOnlyStarted(reservation: LocalOnlyHotspotReservation) {
+        localOnlyReservation = reservation // 持有到组网收尾（B4 正式收尾前由 [stopLocalOnly] 释放）
+        val sdk = Build.VERSION.SDK_INT
+        val cfg = try {
+            reservation.wifiConfiguration
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted 读 wifiConfiguration 异常: $e")
+            null
+        }
+        val ssid = cfg?.SSID?.trim()?.removeSurrounding("\"") ?: ""
+        if (ssid.isBlank()) {
+            DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted：SSID 缺失（系统未下发），按失败处理")
+            dispatchLocalOnlyResult(
+                HotspotResult(success = false, error = "LocalOnlyHotspot 已启动但 SSID 缺失"),
+            )
+            return
+        }
+        // sdk 26–28：公开 API 26+ 可读 preSharedKey（系统随机密码）→ 全自动成功
+        if (sdk in 26..28) {
+            val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")
+            if (pwd.isNullOrBlank()) {
+                DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted(sdk=$sdk)：preSharedKey 缺失（系统未下发密码），按失败处理")
+                dispatchLocalOnlyResult(
+                    HotspotResult(success = false, ssid = ssid, error = "LocalOnlyHotspot 已启动但系统未下发密码"),
+                )
+                return
+            }
+            val ip = collectHotspotIp()
+            DiagLogger.log(
+                tag,
+                "L2_LOCAL_ONLY 自动路径成功：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
+            )
+            dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
+            return
+        }
+        // sdk 33+：App 侧密码不可读（软 AP 配置不回传密码；系统弹窗/通知展示 SSID 与密码）→
+        // 触发 UI 请用户按系统弹窗回填密码，完成经 [completeLocalOnlyPassword] 收敛
+        pendingLocalOnlySsid = ssid
+        DiagLogger.log(
+            tag,
+            "L2_LOCAL_ONLY(sdk=$sdk)：密码不可读（系统弹窗/通知展示），触发 onLocalOnlyPasswordRequest(ssid=$ssid) 请用户回填",
+        )
+        listener.onLocalOnlyPasswordRequest(ssid)
+        // 等待 completeLocalOnlyPassword(pwd) 收敛（pendingLocalOnlyCb 保留；状态机步骤超时已放宽 120s）
+    }
+
+    /** ③ onFailed 收敛（主线程）：系统 reason 映射为可读文案，失败透传交状态机降级 ④。 */
+    private fun handleLocalOnlyFailed(reason: Int) {
+        val text = localOnlyErrorText(reason)
+        DiagLogger.log(tag, "L2_LOCAL_ONLY onFailed(reason=$reason:$text)，失败透传（降级 ④）")
+        dispatchLocalOnlyResult(
+            HotspotResult(success = false, error = "LocalOnlyHotspot 启动失败($text)"),
+        )
+    }
+
+    /** ③ onStopped 收敛（主线程）：释放持有；若仍在等待（onStarted 后密码未回填）按失败收敛。 */
+    private fun handleLocalOnlyStopped() {
+        localOnlyReservation = null
+        if (pendingLocalOnlyCb != null) {
+            DiagLogger.log(tag, "L2_LOCAL_ONLY onStopped（等待密码回填期间被系统停止），按失败收敛")
+            dispatchLocalOnlyResult(HotspotResult(success = false, error = "LocalOnlyHotspot 已停止"))
+        } else {
+            DiagLogger.log(tag, "L2_LOCAL_ONLY onStopped（无待收敛结果，仅记录释放）")
+        }
+    }
+
+    /**
+     * ③ L2 结果收敛（主线程）：释放 pending 状态与异步闸 → 回调 [pendingLocalOnlyCb]
+     * （状态机 onLocalOnlyAsyncResult；回调侧自行校验当前状态，可能已被 cancel/超时置空而忽略）。
+     */
+    private fun dispatchLocalOnlyResult(result: HotspotResult) {
+        pendingLocalOnlySsid = null
+        val cb = pendingLocalOnlyCb
+        pendingLocalOnlyCb = null
+        asyncRunning.set(false) // L2 真异步收敛时统一释放 isRunning（防等待期重复启动）
+        cb?.invoke(result)
+        if (cb == null) {
+            DiagLogger.log(
+                tag,
+                "L2_LOCAL_ONLY 结果无可收敛回调（pendingLocalOnlyCb=null，可能已取消/停止），仅记录 success=${result.success}",
+            )
+        }
+    }
+
+    /** ③ onFailed reason → 可读文案。
+     * 框架常量（WifiManager.LOCAL_ONLY_HOTSPOT_ERROR_*）在 compileSdk37（AGP9 内置 jar）对 Kotlin 不可见，
+     * 改用 AOSP 字面量（1/2/3/4，API 26+ 稳定；含 API 33+ 新增 ERROR_TETHERING_DISALLOWED）。 */
+    private fun localOnlyErrorText(reason: Int): String = when (reason) {
+        1 -> "ERROR_GENERIC"
+        2 -> "ERROR_NO_CHANNEL"
+        3 -> "ERROR_INCOMPATIBLE_MODE"
+        4 -> "ERROR_TETHERING_DISALLOWED"
+        else -> "未知($reason)"
+    }
+
+    /**
+     * ③ sdk 33+ 密码回填（引擎在用户按系统弹窗回填后调用，主线程）：校验非空后完成
+     * L2 成功结果（ssid / pwd=用户登记值 / ip=采集）并收敛 [pendingLocalOnlyCb]
+     * （状态机 onLocalOnlyAsyncResult → onHotspotReady 发 offer）。密码全程不回显。
+     */
+    fun completeLocalOnlyPassword(pwd: String) {
+        val ssid = pendingLocalOnlySsid
+        if (ssid.isNullOrBlank()) {
+            DiagLogger.log(tag, "completeLocalOnlyPassword 忽略：无待回填的 L2 流程（pendingLocalOnlySsid=null）")
+            return
+        }
+        if (pwd.isBlank()) {
+            DiagLogger.log(tag, "completeLocalOnlyPassword：密码为空，保持等待回填（不收敛）")
+            return
+        }
+        pendingLocalOnlySsid = null
+        val ip = collectHotspotIp()
+        DiagLogger.log(
+            tag,
+            "L2_LOCAL_ONLY 回填路径成功：ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
+        )
+        dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
+    }
+
+    /**
+     * ③ L2 本地热点收尾预留入口（B4 正式收尾前：reservation 持有与 close 入口；幂等）：
+     * 关闭 [localOnlyReservation]（系统随后回调 onStopped → 释放持有并收敛待定结果），
+     * 并清理待收敛的 L2 pending（等待系统回调/密码回填期间被中止时，防止异步闸与回调悬挂
+     * 阻塞后续启动）。引擎在组网中止/结束（onAbort、stopAllBle）接线调用。
+     */
+    fun stopLocalOnly() {
+        val r = localOnlyReservation
+        localOnlyReservation = null
+        if (r != null) {
+            try {
+                r.close()
+                DiagLogger.log(tag, "stopLocalOnly：已 close LocalOnlyHotspotReservation（B4 正式收尾前预留释放入口）")
+            } catch (e: Exception) {
+                DiagLogger.log(tag, "stopLocalOnly：close 异常（不吞）: $e")
+            }
+        } else {
+            DiagLogger.log(tag, "stopLocalOnly：无持有中的 LocalOnlyHotspotReservation（幂等 no-op）")
+        }
+        // 收尾兜底：无论是否持有 reservation，清理待收敛状态（含等待系统回调但未收到任何回执的场景）
+        pendingLocalOnlySsid = null
+        val cb = pendingLocalOnlyCb
+        pendingLocalOnlyCb = null
+        asyncRunning.set(false)
+        if (cb != null) {
+            DiagLogger.log(tag, "stopLocalOnly：清理待收敛的 L2 回调（原等待被中止，结果不再上抛）")
+        }
+    }
+
     /**
      * 取热点本机 IPv4（② 用；NetworkInterface 枚举按热点网段打分）：
      * 枚举全部接口，按接口名/网段打分（ap 系 +100、192.168.43.x 默认热点网段 +50、
@@ -486,6 +772,9 @@ class HotspotManager(
 
         /** ② 私有 API 前置缺失标记（error 字段，等待 WRITE_SETTINGS 授权后重试）。 */
         private const val AWAITING_WRITE_SETTINGS = "AwaitingWriteSettings"
+
+        /** ③ L2 真异步 pending 标记（startSyncInternal 同步返回；最终结果由 LocalOnlyHotspotCallback 收敛）。 */
+        private const val LOCAL_ONLY_PENDING = "LocalOnlyPending"
 
         /** ② 反射 setWifiApEnabled 后轮询 isWifiApEnabled 的最长等待（任务约定 ≤5s）。 */
         private const val PRIVATE_AP_POLL_TIMEOUT_MS: Long = 5_000L

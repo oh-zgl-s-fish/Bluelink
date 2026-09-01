@@ -110,6 +110,12 @@ class BluelinkUiState {
     /** WRITE_SETTINGS 授权引导对话框（Android 8–10 接入路径，onNeedWriteSettingsPermission 触发）。 */
     var writeSettingsDialog by mutableStateOf(false)
 
+    /** ③ L2 本地热点（13+）密码登记框是否可见（HotspotManager.onLocalOnlyPasswordRequest 触发）。 */
+    var localOnlyPwdDialog by mutableStateOf(false)
+
+    /** ③ L2 本地热点（13+）系统弹窗/通知展示的 SSID（登记框提示用；密码需用户按系统弹窗回填）。 */
+    var localOnlySsid by mutableStateOf<String?>(null)
+
     /**
      * WifiJoiner 权限前置缺失的运行时权限（onNeedPermission 置位；BluelinkRoot 观察此字段发起
      * 系统授权弹窗，请求结果回来后 engine 经 [joinRetryNeeded] 自动重试 join；授权后复位）。

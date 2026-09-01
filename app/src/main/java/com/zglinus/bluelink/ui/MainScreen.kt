@@ -491,6 +491,7 @@ fun DeviceDetailSheet(
         if (engine.ui.manualPwdDialog) ManualPwdDialog(engine)
         if (engine.ui.joinFailDialog) JoinFailDialog(engine)
         if (engine.ui.writeSettingsDialog) WriteSettingsDialog(engine)
+        if (engine.ui.localOnlyPwdDialog) LocalOnlyPwdDialog(engine)
     }
 }
 
@@ -536,6 +537,47 @@ private fun ManualPwdDialog(engine: BluelinkEngine) {
         },
         dismissButton = {
             TextButton(onClick = { ui.manualPwdDialog = false }) { Text("取消") }
+        },
+    )
+}
+
+/** ③ L2 本地热点（13+）密码登记框：系统弹窗/通知已展示 SSID 与密码，请用户按系统弹窗回填密码（确认走 confirmLocalOnlyPwd）。 */
+@Composable
+private fun LocalOnlyPwdDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.localOnlyPwdDialog = false },
+        title = { Text("本地热点密码登记（③）") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "系统已弹出本地热点通知/弹窗，展示 SSID 与密码：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "SSID：${ui.localOnlySsid ?: "未知"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = "请查看系统通知中的密码并填写如下：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = ui.manualPwdInput,
+                    onValueChange = { ui.manualPwdInput = it },
+                    label = { Text("热点密码（按系统弹窗）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmLocalOnlyPwd() }) { Text("确认") }
+        },
+        dismissButton = {
+            TextButton(onClick = { ui.localOnlyPwdDialog = false }) { Text("取消") }
         },
     )
 }

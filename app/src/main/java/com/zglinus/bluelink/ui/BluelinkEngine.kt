@@ -49,6 +49,9 @@ import org.json.JSONObject
  *
  * A5 组网接线（异网设备组建临时局域网，A 包收官）：
  * - [HotspotManager]（A3b）：④ 手动路径 onManualRequest → ui.manualPwdDialog；
+ * - ③ L2 本地热点（B3）：26-28 全自动；13+ onLocalOnlyPasswordRequest → ui.localOnlyPwdDialog
+ *   （用户按系统弹窗回填密码 → confirmLocalOnlyPwd → completeLocalOnlyPassword）；
+ *   reservation 收尾经 stopLocalOnly（onAbort / stopAllBle 接线，B4 正式收尾前预留释放入口）；
  * - [NetworkingStateMachine]（A3c）：点「组建临时局域网」→ 按本机/对端能力仲裁后创建，
  *   阶段经轮询 [NetworkingStateMachine.currentState] 映射到 [BluelinkUiState.netState]；
  * - [WifiJoiner]（A4）：对端流程收到 offer → join，结果 onJoined/onFailed 回灌状态机；
@@ -239,8 +242,9 @@ class BluelinkEngine(private val context: Context) {
     }
 
     /**
-     * 热点管理器（A3b）：① root 真路径，② 私有 API 反射真路径（B2），③ 本包 stub 降级，
-     * ④ 手动路径触发 UI 密码登记。
+     * 热点管理器（A3b）：① root 真路径，② 私有 API 反射真路径（B2），③ Local-only 本地热点真路径
+     * （B3：startLocalOnlyHotspot 三版本分流——26-28 全自动 / 29-32 盲区禁用 / 33+ 密码回填，
+     * 见 HotspotManager.tryLocalOnlyHotspot），④ 手动路径触发 UI 密码登记。
      * Bluelink ANR 修复（构造/回调兼容确认）：L1_ROOT / L1_PRIVATE_API 均改由
      * [HotspotManager.startAsync] 后台线程执行、主线程回调——mainHandler 由 HotspotManager
      * 内部经 Looper.getMainLooper() 自建，无需注入；本构造（listener + context=null）下
@@ -272,6 +276,17 @@ class BluelinkEngine(private val context: Context) {
             ui.writeSettingsDialog = true
             ui.netState = "开启热点需「修改系统设置」（WRITE_SETTINGS）授权，请授权后重试"
         }
+
+        override fun onLocalOnlyPasswordRequest(ssid: String) {
+            // ③ L2 本地热点（13+，sdk 33+）：系统弹窗/通知已展示 SSID 与密码，App 侧密码不可读
+            // （软 AP 配置不回传密码）——弹出密码登记框（标题带 SSID），请用户按系统弹窗回填；
+            // 确认后经 confirmLocalOnlyPwd → HotspotManager.completeLocalOnlyPassword 完成成功结果。
+            DiagLogger.log(TAG, "③ L2 本地热点请求回填密码（13+ 系统弹窗展示）：ssid=$ssid")
+            ui.localOnlyPwdDialog = true
+            ui.localOnlySsid = ssid
+            ui.manualPwdInput = "" // 新流程清空上次输入
+            ui.netState = "本地热点已启动（SSID=$ssid）：请按系统弹窗密码回填登记"
+        }
     })
 
     /** 组网状态机回调（A3c）：offer→WifiJoiner 接入；传输就绪；中止收敛（置空机器 + 停轮询）。 */
@@ -293,6 +308,10 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "组网中止: $reason")
             netStateMachine = null // 允许再次「组建临时局域网」（下次 start 新建机器）
             mainHandler.removeCallbacks(netPoller)
+            // ③ L2 本地热点收尾预留（B4 正式收尾前）：中止/结束时释放 LocalOnlyHotspotReservation
+            // 并清理待收敛的 L2 pending（幂等；无 L2 时为 no-op，不影响 ①②④）
+            hotspotManager.stopLocalOnly()
+            ui.localOnlyPwdDialog = false
             ui.netActive = false
             ui.netState = "组网已中止：$reason"
         }
@@ -630,6 +649,23 @@ class BluelinkEngine(private val context: Context) {
         ui.manualPwdDialog = false
     }
 
+    /**
+     * ③ L2 本地热点（13+）密码登记框确认：用户按系统弹窗/通知回填密码 → 回填
+     * [HotspotManager.completeLocalOnlyPassword] 完成成功结果（状态机 onLocalOnlyAsyncResult → offer）。
+     */
+    fun confirmLocalOnlyPwd() {
+        val pwd = ui.manualPwdInput.trim()
+        if (pwd.isBlank()) {
+            DiagLogger.log(TAG, "③ L2 本地热点密码为空，保持登记框等待回填")
+            ui.netState = "本地热点密码为空，请按系统弹窗回填"
+            return
+        }
+        val ssid = ui.localOnlySsid
+        DiagLogger.log(TAG, "③ L2 本地热点密码回填：ssid=$ssid pwdLen=${pwd.length}（密码不回显）")
+        hotspotManager.completeLocalOnlyPassword(pwd)
+        ui.localOnlyPwdDialog = false
+    }
+
     /** 接入失败对话框「重试接入」：用用户手填密码重新 join 最近一次 offer 的 SSID。 */
     fun retryJoin(pwd: String) {
         ui.joinFailDialog = false
@@ -737,6 +773,8 @@ class BluelinkEngine(private val context: Context) {
     private fun stopAllBle() {
         DiagLogger.log(TAG, "停止 BLE：广播/扫描/GATT Server/客户端")
         netStateMachine?.cancel() // A5：收尾/关停时取消组网（发 abort → 置空机器）
+        // ③ L2 本地热点收尾预留（B4 正式收尾前释放入口；幂等；stopAllBle 覆盖 release() 收尾路径）
+        hotspotManager.stopLocalOnly()
         wifiJoiner.cancel() // 释放进行中的接入 / 残留 NetworkCallback
         advertiser.stop()
         scanner.stop()

@@ -26,6 +26,7 @@ class BleScanner(
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            Log.i(TAG, "onScanResult device=${result.device?.address} rssi=${result.rssi}")
             mainHandler.post { callbacks.onScanResult(result) }
         }
 

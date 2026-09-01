@@ -7,3 +7,4 @@ captures
 .kotlin
 .externalNativeBuild
 .cxx
+releases/

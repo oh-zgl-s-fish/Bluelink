@@ -27,7 +27,7 @@ BLE 广播/扫描 → GATT 握手(网络状态/IP/指纹/PIN/root能力)
 
 | 能力 | Android 8–11 | Android 12+ | Android 13+ |
 |---|---|---|---|
-| BLE 广播/扫描/GATT | `ACCESS_FINE_LOCATION` | + `BLUETOOTH_SCAN/CONNECT/ADVERTISE` | 同左 |
+| BLE 广播/扫描/GATT | `ACCESS_FINE_LOCATION` | + `BLUETOOTH_SCAN`(**neverForLocation**)/CONNECT/ADVERTISE | 同左 |
 | 开 LocalOnlyHotspot | `ACCESS_FINE_LOCATION` | 同左 | `NEARBY_WIFI_DEVICES`(neverForLocation) |
 | 连接热点 | 8–9: `WRITE_SETTINGS`+`addNetwork`；10–11: `WifiNetworkSpecifier` | 同 10–11 | `NEARBY_WIFI_DEVICES` |
 | 文件 | 8–10: `READ/WRITE_EXTERNAL_STORAGE` | 11+: `MANAGE_EXTERNAL_STORAGE`(特殊权限) | 同左 |
@@ -281,6 +281,7 @@ Root 模式可越过多数权限（`pm grant` / `appops set` / shell uid 自带�
 | 19 | 真机验证授权 | 仅只读验证；开热点/连 Wi-Fi/切网等状态变更由用户手动实测 |
 | 20 | LocalSend 协议 | 仅 v2（与官方互通），不做 v3 |
 | 21 | 仓库 | git init + 推远端（远端地址待定） |
+| 22 | BLE 扫描权限 | `BLUETOOTH_SCAN` 加 `neverForLocation`（12+ 无需定位权限即可投递扫描结果；本 App 不派生位置） |
 
 ## 7. Root 增强（可选）命令矩阵
 
@@ -313,6 +314,14 @@ Root 模式可越过多数权限（`pm grant` / `appops set` / shell uid 自带�
 - 8.0 无 `cmd wifi`/`cmd bluetooth_manager` shell 快路径，热点与连网只能走**反射 hidden API** 或**直控底层**两条路
 - 连热点推荐 **LocalSocket 直连 `@android:wpa_wlan0`**（Android `LocalSocket` 即可连，无需 wpa_cli 二进制，走 Ctrl_Interface 协议 ADD_NETWORK/SET_NETWORK/ENABLE_NETWORK）——此路径已在设备上确认目标 socket 存在且 root 可连
 - 备选：改 `WifiConfigStore.xml`（写 SSID+PSK）后重启 wifi；开热点：反射 `setWifiApEnabled`（有 CHANGE_WIFI_STATE 即可）或改 `softap.conf` + `svc wifi` 重启
+
+### 7.2 真机排障 · 2026-09-01（两台 Android 12+）
+
+- **现象**：双机 App 均广播成功（状态卡无错误红字），扫描列表为空，无扫描异常提示
+- **根因**：`BLUETOOTH_SCAN` 未声明 `usesPermissionFlags="neverForLocation"` → Android 12+ 将扫描结果视为位置数据，应用未授定位权限时**静默不投递**（`startScan` 成功、无回调、无错误；广播走 ADVERTISE 权限不受影响）
+- **修复（v0.1.1）**：Manifest `BLUETOOTH_SCAN` 加 `neverForLocation`；`BleScanner.onScanResult` 增加 `Log.i`（device/rs ssi）供诊断
+- **影响面**：8–11 机型仍需 `ACCESS_FINE_LOCATION`；12+ 不再要求定位
+- **验证状态**：v0.1.1 待双机重测
 
 ## 8. 后续路线（实现分期建议）
 

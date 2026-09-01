@@ -222,7 +222,7 @@ class GattClient(
         bytes: ByteArray,
     ) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeCharacteristic(ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
             } else {
                 @Suppress("DEPRECATION")
@@ -230,26 +230,40 @@ class GattClient(
                 @Suppress("DEPRECATION")
                 gatt.writeCharacteristic(ch)
             }
+            if (ok == false) {
+                // 写入被栈拒绝（未入队）：onCharacteristicWrite 永不会回调，立即 fail，不再等 3s 兜底
+                mainHandler.removeCallbacks(writeTimeoutRunnable)
+                Log.w(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
+                DiagLogger.log(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队），立即判失败")
+                mainHandler.post { fail("写入被栈拒绝(writeCharacteristic 返回 false)") }
+                return
+            }
         } catch (e: Exception) {
             mainHandler.removeCallbacks(writeTimeoutRunnable)
             Log.w(TAG, "writeCharacteristic 异常: $e")
             DiagLogger.log(TAG, "writeCharacteristic 异常: $e")
             fail("写入异常: ${e.message}")
+            return
         }
-        // 写入兜底：发起写后 3s 无 onCharacteristicWrite 回调（栈挂起）则判失败；回调/cleanup 撤除
+        // 写入兜底：仅当写入成功入队后才启动 3s 超时；回调/cleanup 撤除
         mainHandler.postDelayed(writeTimeoutRunnable, WRITE_TIMEOUT_MS)
         DiagLogger.log(TAG, "握手写入已发起，3s 写入兜底超时已启动")
     }
 
     private fun writeDescriptorCompat(gatt: BluetoothGatt, desc: BluetoothGattDescriptor, bytes: ByteArray) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeDescriptor(desc, bytes)
             } else {
                 @Suppress("DEPRECATION")
                 desc.value = bytes
                 @Suppress("DEPRECATION")
                 gatt.writeDescriptor(desc)
+            }
+            if (ok == false) {
+                // CCC 写入失败不阻断主写入，仅记录（订阅可能未生效，回复会走挂起补发路径）
+                Log.w(TAG, "writeDescriptor 返回 false（CCC 写入被栈拒绝，仅记录）")
+                DiagLogger.log(TAG, "writeDescriptor 返回 false（CCC 写入被栈拒绝，仅记录，不阻断主写入）")
             }
         } catch (e: Exception) {
             Log.w(TAG, "writeDescriptor 异常: $e")

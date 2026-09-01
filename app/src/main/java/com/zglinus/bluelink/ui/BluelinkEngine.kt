@@ -88,6 +88,13 @@ class BluelinkEngine(private val context: Context) {
 
     val ui = BluelinkUiState()
 
+    init {
+        // 握手期拒连（地址无关）：把 ui.handshaking 实时状态透传给 GattServer，
+        // 握手进行中（发起置 true / 完成或失败置 false 由现有逻辑维护）对端新连接一律掐断。
+        // ui 声明在 gattServer 之后，故在此 init（ui 已初始化）注册，lambda 每次查询实时值。
+        gattServer.setHandshakingProvider { ui.handshaking }
+    }
+
     private val bleStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val state = intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)

@@ -40,6 +40,14 @@ class GattServer(
     private val subscribedDevices = ConcurrentHashMap<String, Boolean>()
     private val pendingNotify = ConcurrentHashMap<String, ByteArray>()
 
+    /** 握手进行中查询（由 engine 提供，读取 ui.handshaking）；null 视为未握手。 */
+    private var isHandshakingProvider: (() -> Boolean)? = null
+
+    /** 注册握手进行中状态提供者（engine 把 ui.handshaking 实时透传过来）。 */
+    fun setHandshakingProvider(p: (() -> Boolean)?) {
+        isHandshakingProvider = p
+    }
+
     /** 查询某地址是否已连接本机 GATT Server（用于握手仲裁，避免同一设备双连接）。 */
     fun isDeviceConnected(address: String): Boolean = connectedDevices.containsKey(address)
 
@@ -120,8 +128,20 @@ class GattServer(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             mainHandler.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    connectedDevices[device.address] = device
-                    DiagLogger.log(TAG, "${device.address} 已连接 Server")
+                    // 握手期拒连（地址无关）：无论对端随机地址假名如何，握手进行中一律在建立瞬间
+                    // 掐断对端新连接，双连接不可能成形；不加入 connectedDevices 避免脏状态
+                    if (isHandshakingProvider?.invoke() == true) {
+                        DiagLogger.log(TAG, "握手进行中，拒绝/断开新连接 ${device.address}")
+                        try {
+                            gattServer?.cancelConnection(device)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "cancelConnection 异常: $e")
+                            DiagLogger.log(TAG, "cancelConnection 异常: $e")
+                        }
+                    } else {
+                        connectedDevices[device.address] = device
+                        DiagLogger.log(TAG, "${device.address} 已连接 Server")
+                    }
                 } else {
                     connectedDevices.remove(device.address)
                     subscribedDevices.remove(device.address)

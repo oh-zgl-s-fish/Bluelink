@@ -90,3 +90,13 @@ IDLE ──用户确认──▶ NEGOTIATING(角色裁定/可切换)
 2. 12+ 测试机：③ 在 10–12 直接禁用 → 验证 ④ 手动开热点 + 回填 + BLE 转达路径
 3. ② 私有 API 不预验：运行时 try/catch 实测，纳入排障手册按机型回填结果
 4. 13+ 设备（后续有机器时）：③ 弹窗回填路径
+---
+
+## 11. 热点最终方案（2026-09-01 决策定稿）
+
+- **主线**：③ LocalOnlyHotspot——8-9 自动读密码（全自动）；13+ 系统弹窗+App 登记回填（自动开+抄密码一次）；10-12 密码盲区禁用
+- **兜底**：④ 手动系统热点（全版本；10-12 现实出口）
+- **② 私有 API**：仅保留「开启/关闭」能力，可用版本（8-9，targetSdk27 legacy 豁免）直接反射；其余版本 try 失败即降级（Android 12 blacklist 无条件拦截已实测）
+- **root 路线废弃**（A15/KernelSU 上 cmd wifi 残缺+反射方法移除，已删 B1）
+- **Shizuku / Binder 直呼 connectivity.startTethering：暂不引入**（MacroDroid 逆向作为技术档案；结论存档于 docs/macrodroid-notes.md）
+- targetSdk=27 保留（② 8-9 路径需要 legacy 豁免；对 ③ ④ 无副作用）

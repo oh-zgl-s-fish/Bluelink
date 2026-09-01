@@ -1,7 +1,7 @@
 # Bluelink
 
 > 正式命名：**Bluelink**（包名 `com.zglinus.bluelink`）。
-> 状态：**热点全版本自动链路成型**（v0.3.9.2，2026-09-01）：②' 系统热点自动开（k1/c 按名枚举，sdk26-33）→ ③ LocalOnlyHotspot **全版本统一先试读 preSharedKey**（**A15 实测自动读密码成功**；A12/sdk31 放行实测定案盲区与否）→ ④ 手动兜底；组网链路 OFFER_SENT 等 joined 对齐 120s（对端点系统弹窗）；同网复核放宽至子网一致（v0.4.0 进行中，probe 53317 暂不阻塞）。工程根：/srv/android/bluelink。
+> > 状态：**异网组网闭环完全体**（v0.4.1，2026-09-01）：BLE 握手→仲裁→②'系统热点/k1 式或 ③ LocalOnly（**A12 实测密码自动读取，全版本自动**）→offer→对端 Specifier 接入→joined→**热点方复核直接放行→TRANSPORT**；同网复核子网一致兜底。工程根：/srv/android/bluelink。
 
 Android 8+（API 26+）设备间文件传输客户端：
 

@@ -41,3 +41,14 @@ wifi / WifiAPState / ForceLegacy / com.arlosoft.macrodroid.MACRO_NAME
 
 ## 素材位置
 - `/root/user/macrodroid/`：macrodroid.apk（89MB）、apk/（11 dex）、set_hotspot_action.txt（4499 行）、hotspot-symbols.txt（378 行）
+---
+
+## 追加（2026-09-01 第三次逆向确证，推翻早前"无特权不可行"推断）
+
+- **sdk<34（含 Android 12）路径 = 无条件 Binder 直连常规热点**，无 Shizuku/ADB/root 门槛：
+  - `WifiHotspotService`：反射 `IConnectivityManager.startTethering(int,ResultReceiver,boolean)` / `setWifiApEnabled`（ForceLegacy）/ `stopTethering`
+  - Legacy `D1→T1/V1`：`ServiceManager.getService("tethering")` → `ITetheringConnector$Stub.asInterface`（transact，非 hidden API）→ `TetheringRequestParcel{type=0, provisioningUi=false}` → `startTethering(parcel, 包名, null, 回调)`（sdk31+ 四参）
+  - 全程无权限预检；失败 catch 仅记日志；Shizuku 仅 sdk36 机制0
+- **"无 Shizuku 也能开"正解**：Stock A12 放行 TETHER_PRIVILEGED / **NEARBY_WIFI_DEVICES（运行时危险权限，普通 App 可申请）** / system；OEM ROM 常放松
+- **对 Bluelink 的意义**：Binder 直呼 `ITetheringConnector.startTethering`（transact 不受 hidden API 限制）= 10-13 无特权自动常规热点（有外网）的**可行新路径**（开的是系统预配置热点，密码仍盲 → 回填或 root 读）；sdk34+ MakroDroid 已切无障碍点磁贴或 Shizuku（不裸调）
+- 建议：10-13 段增强 = ② 加 Binder 直呼分支 + NEARBY_WIFI_DEVICES/WRITE_SETTINGS 前置 + 失败显式上报；sdk<34 直连、34+ 维持 LocalOnly

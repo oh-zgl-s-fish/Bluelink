@@ -47,7 +47,8 @@ enum class NetState {
  * - IDLE → `start()` → NEGOTIATING（记录仲裁结果并分流）；
  * - 热点方（`Decision.who == ME`）：
  *   NEGOTIATING → HOTSPOT_STARTING（逐级 [HotspotStartLevel.L1_ROOT]→[HotspotStartLevel.L1_PRIVATE_API]
- *   →[HotspotStartLevel.L2_LOCAL_ONLY]→[HotspotStartLevel.MANUAL]，逐级失败自动降级下一级）
+ *   →[HotspotStartLevel.L2_LOCAL_ONLY]→[HotspotStartLevel.MANUAL]，逐级失败自动降级下一级；
+ *   ①② 均经异步桥 [HotspotManager.startAsync] 后台执行、主线程回调收敛，见 [tryStartLevel]）
  *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（15s 等 joined）
  *   → 收到 joined → JOINED（同网复核 SameLanChecker+probeTcp 占位）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
@@ -271,10 +272,12 @@ class NetworkingStateMachine(
      * 逐级尝试启动热点：L1_ROOT → L1_PRIVATE_API → L2_LOCAL_ONLY → MANUAL。
      * 每级失败自动降级下一级；MANUAL 返回 "AwaitingManual" 时进入等待回填。
      *
-     * L1_ROOT（Bluelink ANR 修复，异步桥）：改调 [HotspotManager.startAsync]——矩阵（su/IO，
-     * [RootSoftAp] 预算 ≤10s）在 HotspotManager 后台线程执行，结果经主线程回调
-     * [onL1RootAsyncResult] 收敛（成功走 offer / 失败降级 ②）；本方法 L1_ROOT 分支立即返回，
-     * 不阻塞主线程。15s 步骤超时保留兜底：矩阵超预算 → onStepTimeout → abort，不卡死；
+     * L1_ROOT / L1_PRIVATE_API（Bluelink ANR 修复，异步桥）：①② 均改调 [HotspotManager.startAsync]
+     * ——L1_ROOT 矩阵（su/IO，[RootSoftAp] 预算 ≤10s）与 L1_PRIVATE_API 反射（WRITE_SETTINGS 前置 +
+     * 反射 + 轮询 ≤5s）均在 HotspotManager 后台线程执行，结果经主线程回调
+     * [onL1RootAsyncResult] / [onPrivateApiAsyncResult] 收敛（成功走 offer / 失败降级下一级）；
+     * 本方法 L1_ROOT / L1_PRIVATE_API 分支立即返回，不阻塞主线程。
+     * 15s 步骤超时保留兜底：矩阵超预算 → onStepTimeout → abort，不卡死；
      * 回调到达时若已非 HOTSPOT_STARTING（cancel/切角色/超时 abort）则忽略（防重入/时序漂移）。
      */
     private fun tryStartLevel(level: HotspotStartLevel) {
@@ -287,6 +290,12 @@ class NetworkingStateMachine(
             return
         }
 
+        // ---- L1_PRIVATE_API 异步桥（② 也走异步桥，仿 ① L1_ROOT）：反射/轮询后台执行，结果主线程回调 ----
+        if (level == HotspotStartLevel.L1_PRIVATE_API) {
+            hotspot.startAsync(HotspotStartLevel.L1_PRIVATE_API) { result -> onPrivateApiAsyncResult(result) }
+            return
+        }
+
         val result = hotspot.start(level)
         if (result.success) {
             DiagLogger.log(tag, "热点启动成功 level=$level ssid=${result.ssid} pwdLen=${result.pwd?.length ?: 0}")
@@ -295,8 +304,10 @@ class NetworkingStateMachine(
         }
         DiagLogger.log(tag, "热点启动失败 level=$level error=${result.error}")
         when (level) {
-            // L1_ROOT 已由上方异步桥分支处理（return），不在同步降级链内
-            HotspotStartLevel.L1_PRIVATE_API -> tryStartLevel(HotspotStartLevel.L2_LOCAL_ONLY)
+            // L1_ROOT / L1_PRIVATE_API 已由上方异步桥分支处理（return），不在同步降级链内
+            HotspotStartLevel.L1_ROOT, HotspotStartLevel.L1_PRIVATE_API -> {
+                DiagLogger.log(tag, "等级 $level 不应出现在同步降级链（异步桥已 return），忽略")
+            }
             HotspotStartLevel.L2_LOCAL_ONLY -> tryStartLevel(HotspotStartLevel.MANUAL)
             HotspotStartLevel.MANUAL -> {
                 if (result.error == AWAITING_MANUAL) {
@@ -339,6 +350,36 @@ class NetworkingStateMachine(
             "热点启动失败 level=${HotspotStartLevel.L1_ROOT} error=${result.error}，降级下一级 ②",
         )
         tryStartLevel(HotspotStartLevel.L1_PRIVATE_API)
+    }
+
+    /**
+     * L1_PRIVATE_API 异步桥结果（② 也走异步桥，仿 ① L1_ROOT；由 [HotspotManager.startAsync]
+     * 经主线程 Handler 回调）：
+     * - 先校验当前状态仍为 [NetState.HOTSPOT_STARTING]（防重入/时序漂移：期间被 cancel/切角色/
+     *   15s 步骤超时 abort 则忽略本次结果）；
+     * - success → 用 result 组装 offer（ssid/pwd/ip 走原 [onHotspotReady] 成功路径）；
+     * - 失败（含 WRITE_SETTINGS 未授权 AwaitingWriteSettings / 反射 NoSuchMethodException /
+     *   轮询超时等）→ 降级下一级 [HotspotStartLevel.L2_LOCAL_ONLY]（③）。
+     */
+    private fun onPrivateApiAsyncResult(result: HotspotResult) {
+        if (state != NetState.HOTSPOT_STARTING) {
+            DiagLogger.log(tag, "L1_PRIVATE_API 异步回调忽略：当前状态 $state（防重入/时序漂移）")
+            return
+        }
+        if (result.success) {
+            DiagLogger.log(
+                tag,
+                "热点启动成功 level=${HotspotStartLevel.L1_PRIVATE_API} ssid=${result.ssid} " +
+                    "pwdLen=${result.pwd?.length ?: 0}",
+            )
+            onHotspotReady(HotspotStartLevel.L1_PRIVATE_API, result.ssid, result.pwd)
+            return
+        }
+        DiagLogger.log(
+            tag,
+            "热点启动失败 level=${HotspotStartLevel.L1_PRIVATE_API} error=${result.error}，降级下一级 ③",
+        )
+        tryStartLevel(HotspotStartLevel.L2_LOCAL_ONLY)
     }
 
     /**

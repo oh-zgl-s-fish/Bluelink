@@ -239,10 +239,13 @@ class BluelinkEngine(private val context: Context) {
     }
 
     /**
-     * 热点管理器（A3b）：①②③ 本包降级，④ 手动路径触发 UI 密码登记。
-     * Bluelink ANR 修复（构造/回调兼容确认）：L1_ROOT 矩阵改由 [HotspotManager.startAsync]
-     * 后台线程执行、主线程回调——mainHandler 由 HotspotManager 内部经 Looper.getMainLooper()
-     * 自建，无需注入；本构造（listener + context=null）与 onHotspotReady 回调路径均不改动。
+     * 热点管理器（A3b）：① root 真路径，② 私有 API 反射真路径（B2），③ 本包 stub 降级，
+     * ④ 手动路径触发 UI 密码登记。
+     * Bluelink ANR 修复（构造/回调兼容确认）：L1_ROOT / L1_PRIVATE_API 均改由
+     * [HotspotManager.startAsync] 后台线程执行、主线程回调——mainHandler 由 HotspotManager
+     * 内部经 Looper.getMainLooper() 自建，无需注入；本构造（listener + context=null）下
+     * ② 的 Context 经 ActivityThread.currentApplication() 兜底（HotspotManager.resolveContext）；
+     * onHotspotReady / onWriteSettingsPermission 回调均为本构造新增/既有接线。
      */
     private val hotspotManager = HotspotManager(object : HotspotListener {
         override fun onManualRequest() {
@@ -258,6 +261,16 @@ class BluelinkEngine(private val context: Context) {
             if (result.success) {
                 ui.netState = "热点已就绪（ssid=${result.ssid}）"
             }
+        }
+
+        override fun onWriteSettingsPermission() {
+            // ② 私有 API 反射热点前置缺失（WRITE_SETTINGS「修改系统设置」AppOps，Android 10+ 反射
+            // setWifiApEnabled 需此权限）：复用现有 WriteSettingsDialog / openWriteSettings 引导。
+            // 授权返回后的重试由现有孤儿兜底覆盖（confirmManualPwd 自动补 startNetworking 重跑 ②；
+            // 状态机中止后重新点击「组建临时局域网」同样重跑 ②——届时 canWrite=true 直接进入反射）。
+            DiagLogger.log(TAG, "② 私有 API 热点需 WRITE_SETTINGS 授权（修改系统设置），引导系统设置")
+            ui.writeSettingsDialog = true
+            ui.netState = "开启热点需「修改系统设置」（WRITE_SETTINGS）授权，请授权后重试"
         }
     })
 

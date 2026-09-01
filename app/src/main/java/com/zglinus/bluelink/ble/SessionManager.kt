@@ -14,8 +14,10 @@ import com.zglinus.bluelink.diag.DiagLogger
  * - [attach]：握手成功回调（BluelinkEngine.applyRemoteHandshake）后调用；本机为 Client
  *   角色时同步调用 GattClient.keepAlive() 把连接从"一次性握手"切换为"会话模式"
  *   （保留连接、NOTIFY 订阅与 WRITE 特征，替代硬 cleanup，必须在握手完成回调链内同步执行）；
- * - [sendSignal]：复用 WRITE 通道——优先本机 Client 腿（写入对端 Server 的 WRITE 特征）；
- *   无 Client 腿（对端主动连入、本机为 Server 角色）时回落本机 Server 的 NOTIFY 通道；
+ * - [sendSignal]：复用 WRITE 通道——优先本机 Client 腿（写入对端 Server 的 WRITE 特征），
+ *   clientLeg 有连接即走 GattClient 串行队列（同连接单写互斥，背靠背写入入队等待不丢信令）；
+ *   仅当 clientLeg 完全不可用（未入会话/无连接/无特征/超单包 MTU）时才回落本机 Server 的
+ *   NOTIFY 通道（对端需已订阅）；
  * - 远程信令分流：GattClient.onCharacteristicChanged / GattServer.onCharacteristicWriteRequest
  *   收到的字节先试 SignalProtocol.decode，成功 → [Callbacks.onRemoteSignal]（经 engine 转发）；
  *   失败 → 维持原握手逻辑（向后兼容，未 attach 时 GattClient/GattServer 行为与一期一致）；
@@ -100,16 +102,21 @@ class SessionManager(
     }
 
     /**
-     * 发送组网信令。复用 WRITE 通道：优先本机 Client 腿（写入对端 Server 的 WRITE 特征）；
-     * 无 Client 腿（对端主动连入，本机为 Server 角色）时回落本机 Server 的 NOTIFY 通道
-     * （对端需已订阅）。未 attach / 无可用通道 / 超单包 MTU / 写入被栈拒绝 → false。
+     * 发送组网信令。clientLeg（本机为 Client，写入对端 Server 的 WRITE 特征）优先：
+     * 有连接即走 GattClient 串行队列（[GattClient.sendSignal]）——背靠背写入入队等待、
+     * onCharacteristicWrite 回调后逐条发送，不再重复走 serverLeg，避免同连接双写踩踏；
+     * 仅当 clientLeg 完全不可用（未入会话 / 无连接 / 无特征 / 超单包 MTU / 写入被栈立即拒绝）
+     * 时才回落本机 Server 的 NOTIFY 通道兜底（对端需已订阅）。
+     * 未 attach / 无可用通道 → false。
      */
     fun sendSignal(msg: SignalMessage): Boolean {
         val peer = peerAddress ?: return false
         if (!attached) return false
         val bytes = SignalProtocol.encode(msg)
         DiagLogger.log(TAG, "sendSignal peer=$peer type=${msg.type} ${bytes.size}B")
+        // clientLeg 有连接即走串行队列（入队等待不算失败）；不可用才回落 serverLeg 兜底
         if (gattClient.sendSignal(bytes)) return true
+        DiagLogger.log(TAG, "sendSignal: clientLeg 不可用（未入会话/无连接/无特征/超单包/被拒），回落 serverLeg 兜底 peer=$peer type=${msg.type}")
         return gattServer.sendSignal(peer, bytes)
     }
 

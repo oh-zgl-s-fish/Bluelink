@@ -37,6 +37,7 @@ import com.zglinus.bluelink.networking.NetState
 import com.zglinus.bluelink.networking.NetworkingStateMachine
 import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
+import org.json.JSONObject
 
 /**
  * 一期 BLE 链路接线（生命周期由 MainActivity 持有）：
@@ -50,6 +51,11 @@ import com.zglinus.bluelink.networking.decide
  *   阶段经轮询 [NetworkingStateMachine.currentState] 映射到 [BluelinkUiState.netState]；
  * - [WifiJoiner]（A4）：对端流程收到 offer → join，结果 onJoined/onFailed 回灌状态机；
  * - ④ 手动流程：密码登记（setPassword + 打开系统热点设置）→ onManualConfigured → offer。
+ *
+ * Bluelink 组网补丁：对端收到 offer 但状态机未启动（netStateMachine==null）或不在等 offer 态时，
+ * offer 会被状态机分发忽略 → 无人 join、无人回 joined、热点方等 joined 超时。
+ * 补丁在 onRemoteSignal 分发点拦截：状态机不在等 offer → [handlePeerOffer] 直接接管
+ * （WifiJoiner.join 接入 + 回 joined{ip}），复用 [SignalProtocol.TYPE_JOINED] 协议载荷。
  *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
@@ -162,6 +168,41 @@ class BluelinkEngine(private val context: Context) {
         }
     }
 
+    /**
+     * 引擎接管 offer 时的 WifiJoiner 结果回调（Bluelink 组网补丁）：
+     * 状态机不在等 offer 态（null / 未启动 / 已中止 / 非等待态）时由 engine 直接接管——
+     * 成功 → 直接发 joined{ip} 回报热点方（复用 [SignalProtocol.TYPE_JOINED] 载荷）；
+     * 失败 → 手动密码重试对话框；Android 8–10 → WRITE_SETTINGS 授权引导。
+     */
+    private val peerOfferJoinCallbacks = object : WifiJoiner.Callbacks {
+        override fun onJoined(ip: String) {
+            DiagLogger.log(TAG, "接管接入成功 ip=${ip.ifEmpty { "<空>" }}，发送 joined 回报热点方")
+            val ok = sessionManager.sendSignal(
+                SignalMessage(SignalProtocol.TYPE_JOINED, JSONObject().put("ip", ip))
+            )
+            if (!ok) {
+                DiagLogger.log(TAG, "joined 回报发送失败（无会话/无通道）")
+                ui.netState = "已接入热点，但 joined 回报发送失败（无会话通道）"
+                return
+            }
+            DiagLogger.log(TAG, "joined 回报已发送 ip=${ip.ifEmpty { "<空>" }}")
+            ui.netState = "已接入热点，等待对方确认（IP：${ip.ifEmpty { "<未知>" }}）"
+        }
+
+        override fun onFailed(reason: String) {
+            DiagLogger.log(TAG, "接管接入失败: $reason")
+            ui.joinFailDialog = true
+            ui.joinFailReason = reason
+            ui.netState = "接入失败：$reason"
+        }
+
+        override fun onNeedWriteSettingsPermission() {
+            DiagLogger.log(TAG, "接管路径 Android 8–10 需要 WRITE_SETTINGS 授权，引导系统设置")
+            ui.writeSettingsDialog = true
+            ui.netState = "接入需 WRITE_SETTINGS 授权（Android 8–10），请先授权后重试"
+        }
+    }
+
     /** 热点管理器（A3b）：①②③ 本包降级，④ 手动路径触发 UI 密码登记。 */
     private val hotspotManager = HotspotManager(object : HotspotListener {
         override fun onManualRequest() {
@@ -208,6 +249,9 @@ class BluelinkEngine(private val context: Context) {
     /** 接入失败/重试的目标 SSID（最近一次 offer 携带）。 */
     private var pendingJoinSsid: String? = null
 
+    /** 引擎接管 offer 去重（Bluelink 组网补丁）：一次会话内最多接管一次；WifiJoiner.join 幂等兜底重复 offer。 */
+    private var peerOfferHandled = false
+
     /**
      * 组网阶段轮询：状态机不暴露状态变化回调（仅 currentState getter），
      * 由 engine 以固定间隔读取并映射到 [BluelinkUiState.netState] / netActive。
@@ -225,7 +269,11 @@ class BluelinkEngine(private val context: Context) {
                 return
             }
             val s = m.currentState
-            ui.netState = netStateText(s)
+            // Bluelink 组网补丁：engine 已接管 offer 时保留接管流程的 UI 文案，
+            // 不被状态机阶段轮询覆盖（状态机本身不在等 offer，其阶段文本无意义）
+            if (!peerOfferHandled) {
+                ui.netState = netStateText(s)
+            }
             ui.netActive = s != NetState.IDLE && s != NetState.TEARDOWN
             if (s == NetState.TRANSPORT || s == NetState.TEARDOWN) {
                 mainHandler.removeCallbacks(this) // 终态：停止轮询（TRANSPORT 保留机器供「结束组网」）
@@ -257,8 +305,22 @@ class BluelinkEngine(private val context: Context) {
                 }
                 ui.lastSignal = peerAddress to msg
                 // A5：转发组网状态机（A3c 按 type 分发 offer/joined/ack/abort；
-                // offer 经状态机回调 onOfferReceived 驱动 WifiJoiner 接入）
-                netStateMachine?.onRemoteSignal(msg)
+                // offer 经状态机回调 onOfferReceived 驱动 WifiJoiner 接入）。
+                // Bluelink 组网补丁：offer 优先给状态机（仅当其处于等 offer 的 NEGOTIATING 态
+                // 才会真正消费）；否则（状态机 null / 非等 offer 态——对端从未触发组网的实锤
+                // 场景）由 engine 直接接管：WifiJoiner 接入 + 回报 joined，避免 offer 被忽略、
+                // 无人 join、热点方等 joined 超时。
+                val m = netStateMachine
+                val machineWaitingOffer = m != null && m.currentState == NetState.NEGOTIATING
+                if (msg.type == SignalProtocol.TYPE_OFFER && !machineWaitingOffer) {
+                    val payload = msg.payload
+                    handlePeerOffer(
+                        ssid = payload?.optString("ssid", "") ?: "",
+                        pwd = payload?.optString("pwd", "") ?: "",
+                    )
+                } else {
+                    netStateMachine?.onRemoteSignal(msg)
+                }
             }
         })
         // 握手期拒连（地址无关）：把 ui.handshaking 实时状态透传给 GattServer，
@@ -480,6 +542,38 @@ class BluelinkEngine(private val context: Context) {
         wifiJoiner.join(ssid, pwd, wifiJoinCallbacks)
     }
 
+    /**
+     * Bluelink 组网补丁：对端收到 offer 但状态机未在等 offer（null / 非 NEGOTIATING 态）时的
+     * engine 直接接管入口（由 onRemoteSignal 分发点调用）。
+     *
+     * 复用 [WifiJoiner.join]（幂等：已有进行中的接入时忽略重复 offer）：
+     * - join 成功 → [peerOfferJoinCallbacks.onJoined] 直接发 joined{ip} 回报热点方
+     *   （载荷与状态机 [NetworkingStateMachine] 的 joined 一致，热点方按既有 onJoined 收敛）；
+     * - 失败 → joinFailDialog 手动输密码重试（复用 [retryJoin]）；Android 8–10 → WRITE_SETTINGS 授权引导。
+     *
+     * 去重：一次会话内 [peerOfferHandled] 置位后忽略后续 offer（避免重复 join / 重复弹窗），
+     * 新会话（重新握手 attach）时重置。
+     */
+    private fun handlePeerOffer(ssid: String, pwd: String) {
+        val s = ssid.trim()
+        if (s.isBlank()) {
+            DiagLogger.log(TAG, "接管 offer：SSID 为空，忽略")
+            return
+        }
+        if (peerOfferHandled) {
+            DiagLogger.log(TAG, "接管 offer：本次会话已处理过（peerOfferHandled），忽略重复 offer ssid=$s")
+            return
+        }
+        peerOfferHandled = true
+        DiagLogger.log(
+            TAG,
+            "接管 offer：ssid=$s pwdLen=${pwd.length}（状态机未在等 offer，engine 直接驱动 WifiJoiner 接入）",
+        )
+        pendingJoinSsid = s
+        ui.netState = "收到组网邀请，正在接入热点…"
+        wifiJoiner.join(s, pwd, peerOfferJoinCallbacks)
+    }
+
     /** 打开系统热点设置（④ 指引；ACTION_WIFI_SETTINGS 兜底，热点入口在 Wi-Fi 设置内）。 */
     fun openHotspotSettings() {
         try {
@@ -582,6 +676,8 @@ class BluelinkEngine(private val context: Context) {
         // 持久信令会话：握手成功（Client 或 Server 任一通道）即 attach；
         // Client 侧由 keepAlive() 保留底层连接替代原硬 cleanup；Server 侧保留连接腿
         sessionManager.attach(deviceAddress)
+        // Bluelink 组网补丁：新会话重置 offer 接管去重（一次会话一次接管）
+        peerOfferHandled = false
         // 信令自测（验证包）：attach 成功后自动开始 120s 心跳收发（每 5s 一条 ping，对端回 pong）
         signalTest.start()
     }

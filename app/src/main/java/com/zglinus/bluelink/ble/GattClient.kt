@@ -22,6 +22,10 @@ import com.zglinus.bluelink.diag.DiagLogger
  * - ATT 操作串行化：服务发现后只写 CCC 订阅，主握手写入等 onDescriptorWrite 确认
  *   CCC 写完后才发起，避免背靠背发起 CCC 与 WRITE 被蓝牙栈单请求串行模型静默丢弃
  *   （onCharacteristicWrite 永不回调）；
+ * - 发送串行队列（同连接单写互斥）：握手写入与会话信令写入共用一条 FIFO 队列 +
+ *   inFlight 标志——同一时刻至多一条 write 在途，其余入队等待，onCharacteristicWrite
+ *   成功/失败回调后出队下一条，杜绝背靠背 writeCharacteristic 被栈单请求模型拒绝
+ *   （真机实锤：pong 回写与定时 ping 背靠背时返回 false 被拒，offer/joined 等信令丢失）；
  * - 回调运行在 Binder 线程，统一切回主线程；disconnect/close 防泄漏；
  * - 持久信令会话（A2）：握手成功后由 SessionManager.attach → keepAlive() 保留连接进入会话
  *   模式（替代硬 cleanup），NOTIFY 收信令 / WRITE 发信令；detach/release 恢复原 cleanup；
@@ -54,6 +58,19 @@ class GattClient(
 
     /** 持久信令会话模式：keepAlive() 进入（替代硬 cleanup），会话期保留连接收发信令。 */
     private var sessionMode = false
+
+    /**
+     * 发送串行队列（同连接单写互斥）：握手写入与信令写入共用，同一时刻至多一条在途，
+     * 其余按序排队，onCharacteristicWrite 回调后出队下一条。解决背靠背 writeCharacteristic
+     * 被 Android 单请求栈拒绝（返回 false）导致信令丢失的问题。
+     */
+    private val writeQueue = ArrayDeque<QueuedWrite>()
+
+    /** 是否有写入在途（onCharacteristicWrite 尚未回调）：互斥核心，true 时新写入只入队。 */
+    private var writeInFlight = false
+
+    /** 在途写入是否为握手写入（决定失败语义与日志标签；仅 writeInFlight=true 时有意义）。 */
+    private var inFlightHandshake = false
 
     /** 当前 ATT MTU（requestMtu 协商结果；未协商/协商失败兜底默认 23）。 */
     private var mtu: Int = DEFAULT_ATT_MTU
@@ -88,6 +105,10 @@ class GattClient(
         sessionMode = false
         mtu = DEFAULT_ATT_MTU
         targetAddress = device.address
+        // 新连接重置发送队列（防御：上一会话遗留的未发送条目一律丢弃）
+        writeQueue.clear()
+        writeInFlight = false
+        inFlightHandshake = false
         Log.d(TAG, "连接 ${device.address} 开始握手")
         DiagLogger.log(TAG, "连接 ${device.address} 开始握手")
         @Suppress("DEPRECATION")
@@ -132,12 +153,14 @@ class GattClient(
     }
 
     /**
-     * 会话期信令发送：复用 WRITE 通道（对端 Server 的 WRITE 特征）。
-     * 未进入会话模式 / 无特征 / 超单包 MTU / 写入被栈拒绝 → false。
+     * 会话期信令发送：复用 WRITE 通道（对端 Server 的 WRITE 特征），经串行队列发送——
+     * 有在途写入时入队等待（返回 true，排队不算失败），onCharacteristicWrite 回调后
+     * 自动出队逐条发送；空闲时立即写入。
+     * 未进入会话模式 / 无特征 / 超单包 MTU / 写入被栈立即拒绝 → false。
      */
     fun sendSignal(bytes: ByteArray): Boolean {
         if (!sessionMode) return false
-        val g = gatt ?: return false
+        if (gatt == null) return false
         val w = pendingWriteChar ?: return false
         val maxPayload = mtu - 3
         if (bytes.size > maxPayload) {
@@ -145,8 +168,9 @@ class GattClient(
             DiagLogger.log(TAG, "信令 ${bytes.size}B 超出会话单包上限 ${maxPayload}B（MTU=$mtu），发送失败")
             return false
         }
-        DiagLogger.log(TAG, "信令写入发起: ${targetAddress} ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
-        return writeCharacteristicCompat(g, w, bytes)
+        DiagLogger.log(TAG, "信令发送: ${targetAddress} ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
+        // 串行队列：有在途写入则入队（排队等待不算失败）；空闲则立即写入
+        return enqueueWrite(w, bytes, handshake = false)
     }
 
     /**
@@ -231,7 +255,7 @@ class GattClient(
                 } else {
                     // 无 CCC 描述符：没有可串行等待的写，直接发起主握手写入
                     DiagLogger.log(TAG, "NOTIFY 特征无 CCC 描述符，跳过订阅写入，直接发起主握手写入")
-                    sendHandshake(gatt, write)
+                    sendHandshake(write)
                 }
             }
         }
@@ -247,7 +271,7 @@ class GattClient(
                 DiagLogger.log(TAG, "CCC 写完(status=$status)，发起主写入")
                 val write = pendingWriteChar
                 if (write != null) {
-                    sendHandshake(gatt, write)
+                    sendHandshake(write)
                 } else {
                     Log.w(TAG, "onDescriptorWrite 无暂存写入特征，跳过握手写入")
                     DiagLogger.log(TAG, "onDescriptorWrite 无暂存写入特征，跳过握手写入")
@@ -263,22 +287,29 @@ class GattClient(
             mainHandler.post {
                 // 写入兜底：无论 status 都撤掉 3s 写入超时（status 已返回，栈未挂起）
                 mainHandler.removeCallbacks(writeTimeoutRunnable)
+                // 串行队列驱动核心：当前写入完成（成功/失败均算完成）→ 清在途标志 → 出队下一条
+                val wasHandshake = inFlightHandshake
+                writeInFlight = false
+                inFlightHandshake = false
                 if (status != BluetoothGatt.GATT_SUCCESS) {
-                    if (sessionMode) {
-                        // 会话期单条信令写失败：仅记录（不断链），链路是否异常由后续断线事件判定
-                        Log.w(TAG, "信令写入失败(status=$status)")
-                        DiagLogger.log(TAG, "信令写入失败(status=$status)")
-                    } else {
+                    if (wasHandshake) {
                         // 握手写入结果确认：失败立即终止，避免干等 10s 超时；
                         // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
                         fail("握手消息发送失败(status=$status)")
+                        return@post
                     }
+                    // 会话期单条信令写失败：仅记录（不断链），链路是否异常由后续断线事件判定；
+                    // 队列中后续信令仍按序继续发送
+                    Log.w(TAG, "信令写入失败(status=$status)")
+                    DiagLogger.log(TAG, "信令写入失败(status=$status)，队列剩余=${writeQueue.size}，继续发送下一条")
                 } else {
                     DiagLogger.log(
                         TAG,
-                        if (sessionMode) "信令写入确认成功 status=$status" else "onCharacteristicWrite 握手写入确认成功 status=$status"
+                        if (wasHandshake) "onCharacteristicWrite 握手写入确认成功 status=$status"
+                        else "信令写入确认成功 status=$status，队列剩余=${writeQueue.size}"
                     )
                 }
+                pumpWriteQueue()
             }
         }
 
@@ -335,8 +366,9 @@ class GattClient(
     /**
      * 串行化后的主握手写入：仅在 CCC 写完成后调用（onDescriptorWrite），
      * 避免与描述符写入背靠背被蓝牙栈单请求模型静默丢弃。
+     * 与信令写入共用同一串行队列（[enqueueWrite]），保证握手/信令写入互斥。
      */
-    private fun sendHandshake(gatt: BluetoothGatt, write: BluetoothGattCharacteristic) {
+    private fun sendHandshake(write: BluetoothGattCharacteristic) {
         // 可能在 cleanup 之后才被回调触发（CCC 写回调延迟到达），入口先拦截
         if (cleaned) return
         val bytes = HandshakeProtocol.encode(HandshakeProtocol.buildLocal(context))
@@ -346,15 +378,67 @@ class GattClient(
             fail("握手消息 ${bytes.size}B 超出当前 MTU ${maxPayload}B")
             return
         }
-        // 内部含返回值检查与 3s 写入兜底启动
-        writeCharacteristicCompat(gatt, write, bytes)
-        DiagLogger.log(TAG, "握手写入已发起: ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
+        DiagLogger.log(TAG, "握手写入入队/发起: ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B，与信令共用串行队列）")
+        enqueueWrite(write, bytes, handshake = true)
+    }
+
+    /**
+     * 串行写入统一入口（信令与握手共用，同连接单写互斥）：
+     * - 已有写入在途（[writeInFlight]）→ 入队等待，返回 true（排队不算失败，
+     *   onCharacteristicWrite 回调后自动出队发送）；
+     * - 空闲 → 置在途标志并立即写入；
+     * - 实际入栈被拒（writeCharacteristic 返回 false）/ 异常 → false（已清在途并尝试出队下一条）。
+     */
+    private fun enqueueWrite(
+        ch: BluetoothGattCharacteristic,
+        bytes: ByteArray,
+        handshake: Boolean,
+    ): Boolean {
+        if (writeInFlight) {
+            writeQueue.addLast(QueuedWrite(ch, bytes, handshake))
+            DiagLogger.log(TAG, "写入入队: 队列长度=${writeQueue.size}（前一条在途，待完成回调后串行发送）")
+            return true
+        }
+        return startWrite(QueuedWrite(ch, bytes, handshake))
+    }
+
+    /** 立即发起一条写入（调用方保证当前无在途写入）。返回是否成功入栈。 */
+    private fun startWrite(q: QueuedWrite): Boolean {
+        val g = gatt
+        if (g == null || cleaned) {
+            DiagLogger.log(TAG, "写入放弃: 连接已清理（${q.bytes.size}B ${if (q.handshake) "握手" else "信令"}）")
+            return false
+        }
+        writeInFlight = true
+        inFlightHandshake = q.handshake
+        DiagLogger.log(TAG, "写入发起: ${if (q.handshake) "握手" else "信令"} ${q.bytes.size}B（队列剩余=${writeQueue.size}）")
+        val ok = writeCharacteristicCompat(g, q.characteristic, q.bytes, q.handshake)
+        if (!ok) {
+            // 入栈被拒/异常：当前写入未在途，清标志后继续出队下一条（队列不因单条失败而阻塞）
+            writeInFlight = false
+            inFlightHandshake = false
+            pumpWriteQueue()
+            return false
+        }
+        return true
+    }
+
+    /**
+     * 出队下一条并发送：由 onCharacteristicWrite 完成回调驱动（成功/失败均触发）；
+     * 入栈被拒时（[startWrite] 返回 false）也会继续出队，直到队列耗尽。
+     */
+    private fun pumpWriteQueue() {
+        if (writeInFlight) return
+        val next = writeQueue.pollFirst() ?: return
+        DiagLogger.log(TAG, "写入出队: 队列剩余=${writeQueue.size} ${if (next.handshake) "握手" else "信令"} ${next.bytes.size}B")
+        startWrite(next)
     }
 
     private fun writeCharacteristicCompat(
         gatt: BluetoothGatt,
         ch: BluetoothGattCharacteristic,
         bytes: ByteArray,
+        handshake: Boolean,
     ): Boolean {
         try {
             val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -368,13 +452,13 @@ class GattClient(
             if (ok == false) {
                 // 写入被栈拒绝（未入队）：onCharacteristicWrite 永不会回调，立即失败，不再等 3s 兜底
                 mainHandler.removeCallbacks(writeTimeoutRunnable)
-                if (sessionMode) {
-                    Log.w(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
-                    DiagLogger.log(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队），发送失败")
-                } else {
+                if (handshake) {
                     Log.w(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
                     DiagLogger.log(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队），立即判失败")
                     mainHandler.post { fail("写入被栈拒绝(writeCharacteristic 返回 false)") }
+                } else {
+                    Log.w(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
+                    DiagLogger.log(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队），发送失败")
                 }
                 return false
             }
@@ -382,13 +466,13 @@ class GattClient(
             mainHandler.removeCallbacks(writeTimeoutRunnable)
             Log.w(TAG, "writeCharacteristic 异常: $e")
             DiagLogger.log(TAG, "writeCharacteristic 异常: $e")
-            if (sessionMode) return false
+            if (!handshake) return false
             fail("写入异常: ${e.message}")
             return false
         }
-        // 写入兜底：仅当写入成功入队后才启动 3s 超时；回调/cleanup 撤除
+        // 写入兜底：仅当写入成功入栈后才启动 3s 超时；回调/cleanup 撤除
         mainHandler.postDelayed(writeTimeoutRunnable, WRITE_TIMEOUT_MS)
-        if (!sessionMode) {
+        if (handshake) {
             DiagLogger.log(TAG, "握手写入已发起，3s 写入兜底超时已启动")
         }
         return true
@@ -435,6 +519,13 @@ class GattClient(
     private fun cleanup() {
         mainHandler.removeCallbacks(timeoutRunnable)
         mainHandler.removeCallbacks(writeTimeoutRunnable)
+        // 清理发送队列：断链/超时/取消时丢弃全部未发送条目（含在途写入之后排队的）
+        if (writeQueue.isNotEmpty()) {
+            DiagLogger.log(TAG, "cleanup 清空发送队列（丢弃 ${writeQueue.size} 条未发送）")
+            writeQueue.clear()
+        }
+        writeInFlight = false
+        inFlightHandshake = false
         val g = gatt
         gatt = null
         cleaned = true
@@ -458,6 +549,13 @@ class GattClient(
             }
         }
     }
+
+    /** 发送队列条目：目标 WRITE 特征 + 字节 + 是否握手写入（握手与信令失败语义不同）。 */
+    private class QueuedWrite(
+        val characteristic: BluetoothGattCharacteristic,
+        val bytes: ByteArray,
+        val handshake: Boolean,
+    )
 
     companion object {
         private const val TAG = "GattClient"

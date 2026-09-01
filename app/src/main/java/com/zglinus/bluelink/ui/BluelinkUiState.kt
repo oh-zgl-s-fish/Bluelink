@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.zglinus.bluelink.ble.HandshakeMessage
+import com.zglinus.bluelink.ble.SignalMessage
 import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.net.NetworkSummary
 
@@ -68,4 +69,36 @@ class BluelinkUiState {
 
     /** 诊断日志弹窗当前展示的文本（打开/刷新时由 UI 侧填充 DiagLogger.dump()）。 */
     var diagnosticText by mutableStateOf("")
+
+    /** 最近一条会话信令（持久信令会话 A2；engine 转发 SessionManager 上抛，供 UI 后续展示）。 */
+    var lastSignal by mutableStateOf<Pair<String, SignalMessage>?>(null)
+
+    // ============ A5 组网（networking）UI 状态 ============
+
+    /** 组网阶段展示文本（engine 轮询状态机 currentState 映射；null = 未组网）。 */
+    var netState by mutableStateOf<String?>(null)
+
+    /** 详情弹层「组建临时局域网」按钮是否可见（异网且已握手，engine 判定）。 */
+    var netBtnVisible by mutableStateOf(false)
+
+    /** 组网进行中（非 IDLE/TEARDOWN；「结束组网」按钮显示依据）。 */
+    var netActive by mutableStateOf(false)
+
+    /** ④ 手动配网密码登记对话框是否可见（HotspotManager.onManualRequest 触发）。 */
+    var manualPwdDialog by mutableStateOf(false)
+
+    /** ④ 手动配网：热点名称输入（占位默认 Bluelink，用户可改）。 */
+    var manualSsidInput by mutableStateOf("Bluelink")
+
+    /** ④ 手动配网 / 接入失败重试：密码输入。 */
+    var manualPwdInput by mutableStateOf("")
+
+    /** 接入失败对话框（WifiJoiner onFailed：系统弹窗未确认/超时等，可手动输密码重试）。 */
+    var joinFailDialog by mutableStateOf(false)
+
+    /** 接入失败原因（WifiJoiner onFailed reason）。 */
+    var joinFailReason by mutableStateOf<String?>(null)
+
+    /** WRITE_SETTINGS 授权引导对话框（Android 8–10 接入路径，onNeedWriteSettingsPermission 触发）。 */
+    var writeSettingsDialog by mutableStateOf(false)
 }

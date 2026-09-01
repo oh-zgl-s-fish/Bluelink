@@ -1,6 +1,7 @@
 package com.zglinus.bluelink.ble
 
 import android.content.Context
+import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
 import com.zglinus.bluelink.diag.DiagLogger
@@ -19,6 +20,7 @@ import java.util.concurrent.TimeUnit
  *   "alias": "<本机别名，默认 Build.MODEL>",
  *   "model": "<Build.MODEL>",
  *   "root": <Boolean 本机 Magisk 探测结果: 可执行 su -c id 校验 uid=0；探测失败/未授权=false>,
+ *   "battery": <Int? 本机电量百分比 0-100；BatteryManager 不可用/异常时为 null>,
  *   "net": {
  *     "wifi": <bool>, "ssid": "<可空>", "ip": "<IPv4 地址,可空>",
  *     "mask": "<子网掩码,可空>", "cellular": <bool>
@@ -38,6 +40,7 @@ data class HandshakeMessage(
     val alias: String = "",
     val model: String = "",
     val root: Boolean = false,
+    val battery: Int? = null,
     val net: NetworkSummary = NetworkSummary(),
 )
 
@@ -49,6 +52,7 @@ object HandshakeProtocol {
     private const val F_ALIAS = "alias"
     private const val F_MODEL = "model"
     private const val F_ROOT = "root"
+    private const val F_BATTERY = "battery"
     private const val F_NET = "net"
     private const val F_WIFI = "wifi"
     private const val F_SSID = "ssid"
@@ -64,8 +68,18 @@ object HandshakeProtocol {
             alias = Build.MODEL,
             model = Build.MODEL,
             root = RootDetector.isRoot(),
+            battery = readBattery(context),
             net = net,
         )
+    }
+
+    /** 读取本机电量百分比（0-100）；BatteryManager 不可用或异常时返回 null。 */
+    private fun readBattery(context: Context): Int? = try {
+        val bm = context.getSystemService(BatteryManager::class.java)
+        bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 }
+    } catch (e: Exception) {
+        Log.w(TAG, "读取电量失败: $e")
+        null
     }
 
     /** 序列化为单行 JSON。 */
@@ -82,6 +96,7 @@ object HandshakeProtocol {
         o.put(F_ALIAS, m.alias)
         o.put(F_MODEL, m.model)
         o.put(F_ROOT, m.root)
+        o.put(F_BATTERY, m.battery ?: JSONObject.NULL)
         o.put(F_NET, net)
         return o.toString()
     }
@@ -111,6 +126,10 @@ object HandshakeProtocol {
             alias = o.optString(F_ALIAS, ""),
             model = o.optString(F_MODEL, ""),
             root = o.optBoolean(F_ROOT, false),
+            battery = o.optString(F_BATTERY)
+                .takeIf { it.isNotBlank() && it != "null" }
+                ?.toIntOrNull()
+                ?.takeIf { it in 0..100 },
             net = NetworkSummary(
                 wifi = net?.optBoolean(F_WIFI, false) ?: false,
                 ssid = net?.optString(F_SSID)?.takeIf { it.isNotBlank() && it != "null" },

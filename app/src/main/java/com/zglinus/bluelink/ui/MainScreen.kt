@@ -28,7 +28,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -343,7 +345,12 @@ private fun EmptyState() {
     }
 }
 
-/** 设备详情弹层：握手详情 JSON 渲染 + 同网判定结果。 */
+/**
+ * 设备详情弹层：握手详情 JSON 渲染 + 同网判定结果 + A5 组网入口/阶段/结束。
+ *
+ * A5 组网状态经 [BluelinkEngine.current()]（companion 单例，init 注册 / release 注销）读取：
+ * 保持 BluelinkRoot 零改动以符合「3 文件」改动范围，engine 与 UI 同包无需 import。
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceDetailSheet(
@@ -352,6 +359,8 @@ fun DeviceDetailSheet(
     handshakeError: String?,
     onDismiss: () -> Unit,
 ) {
+    val engine = BluelinkEngine.current()
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
@@ -377,11 +386,46 @@ fun DeviceDetailSheet(
             Text(
                 text = when (entry.lanStatus) {
                     LanStatus.SAME_LAN -> "✅ 同网（同一子网，可直连传输）"
-                    LanStatus.DIFFERENT_NETWORK -> "🌐 异网（需二期组网）"
+                    LanStatus.DIFFERENT_NETWORK -> "🌐 异网（可组建临时局域网）"
                     LanStatus.UNKNOWN -> "❔ 未知（信息不足）"
                 },
                 style = MaterialTheme.typography.bodyMedium,
             )
+
+            // ============ A5 组网：入口 / 阶段 / 结束 ============
+            if (engine != null) {
+                val ui = engine.ui
+                if (ui.netBtnVisible) {
+                    HorizontalDivider()
+                    Text("临时局域网", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "本机与对方不在同一网络，可组建临时局域网后直连。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        onClick = { engine.startNetworking() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("组建临时局域网") }
+                }
+                ui.netState?.let { state ->
+                    Text(
+                        text = "组网状态：$state",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (state.startsWith("✅")) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                if (ui.netActive) {
+                    OutlinedButton(
+                        onClick = { engine.endNetworking() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("结束组网") }
+                }
+            }
 
             HorizontalDivider()
 
@@ -419,6 +463,118 @@ fun DeviceDetailSheet(
             ) { Text("关闭") }
         }
     }
+
+    // ============ A5 组网对话框 ============
+    if (engine != null) {
+        if (engine.ui.manualPwdDialog) ManualPwdDialog(engine)
+        if (engine.ui.joinFailDialog) JoinFailDialog(engine)
+        if (engine.ui.writeSettingsDialog) WriteSettingsDialog(engine)
+    }
+}
+
+/** ④ 手动配网对话框：指引 + SSID/密码输入 + 确认 + 「打开系统热点设置」。 */
+@Composable
+private fun ManualPwdDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.manualPwdDialog = false },
+        title = { Text("手动配网（④）") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "本机无法自动开启热点，请手动操作：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "1. 在系统设置中打开「个人热点 / 便携式 Wi-Fi 热点」\n2. 将热点名称与密码填写如下并保存",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = ui.manualSsidInput,
+                    onValueChange = { ui.manualSsidInput = it },
+                    label = { Text("热点名称 (SSID)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ui.manualPwdInput,
+                    onValueChange = { ui.manualPwdInput = it },
+                    label = { Text("热点密码") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(onClick = { engine.openHotspotSettings() }) {
+                    Text("打开系统热点设置")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmManualPwd() }) { Text("确认") }
+        },
+        dismissButton = {
+            TextButton(onClick = { ui.manualPwdDialog = false }) { Text("取消") }
+        },
+    )
+}
+
+/** 接入失败对话框：提示原因 + 手动输入密码重试（WifiJoiner onFailed）。 */
+@Composable
+private fun JoinFailDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.joinFailDialog = false },
+        title = { Text("接入失败") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "未能接入对方热点：${ui.joinFailReason ?: "未知原因"}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    text = "若对方热点设有密码，可手动输入后重试：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = ui.manualPwdInput,
+                    onValueChange = { ui.manualPwdInput = it },
+                    label = { Text("热点密码") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.retryJoin(ui.manualPwdInput) }) { Text("重试接入") }
+        },
+        dismissButton = {
+            TextButton(onClick = { ui.joinFailDialog = false }) { Text("取消") }
+        },
+    )
+}
+
+/** WRITE_SETTINGS 授权引导对话框（Android 8–10 接入路径）。 */
+@Composable
+private fun WriteSettingsDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.writeSettingsDialog = false },
+        title = { Text("需要「修改系统设置」权限") },
+        text = {
+            Text(
+                text = "Android 8–10 接入热点需 WRITE_SETTINGS 授权。\n请授权后返回，再点「重试接入」。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.openWriteSettings() }) { Text("去授权") }
+        },
+        dismissButton = {
+            TextButton(onClick = { engine.retryJoin(ui.manualPwdInput) }) { Text("重试接入") }
+            TextButton(onClick = { ui.writeSettingsDialog = false }) { Text("取消") }
+        },
+    )
 }
 
 /** 诊断日志弹窗：可滚动文本 + 刷新/复制/导出/清空（导出写 App 外部私有目录，无需存储权限）。 */

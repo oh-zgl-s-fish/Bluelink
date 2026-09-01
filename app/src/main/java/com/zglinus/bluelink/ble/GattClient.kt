@@ -22,7 +22,10 @@ import com.zglinus.bluelink.diag.DiagLogger
  * - ATT 操作串行化：服务发现后只写 CCC 订阅，主握手写入等 onDescriptorWrite 确认
  *   CCC 写完后才发起，避免背靠背发起 CCC 与 WRITE 被蓝牙栈单请求串行模型静默丢弃
  *   （onCharacteristicWrite 永不回调）；
- * - 回调运行在 Binder 线程，统一切回主线程；disconnect/close 防泄漏。
+ * - 回调运行在 Binder 线程，统一切回主线程；disconnect/close 防泄漏；
+ * - 持久信令会话（A2）：握手成功后由 SessionManager.attach → keepAlive() 保留连接进入会话
+ *   模式（替代硬 cleanup），NOTIFY 收信令 / WRITE 发信令；detach/release 恢复原 cleanup；
+ *   未 attach 时行为与一期完全一致（握手完成即清理）。
  */
 class GattClient(
     private val context: Context,
@@ -32,6 +35,12 @@ class GattClient(
     interface Callbacks {
         fun onHandshakeCompleted(deviceAddress: String, handshake: HandshakeMessage)
         fun onHandshakeFailed(deviceAddress: String, reason: String)
+
+        /** 会话期收到远端信令（NOTIFY 字节经 SignalProtocol.decode 成功分流）。默认空实现保持兼容。 */
+        fun onRemoteSignal(deviceAddress: String, msg: SignalMessage) = Unit
+
+        /** 会话期底层连接断开（GattClient 已静默清理死连接），供 SessionManager 自动重连决策。 */
+        fun onSessionDisconnected(deviceAddress: String) = Unit
     }
 
     private var gatt: BluetoothGatt? = null
@@ -43,6 +52,9 @@ class GattClient(
     private var handshakeDone = false
     private var cleaned = false
 
+    /** 持久信令会话模式：keepAlive() 进入（替代硬 cleanup），会话期保留连接收发信令。 */
+    private var sessionMode = false
+
     /** 当前 ATT MTU（requestMtu 协商结果；未协商/协商失败兜底默认 23）。 */
     private var mtu: Int = DEFAULT_ATT_MTU
 
@@ -52,7 +64,16 @@ class GattClient(
 
     /** 写入兜底：握手写发起后 3s 内 onCharacteristicWrite 未回调（蓝牙栈写入挂起）则判失败。 */
     private val writeTimeoutRunnable = Runnable {
-        fail("握手写入 3s 无回调(status 未返回)")
+        if (sessionMode) {
+            // 会话期写入挂起（栈无回调）：视为链路异常，清理后走断线自动重连路径
+            val addr = targetAddress
+            Log.w(TAG, "信令写入 3s 无回调(status 未返回)，按链路异常处理")
+            DiagLogger.log(TAG, "信令写入 3s 无回调(status 未返回)，按链路异常处理，交由自动重连")
+            cleanup()
+            if (addr != null) callbacks.onSessionDisconnected(addr)
+        } else {
+            fail("握手写入 3s 无回调(status 未返回)")
+        }
     }
 
     fun connect(device: BluetoothDevice) {
@@ -64,6 +85,7 @@ class GattClient(
         }
         handshakeDone = false
         cleaned = false
+        sessionMode = false
         mtu = DEFAULT_ATT_MTU
         targetAddress = device.address
         Log.d(TAG, "连接 ${device.address} 开始握手")
@@ -91,6 +113,51 @@ class GattClient(
     /** 释放资源（静默）。 */
     fun release() = cleanup()
 
+    /** 会话模式是否激活（SessionManager 查询用）。 */
+    fun isSessionActive(): Boolean = sessionMode
+
+    /**
+     * 握手成功后由 SessionManager.attach 调用：把底层连接从"一次性握手"切换为"持久会话"，
+     * 保留 GATT 连接、NOTIFY 订阅与 WRITE 特征（替代原硬 cleanup）。
+     * 返回是否成功进入会话模式（需 gatt 存活且握手已完成）。
+     */
+    fun keepAlive(): Boolean {
+        if (gatt == null || !handshakeDone || cleaned) return false
+        if (sessionMode) return true // 幂等
+        sessionMode = true
+        mainHandler.removeCallbacks(timeoutRunnable)
+        mainHandler.removeCallbacks(writeTimeoutRunnable)
+        DiagLogger.log(TAG, "会话模式：保留连接 ${targetAddress}（MTU=$mtu，NOTIFY 订阅持续有效）")
+        return true
+    }
+
+    /**
+     * 会话期信令发送：复用 WRITE 通道（对端 Server 的 WRITE 特征）。
+     * 未进入会话模式 / 无特征 / 超单包 MTU / 写入被栈拒绝 → false。
+     */
+    fun sendSignal(bytes: ByteArray): Boolean {
+        if (!sessionMode) return false
+        val g = gatt ?: return false
+        val w = pendingWriteChar ?: return false
+        val maxPayload = mtu - 3
+        if (bytes.size > maxPayload) {
+            Log.w(TAG, "信令 ${bytes.size}B 超出会话单包上限 ${maxPayload}B（MTU=$mtu）")
+            DiagLogger.log(TAG, "信令 ${bytes.size}B 超出会话单包上限 ${maxPayload}B（MTU=$mtu），发送失败")
+            return false
+        }
+        DiagLogger.log(TAG, "信令写入发起: ${targetAddress} ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
+        return writeCharacteristicCompat(g, w, bytes)
+    }
+
+    /**
+     * 会话期断线重连（SessionManager 自动重连调用）：静默清理旧连接后按握手流程重新连接；
+     * 重连握手完成会再次触发 onHandshakeCompleted → attach → keepAlive 恢复会话。
+     */
+    fun reconnectSession(device: BluetoothDevice) {
+        cleanup()
+        connect(device)
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             mainHandler.post {
@@ -110,7 +177,14 @@ class GattClient(
                         }
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                        if (!handshakeDone && !cleaned) fail("连接断开")
+                        if (sessionMode) {
+                            // 会话期断线：静默清理死连接并上报，由 SessionManager 决定自动重连（一次）
+                            val addr = targetAddress
+                            Log.w(TAG, "会话连接断开 $addr")
+                            DiagLogger.log(TAG, "会话连接断开 $addr：已清理，等待自动重连决策")
+                            cleanup()
+                            if (addr != null) callbacks.onSessionDisconnected(addr)
+                        } else if (!handshakeDone && !cleaned) fail("连接断开")
                     }
                 }
             }
@@ -189,12 +263,21 @@ class GattClient(
             mainHandler.post {
                 // 写入兜底：无论 status 都撤掉 3s 写入超时（status 已返回，栈未挂起）
                 mainHandler.removeCallbacks(writeTimeoutRunnable)
-                // 握手写入结果确认：失败立即终止，避免干等 10s 超时；
-                // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
                 if (status != BluetoothGatt.GATT_SUCCESS) {
-                    fail("握手消息发送失败(status=$status)")
+                    if (sessionMode) {
+                        // 会话期单条信令写失败：仅记录（不断链），链路是否异常由后续断线事件判定
+                        Log.w(TAG, "信令写入失败(status=$status)")
+                        DiagLogger.log(TAG, "信令写入失败(status=$status)")
+                    } else {
+                        // 握手写入结果确认：失败立即终止，避免干等 10s 超时；
+                        // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
+                        fail("握手消息发送失败(status=$status)")
+                    }
                 } else {
-                    DiagLogger.log(TAG, "onCharacteristicWrite 握手写入确认成功 status=$status")
+                    DiagLogger.log(
+                        TAG,
+                        if (sessionMode) "信令写入确认成功 status=$status" else "onCharacteristicWrite 握手写入确认成功 status=$status"
+                    )
                 }
             }
         }
@@ -215,16 +298,33 @@ class GattClient(
 
     private fun handleNotify(value: ByteArray) {
         mainHandler.post {
-            if (handshakeDone || cleaned) return@post
+            if (cleaned) return@post
             if (notifyChar?.uuid != Constants.NOTIFY_CHARACTERISTIC_UUID) return@post
+
+            // 信令分流：收到的字节先试 SignalProtocol.decode；解析成功且 type 有效才视为信令
+            // （握手 JSON 无 type 键，decode 会得到 type=""，自动落回原握手逻辑）
+            val signal = SignalProtocol.decode(value)
+            if (signal != null && signal.type.isNotBlank()) {
+                val addr = targetAddress
+                DiagLogger.log(TAG, "Client 收到信令来自 $addr: type=${signal.type} payload=${signal.payload?.length() ?: "-"}")
+                if (addr != null) callbacks.onRemoteSignal(addr, signal)
+                return@post
+            }
+
+            // 会话期非信令字节：忽略（不再尝试握手解析）
+            if (handshakeDone) return@post
+
+            // 原握手逻辑
             val msg = HandshakeProtocol.decode(value)
             if (msg != null) {
                 handshakeDone = true
                 val addr = targetAddress
                 Log.d(TAG, "收到 ${addr} 握手: ${HandshakeProtocol.toJson(msg)}")
                 DiagLogger.log(TAG, "收到对方 ${addr} 握手: ${HandshakeProtocol.toJson(msg)}")
-                cleanup()
                 if (addr != null) callbacks.onHandshakeCompleted(addr, msg)
+                // 回调链内 SessionManager.attach → keepAlive() 已同步执行（主线程）；
+                // 若未进入会话模式（未接线 / attach 失败）则恢复原行为：立即 cleanup
+                if (!sessionMode) cleanup()
             } else {
                 Log.w(TAG, "对方握手通知解析失败")
                 DiagLogger.log(TAG, "对方握手通知解析失败（${value.size}B）")
@@ -255,7 +355,7 @@ class GattClient(
         gatt: BluetoothGatt,
         ch: BluetoothGattCharacteristic,
         bytes: ByteArray,
-    ) {
+    ): Boolean {
         try {
             val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeCharacteristic(ch, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
@@ -266,23 +366,32 @@ class GattClient(
                 gatt.writeCharacteristic(ch)
             }
             if (ok == false) {
-                // 写入被栈拒绝（未入队）：onCharacteristicWrite 永不会回调，立即 fail，不再等 3s 兜底
+                // 写入被栈拒绝（未入队）：onCharacteristicWrite 永不会回调，立即失败，不再等 3s 兜底
                 mainHandler.removeCallbacks(writeTimeoutRunnable)
-                Log.w(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
-                DiagLogger.log(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队），立即判失败")
-                mainHandler.post { fail("写入被栈拒绝(writeCharacteristic 返回 false)") }
-                return
+                if (sessionMode) {
+                    Log.w(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
+                    DiagLogger.log(TAG, "信令 writeCharacteristic 返回 false，写入被栈拒绝（未入队），发送失败")
+                } else {
+                    Log.w(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队）")
+                    DiagLogger.log(TAG, "writeCharacteristic 返回 false，写入被栈拒绝（未入队），立即判失败")
+                    mainHandler.post { fail("写入被栈拒绝(writeCharacteristic 返回 false)") }
+                }
+                return false
             }
         } catch (e: Exception) {
             mainHandler.removeCallbacks(writeTimeoutRunnable)
             Log.w(TAG, "writeCharacteristic 异常: $e")
             DiagLogger.log(TAG, "writeCharacteristic 异常: $e")
+            if (sessionMode) return false
             fail("写入异常: ${e.message}")
-            return
+            return false
         }
         // 写入兜底：仅当写入成功入队后才启动 3s 超时；回调/cleanup 撤除
         mainHandler.postDelayed(writeTimeoutRunnable, WRITE_TIMEOUT_MS)
-        DiagLogger.log(TAG, "握手写入已发起，3s 写入兜底超时已启动")
+        if (!sessionMode) {
+            DiagLogger.log(TAG, "握手写入已发起，3s 写入兜底超时已启动")
+        }
+        return true
     }
 
     private fun writeDescriptorCompat(gatt: BluetoothGatt, desc: BluetoothGattDescriptor, bytes: ByteArray) {
@@ -309,6 +418,14 @@ class GattClient(
     private fun fail(reason: String) {
         if (cleaned) return
         val addr = targetAddress
+        if (sessionMode) {
+            // 会话期意外失败：不回退到握手失败回调，按链路异常走自动重连路径
+            Log.w(TAG, "会话异常 $addr: $reason")
+            DiagLogger.log(TAG, "会话异常 $addr: $reason")
+            cleanup()
+            if (addr != null) callbacks.onSessionDisconnected(addr)
+            return
+        }
         Log.w(TAG, "握手失败 ${addr}: $reason")
         DiagLogger.log(TAG, "握手失败 ${addr}: $reason")
         cleanup()
@@ -321,6 +438,7 @@ class GattClient(
         val g = gatt
         gatt = null
         cleaned = true
+        sessionMode = false
         notifyChar = null
         pendingWriteChar = null
         targetAddress = null

@@ -33,6 +33,12 @@ class GattServer(
 ) {
     interface Callbacks {
         fun onRemoteHandshake(deviceAddress: String, handshake: HandshakeMessage)
+
+        /** 会话期收到远端信令（WRITE 字节经 SignalProtocol.decode 成功分流）。默认空实现保持兼容。 */
+        fun onRemoteSignal(deviceAddress: String, msg: SignalMessage) = Unit
+
+        /** 某设备与本机 Server 断开（会话腿丢失通知，SessionManager 据此决策）。 */
+        fun onDeviceDisconnected(deviceAddress: String) = Unit
     }
 
     private var gattServer: BluetoothGattServer? = null
@@ -147,6 +153,7 @@ class GattServer(
                     subscribedDevices.remove(device.address)
                     pendingNotify.remove(device.address)
                     DiagLogger.log(TAG, "${device.address} 已断开 Server")
+                    callbacks.onDeviceDisconnected(device.address)
                 }
             }
         }
@@ -165,6 +172,16 @@ class GattServer(
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
                 }
+
+                // 信令分流：收到的字节先试 SignalProtocol.decode；解析成功且 type 有效才视为信令
+                // （握手 JSON 无 type 键，decode 会得到 type=""，自动落回原握手逻辑）
+                val signal = SignalProtocol.decode(value)
+                if (signal != null && signal.type.isNotBlank()) {
+                    DiagLogger.log(TAG, "Server 收到信令来自 ${device.address}: type=${signal.type} payload=${signal.payload?.length() ?: "-"}")
+                    callbacks.onRemoteSignal(device.address, signal)
+                    return@post
+                }
+
                 val msg = HandshakeProtocol.decode(value)
                 if (msg != null) {
                     Log.d(TAG, "收到 ${device.address} 握手: ${HandshakeProtocol.toJson(msg)}")
@@ -218,6 +235,25 @@ class GattServer(
                 DiagLogger.log(TAG, "onNotificationSent 非成功 status=$status 到 ${device.address}")
             }
         }
+    }
+
+    /**
+     * 会话期信令发送（Server 腿）：经 NOTIFY 通道发给对端（需对端已订阅）。
+     * 未连接 / 未订阅 → false。
+     */
+    fun sendSignal(deviceAddress: String, bytes: ByteArray): Boolean {
+        val device = connectedDevices[deviceAddress]
+        if (device == null) {
+            DiagLogger.log(TAG, "Server 信令发送失败：$deviceAddress 未连接")
+            return false
+        }
+        if (subscribedDevices[deviceAddress] != true) {
+            DiagLogger.log(TAG, "Server 信令发送失败：$deviceAddress 未订阅 NOTIFY")
+            return false
+        }
+        DiagLogger.log(TAG, "Server 信令发送: $deviceAddress ${bytes.size}B")
+        sendNotify(device, bytes)
+        return true
     }
 
     private fun sendNotify(device: BluetoothDevice, bytes: ByteArray) {

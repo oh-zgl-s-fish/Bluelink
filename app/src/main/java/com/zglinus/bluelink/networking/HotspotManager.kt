@@ -60,7 +60,8 @@ enum class HotspotStartLevel {
  * @param success 是否成功开启热点；false 时 [error] 给出降级/等待原因。
  * @param ssid 热点 SSID（成功时返回，供对端连接；手动路径由 UI 回填）。
  * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；③ L2 本地热点 26-28 由系统下发
- *   （onStarted 读 preSharedKey）、33+ 由用户按系统弹窗回填登记；手动路径由 UI 回填）。
+ *   （onStarted 读 preSharedKey）、33+ 先试读 preSharedKey（v0.3.9-verify ③-①：网页版主张授权后
+ *   可直接读，实测定案），试读空/null 才由用户按系统弹窗回填登记；手动路径由 UI 回填）。
  * @param ip 热点本机 IPv4（② 私有 API 路径启动后采集；未取到为空串 ""，一期允许）。
  * @param error 失败/等待原因（如 root 路径已停用(B1 移除) 降级、③ L2 盲区禁用/系统 reason/启动异常
  *   降级、`"AwaitingManual"` 等待手动、`"AwaitingWriteSettings"` 等待 WRITE_SETTINGS 授权）。
@@ -91,9 +92,11 @@ interface HotspotListener {
     fun onWriteSettingsPermission()
 
     /**
-     * ③ L2 本地热点（13+，sdk 33+）：onStarted 后 App 侧密码不可读（软 AP 配置不回传密码；
-     * 系统弹窗/通知展示 SSID 与密码）——请求 UI 弹出密码登记框，请用户按系统弹窗回填密码；
-     * 回填后经 [HotspotManager.completeLocalOnlyPassword] 完成 L2 成功结果（26-28 全自动路径不触发本回调）。
+     * ③ L2 本地热点（13+，sdk 33+）：onStarted 后**先试读 preSharedKey**（v0.3.9-verify ③-①：
+     * 网页版主张 13+ 授权 NEARBY_WIFI_DEVICES 后可直接读，以实测定案），试读为空/null
+     * （软 AP 配置未回传密码；系统弹窗/通知展示 SSID 与密码）才触发本回调——请求 UI 弹出密码
+     * 登记框，请用户按系统弹窗回填密码；回填后经 [HotspotManager.completeLocalOnlyPassword]
+     * 完成 L2 成功结果（26-28 全自动路径不触发本回调）。
      */
     fun onLocalOnlyPasswordRequest(ssid: String)
 
@@ -106,10 +109,13 @@ interface HotspotListener {
     fun onSystemHotspotPasswordRequest()
 
     /**
-     * ② Binder 直呼系统热点（v0.3.6 第一手段）前置缺失：NEARBY_WIFI_DEVICES（Android 13+，
-     * Manifest 已声明 neverForLocation）未授权——请求 UI/引擎发起系统运行时授权（复用现有
-     * requestedPermission 授权链，Engine 已接），授权后自动重试本等级；未授权时本等级失败透传、
-     * 照旧降级 ③。
+     * NEARBY_WIFI_DEVICES（Android 13+，Manifest 已声明 neverForLocation）运行时授权前置缺失——
+     * 请求 UI/引擎发起系统授权（复用现有 requestedPermission 授权链，Engine 已接），授权后自动
+     * 重试触发方：
+     * - ② Binder 直呼系统热点（v0.3.6 第一手段）前置缺失：未授权时本等级失败透传、照旧降级 ③；
+     * - ③ L2 本地热点（v0.3.9-verify ③-②）调 startLocalOnlyHotspot 前的前置缺失：未授权 →
+     *   引导授权并返回 AwaitingNearbyPermission，授权后经 Engine.handleHotspotPermissionRetry
+     *   重跑组网（② 降级后重入 ③）。
      */
     fun onNeedNearbyPermission()
 }
@@ -150,7 +156,10 @@ interface HotspotListener {
  *   `WifiManager.startLocalOnlyHotspot(callback, handler)` 三版本分流（design 定稿，见 [tryLocalOnlyHotspot]）：
  *   sdk 26-28 全自动（onStarted 读 `reservation.wifiConfiguration` 的 SSID/preSharedKey + 采集 IP）；
  *   sdk 29-32 本级禁用（密码盲区，直接失败 `"LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④"`）；
- *   sdk 33+ onStarted 后密码不可读（系统弹窗展示）→ 触发 [HotspotListener.onLocalOnlyPasswordRequest]
+ *   sdk 33+ 调 startLocalOnlyHotspot 前置 NEARBY_WIFI_DEVICES 运行时授权（v0.3.9-verify ③-②：
+ *   未授权 → [HotspotListener.onNeedNearbyPermission] 引导、授权后重试；返回 AwaitingNearbyPermission）；
+ *   onStarted 统一先试读 preSharedKey（v0.3.9-verify ③-①：网页版主张 13+ 授权后可读，实测定案——
+ *   非空自动完成，空/null 才走回填）→ 33+ 空/null 触发 [HotspotListener.onLocalOnlyPasswordRequest]
  *   请用户回填，[completeLocalOnlyPassword] 完成后返回成功结果。真异步：系统回调经主线程
  *   [dispatchLocalOnlyResult] 收敛（同步返回 [LOCAL_ONLY_PENDING] 标记）；reservation 持有到组网收尾，
  *   [stopLocalOnly] 为 B4 正式收尾前的释放入口；
@@ -298,6 +307,7 @@ class HotspotManager(
             mainHandler.post {
                 asyncRunning.set(false)
                 pendingBinderTetherCb = null // 非 pending 结果：清理预留（防残留悬挂）
+                pendingLocalOnlyCb = null // 非 pending 结果（含 ③-② 前置 AwaitingNearbyPermission 同步失败）：清理 L2 预留（防残留悬挂）
                 cb(result)
             }
         }
@@ -1269,10 +1279,13 @@ class HotspotManager(
      * - sdk 29–32（Android 10-12）：**本级禁用**（密码盲区：系统不下发可读密码，行为不可靠）→
      *   直接返回 `HotspotResult(false, error="LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④")`
      *   交状态机降级 ④（手动）；
-     * - sdk 33+（Android 13+）：onStarted 后系统弹窗/通知展示 SSID 与密码，App 侧
-     *   [LocalOnlyHotspotReservation.wifiConfiguration] 密码不可读（软 AP 配置不回传密码）→
-     *   触发 [HotspotListener.onLocalOnlyPasswordRequest](ssid) 请 UI 弹密码登记框、用户按系统弹窗
-     *   回填 → [completeLocalOnlyPassword] 完成后返回成功 [HotspotResult]（ssid / pwd=用户登记值 / ip）；
+     * - sdk 33+（Android 13+）：调 startLocalOnlyHotspot 前先做 NEARBY_WIFI_DEVICES 运行时授权前置
+     *   （v0.3.9-verify ③-②：未授权 → 回调 [HotspotListener.onNeedNearbyPermission] 引导授权、返回
+     *   `AwaitingNearbyPermission` 待授权后重试，复用 Engine requestedPermission 链）；onStarted 后
+     *   **先试读 preSharedKey**（v0.3.9-verify ③-①：网页版主张 13+ 授权后 App 侧可直接读，以实测定
+     *   案）——非空 → 自动完成；空/null（软 AP 配置未回传密码；系统弹窗/通知展示）→ 触发
+     *   [HotspotListener.onLocalOnlyPasswordRequest](ssid) 请 UI 弹密码登记框、用户按系统弹窗回填 →
+     *   [completeLocalOnlyPassword] 完成后返回成功 [HotspotResult]（ssid / pwd=用户登记值 / ip）；
      * - 失败路径：onFailed(reason)（系统 reason 映射见 [localOnlyErrorText]）/ onStopped（等待期被
      *   系统停止）/ 异常 → 失败透传，交状态机降级 ④。
      *
@@ -1307,6 +1320,29 @@ class HotspotManager(
             val err = "L2_LOCAL_ONLY：WifiManager 不可用（Context 已取得但 getSystemService 失败）"
             DiagLogger.log(tag, err)
             return HotspotResult(success = false, error = err)
+        }
+
+        // ★ v0.3.9-verify ③-②：sdk 33+ 调 startLocalOnlyHotspot 前的 NEARBY_WIFI_DEVICES 运行时授权
+        // 前置（Android 13+ 强制，Manifest 已声明 neverForLocation）——未授权 → 回调
+        // onNeedNearbyPermission 引导授权（Engine requestedPermission 授权链，授权后经
+        // handleHotspotPermissionRetry 重跑组网重入 ③），返回 AwaitingNearbyPermission 待重试；
+        // 已授权 → 放行 startLocalOnlyHotspot（onStarted 内 ③-① 再先试读密码）。
+        if (Build.VERSION.SDK_INT >= 33) {
+            val nearbyGranted = try {
+                ctx.checkSelfPermission(NEARBY_WIFI_DEVICES_PERMISSION) == PackageManager.PERMISSION_GRANTED
+            } catch (e: Exception) {
+                DiagLogger.log(tag, "L2_LOCAL_ONLY NEARBY_WIFI_DEVICES 权限检查异常（按未授权处理，catch 兜底）: $e")
+                false
+            }
+            if (!nearbyGranted) {
+                DiagLogger.log(
+                    tag,
+                    "L2_LOCAL_ONLY(sdk=$sdk) 前置：NEARBY_WIFI_DEVICES 未授权（Android 13+ 强制，Manifest 已声明 neverForLocation），" +
+                        "回调 onNeedNearbyPermission 走 requestedPermission 授权链，返回 AwaitingNearbyPermission 待授权后重试",
+                )
+                mainHandler.post { listener.onNeedNearbyPermission() }
+                return HotspotResult(success = false, error = AWAITING_NEARBY_PERMISSION)
+            }
         }
 
         DiagLogger.log(
@@ -1348,7 +1384,8 @@ class HotspotManager(
         }
     }
 
-    /** ③ onStarted 收敛（主线程）：持有 reservation → 三版本分流（26-28 全自动 / 33+ 请求密码回填）。 */
+    /** ③ onStarted 收敛（主线程）：持有 reservation → 统一先试读 preSharedKey（v0.3.9-verify ③-①）：
+     *  非空 → 自动完成（无论 sdk）；空/null → 33+ 请求密码回填、26-28 如实失败降级。 */
     @Suppress("DEPRECATION") // reservation.wifiConfiguration 为 WifiConfiguration 旧 API（26+ 公开），软 AP 密码回传行为随版本分流
     private fun handleLocalOnlyStarted(reservation: LocalOnlyHotspotReservation) {
         localOnlyReservation = reservation // 持有到组网收尾（B4 正式收尾前由 [stopLocalOnly] 释放）
@@ -1367,30 +1404,35 @@ class HotspotManager(
             )
             return
         }
-        // sdk 26–28：公开 API 26+ 可读 preSharedKey（系统随机密码）→ 全自动成功
-        if (sdk in 26..28) {
-            val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")
-            if (pwd.isNullOrBlank()) {
-                DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted(sdk=$sdk)：preSharedKey 缺失（系统未下发密码），按失败处理")
-                dispatchLocalOnlyResult(
-                    HotspotResult(success = false, ssid = ssid, error = "LocalOnlyHotspot 已启动但系统未下发密码"),
-                )
-                return
-            }
+        // ★ v0.3.9-verify ③-①：统一先试读 preSharedKey（不再按 sdk 分「可读/不可读」单路径）——
+        // 网页版主张 Android 13+（sdk 33+）授权 NEARBY_WIFI_DEVICES 后 onStarted 可直接读密码，
+        // 以实测定案：非空 → 自动完成（无论 sdk）；空/null → 33+ 走回填兜底、26-28 如实失败降级。
+        // 注：cfg 已在上面 try/catch 读好（reservation.wifiConfiguration 访问可能抛异常），语义与
+        // reservation.wifiConfiguration?.preSharedKey 一致，仅多一层异常防护。
+        val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
+        if (pwd != null) {
             val ip = collectHotspotIp()
             DiagLogger.log(
                 tag,
-                "L2_LOCAL_ONLY 自动路径成功：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
+                "L2_LOCAL_ONLY 密码自动读取成功（33+ 也先试读）：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
             )
             dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
             return
         }
-        // sdk 33+：App 侧密码不可读（软 AP 配置不回传密码；系统弹窗/通知展示 SSID 与密码）→
-        // 触发 UI 请用户按系统弹窗回填密码，完成经 [completeLocalOnlyPassword] 收敛
+        if (sdk in 26..28) {
+            // 26-28 自动读取失败：preSharedKey 空/null（系统未下发密码）→ 如实失败降级（语义与现状一致）
+            DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted(sdk=$sdk)：自动读取 preSharedKey 为空（系统未下发密码），按失败处理")
+            dispatchLocalOnlyResult(
+                HotspotResult(success = false, ssid = ssid, error = "LocalOnlyHotspot 已启动但系统未下发密码"),
+            )
+            return
+        }
+        // sdk 33+：试读 preSharedKey 为空/null（软 AP 配置未回传密码；系统弹窗/通知展示 SSID 与密码）→
+        // 走回填兜底：触发 UI 请用户按系统弹窗回填密码，完成经 [completeLocalOnlyPassword] 收敛
         pendingLocalOnlySsid = ssid
         DiagLogger.log(
             tag,
-            "L2_LOCAL_ONLY(sdk=$sdk)：密码不可读（系统弹窗/通知展示），触发 onLocalOnlyPasswordRequest(ssid=$ssid) 请用户回填",
+            "L2_LOCAL_ONLY(sdk=$sdk)：试读 preSharedKey 为空（软 AP 配置未回传密码；系统弹窗/通知展示），触发 onLocalOnlyPasswordRequest(ssid=$ssid) 请用户回填",
         )
         listener.onLocalOnlyPasswordRequest(ssid)
         // 等待 completeLocalOnlyPassword(pwd) 收敛（pendingLocalOnlyCb 保留；状态机步骤超时已放宽 120s）
@@ -1446,8 +1488,9 @@ class HotspotManager(
     }
 
     /**
-     * ③ sdk 33+ 密码回填（引擎在用户按系统弹窗回填后调用，主线程）：校验非空后完成
-     * L2 成功结果（ssid / pwd=用户登记值 / ip=采集）并收敛 [pendingLocalOnlyCb]
+     * ③ sdk 33+ 密码回填兜底（引擎在用户按系统弹窗回填后调用，主线程）：onStarted 试读
+     * preSharedKey 为空/null 后（v0.3.9-verify ③-①）触发本回填——校验非空后完成 L2 成功结果
+     * （ssid / pwd=用户登记值 / ip=采集）并收敛 [pendingLocalOnlyCb]
      * （状态机 onLocalOnlyAsyncResult → onHotspotReady 发 offer）。密码全程不回显。
      */
     fun completeLocalOnlyPassword(pwd: String) {
@@ -1645,6 +1688,9 @@ class HotspotManager(
 
         /** ② Binder 直呼前置缺失标记（error 字段，NEARBY_WIFI_DEVICES 未授；Engine 走 requestedPermission 授权链，授权后自动重试热点）。 */
         private const val NEED_NEARBY_PERMISSION = "NeedNearbyPermission"
+
+        /** ③ L2 本地热点前置缺失标记（v0.3.9-verify ③-②：error 字段，sdk 33+ 调 startLocalOnlyHotspot 前 NEARBY_WIFI_DEVICES 未授；Engine 走 requestedPermission 授权链，授权后重跑组网重入 ③）。 */
+        private const val AWAITING_NEARBY_PERMISSION = "AwaitingNearbyPermission"
 
         /** ② NEARBY_WIFI_DEVICES 权限名字面量（sdk≥33 强制，Manifest 已声明 neverForLocation）。 */
         private const val NEARBY_WIFI_DEVICES_PERMISSION = "android.permission.NEARBY_WIFI_DEVICES"

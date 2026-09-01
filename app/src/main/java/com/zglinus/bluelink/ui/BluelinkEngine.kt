@@ -50,7 +50,9 @@ import org.json.JSONObject
  *
  * A5 组网接线（异网设备组建临时局域网，A 包收官）：
  * - [HotspotManager]（A3b）：④ 手动路径 onManualRequest → ui.manualPwdDialog；
- * - ③ L2 本地热点（B3）：26-28 全自动；13+ onLocalOnlyPasswordRequest → ui.localOnlyPwdDialog
+ * - ③ L2 本地热点（B3）：26-28 全自动；13+ 前置 NEARBY_WIFI_DEVICES 授权（onNeedNearbyPermission →
+ *   requestedPermission → handleHotspotPermissionRetry 重跑）→ onStarted 先试读 preSharedKey
+ *   （v0.3.9-verify ③-①，实测定案），试读空才 onLocalOnlyPasswordRequest → ui.localOnlyPwdDialog
  *   （用户按系统弹窗回填密码 → confirmLocalOnlyPwd → completeLocalOnlyPassword）；
  *   reservation 收尾经 stopLocalOnly（onAbort / stopAllBle 接线，B4 正式收尾前预留释放入口）；
  * - [NetworkingStateMachine]（A3c）：点「组建临时局域网」→ 按本机/对端能力仲裁后创建，
@@ -319,11 +321,13 @@ class BluelinkEngine(private val context: Context) {
         }
 
         override fun onNeedNearbyPermission() {
-            // ② public startTethering（v0.3.5 第一手段）前置：NEARBY_WIFI_DEVICES（Android 13+，
-            // Manifest 已声明 neverForLocation）未授权 / startTethering 抛 SecurityException——
+            // NEARBY_WIFI_DEVICES（Android 13+，Manifest 已声明 neverForLocation）运行时授权前置缺失——
+            // 触发方：② public startTethering（v0.3.5 第一手段）前置 / startTethering 抛 SecurityException；
+            // ③ L2 本地热点（v0.3.9-verify ③-②）调 startLocalOnlyHotspot 前的前置（未授权引导授权）。
             // 复用现有 requestedPermission 授权链（BluelinkRoot LaunchedEffect 发起系统授权弹窗，
-            // 结果经 onJoinPermissionResult → handleHotspotPermissionRetry 自动重试热点）。
-            // 已授权仍触发（SecurityException 可能为其他原因）→ 不重复弹授权（防授权重试死循环）。
+            // 结果经 onJoinPermissionResult → handleHotspotPermissionRetry 自动重试热点，覆盖 ②/③——
+            // 重跑 startNetworking：② 降级后重入 ③ 时前置已授权）。
+            // 已授权仍触发（② SecurityException 可能为其他原因）→ 不重复弹授权（防授权重试死循环）。
             val granted = try {
                 appContext.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) ==
                     PackageManager.PERMISSION_GRANTED
@@ -332,13 +336,13 @@ class BluelinkEngine(private val context: Context) {
                 false
             }
             if (granted) {
-                DiagLogger.log(TAG, "② NEARBY_WIFI_DEVICES 已授权但 public 路径仍失败（SecurityException 可能为其他原因），不重复发起授权")
-                ui.netState = "开启热点失败：系统仍拒绝 tethering（NEARBY_WIFI_DEVICES 已授权）"
+                DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 已授权但 ②/③ 路径仍失败（② SecurityException 可能为其他原因），不重复发起授权")
+                ui.netState = "开启热点失败：系统仍拒绝热点（NEARBY_WIFI_DEVICES 已授权）"
                 return
             }
             pendingHotspotPermission = Manifest.permission.NEARBY_WIFI_DEVICES
             ui.requestedPermission = Manifest.permission.NEARBY_WIFI_DEVICES
-            DiagLogger.log(TAG, "② 开启热点需 NEARBY_WIFI_DEVICES 权限：置 requestedPermission 发起系统授权，授权后自动重试")
+            DiagLogger.log(TAG, "②/③ 开启热点需 NEARBY_WIFI_DEVICES 权限：置 requestedPermission 发起系统授权，授权后自动重试")
             ui.netState = "开启热点需要「附近的设备」权限（NEARBY_WIFI_DEVICES），请授权后自动重试"
         }
     })
@@ -393,7 +397,7 @@ class BluelinkEngine(private val context: Context) {
     /** 待重试 join 缺失的运行时权限（onNeedPermission 记录，授权成功后自动重试 join）。 */
     private var pendingJoinPermission: String? = null
 
-    /** ② public startTethering（v0.3.5 第一手段）前置缺失的运行时权限（onNeedNearbyPermission 记录；授权成功后自动重试热点）。 */
+    /** ②/③ 前置缺失的运行时权限（onNeedNearbyPermission 记录；授权成功后自动重试热点——③ L2 本地热点 v0.3.9-verify ③-② 同链）。 */
     private var pendingHotspotPermission: String? = null
 
     /** 引擎接管 offer 去重（Bluelink 组网补丁）：一次会话内最多接管一次；WifiJoiner.join 幂等兜底重复 offer。 */
@@ -518,8 +522,8 @@ class BluelinkEngine(private val context: Context) {
      * 自动重试挂起的 join（WifiJoiner.join 幂等，可安全重试）；未授予 → 保持挂起并提示。
      */
     fun onJoinPermissionResult() {
-        // ② public startTethering 前置 NEARBY_WIFI_DEVICES（onNeedNearbyPermission → requestedPermission）：
-        // 授权结果回灌后先走热点自动重试分支（join 挂起与热点挂起互斥，分支独立处理）
+        // ②/③ 前置 NEARBY_WIFI_DEVICES（onNeedNearbyPermission → requestedPermission；③ L2 本地热点
+        // v0.3.9-verify ③-② 同链）：授权结果回灌后先走热点自动重试分支（join 挂起与热点挂起互斥，分支独立处理）
         pendingHotspotPermission?.let { handleHotspotPermissionRetry(it) }
 
         val p = pendingJoinPermission ?: return
@@ -553,12 +557,15 @@ class BluelinkEngine(private val context: Context) {
     }
 
     /**
-     * ② public startTethering 前置 NEARBY_WIFI_DEVICES 授权结果回灌（onJoinPermissionResult 分支，
-     * BluelinkRoot 的 permissionLauncher 回调路由：请求包含 ui.requestedPermission 时进入）：
-     * - 已授予 → 自动重试热点：状态机仍 [NetState.HOTSPOT_STARTING] 时取消当前流程干净重跑 ②
-     *   （cancel → onAbort 停 L2/清理 pending → startNetworking 重协商，public 路径带权限执行）；
-     *   状态机已中止/未启动（授权期间 15s 步骤超时 abort）→ 孤儿兜底 startNetworking 直接重跑 ②；
-     * - 未授予（用户拒绝）→ 清 requestedPermission 保持待重试（下次 public 路径再次触发
+     * ②/③ 前置 NEARBY_WIFI_DEVICES 授权结果回灌（onJoinPermissionResult 分支，BluelinkRoot 的
+     * permissionLauncher 回调路由：请求包含 ui.requestedPermission 时进入）——触发方：② public
+     * startTethering 前置 / ③ L2 本地热点（v0.3.9-verify ③-②）调 startLocalOnlyHotspot 前前置：
+     * - 已授予 → 自动重试热点（覆盖 ②/③）：状态机仍 [NetState.HOTSPOT_STARTING] 时取消当前流程
+     *   干净重跑（cancel → onAbort 停 L2/清理 pending → startNetworking 重协商，② 带权限执行、
+     *   降级后重入 ③ 时前置已授权）；
+     *   状态机已中止/未启动（授权期间 15s 步骤超时 abort / ③ 前置返回 AwaitingNearbyPermission 后
+     *   降级 ④ 或中止）→ 孤儿兜底 startNetworking 直接重跑；
+     * - 未授予（用户拒绝）→ 清 requestedPermission 保持待重试（下次 ②/③ 路径再次触发
      *   onNeedNearbyPermission 可再弹授权）。
      */
     private fun handleHotspotPermissionRetry(permission: String) {
@@ -572,25 +579,25 @@ class BluelinkEngine(private val context: Context) {
         if (!granted) {
             pendingHotspotPermission = null
             ui.requestedPermission = null
-            DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 未授权（用户拒绝）：清 requestedPermission 保持待重试（下次 public 路径可再触发授权）")
+            DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 未授权（用户拒绝）：清 requestedPermission 保持待重试（下次 ②/③ 路径可再触发授权）")
             ui.netState = "开启热点需「附近的设备」权限（NEARBY_WIFI_DEVICES），未授权时将降级 ③/④"
             return
         }
         pendingHotspotPermission = null
         ui.requestedPermission = null
-        DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 已授权：自动重试 ②（public startTethering 现可执行）")
+        DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 已授权：自动重试热点（② public startTethering / ③ L2 本地热点现可执行）")
         val m = netStateMachine
         if (m == null || m.currentState != NetState.HOTSPOT_STARTING) {
             // 状态机不活动（授权期间 15s 步骤超时 abort / 未启动）：孤儿兜底——直接重跑组网
             DiagLogger.log(
                 TAG,
-                "NEARBY_WIFI_DEVICES 已授权但状态机不活动（machine=${m != null} state=${m?.currentState}），补 startNetworking() 重跑 ②",
+                "NEARBY_WIFI_DEVICES 已授权但状态机不活动（machine=${m != null} state=${m?.currentState}），补 startNetworking() 重跑 ②/③",
             )
             startNetworking()
             return
         }
-        // 状态机仍 HOTSPOT_STARTING（本次尝试已降级 ③/④）：取消当前流程并干净重跑 ②
-        DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 已授权且状态机仍 HOTSPOT_STARTING：取消当前流程重跑 ②（clean restart）")
+        // 状态机仍 HOTSPOT_STARTING（本次尝试已降级 ③/④）：取消当前流程并干净重跑（②/③ 均安全）
+        DiagLogger.log(TAG, "NEARBY_WIFI_DEVICES 已授权且状态机仍 HOTSPOT_STARTING：取消当前流程重跑 ②/③（clean restart）")
         netStateMachine?.cancel()
         startNetworking()
     }

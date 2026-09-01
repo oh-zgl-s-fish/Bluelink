@@ -16,6 +16,8 @@ import android.util.Log
  *
  * - 连接失败 / 服务缺失 / 超时（[Constants.HANDSHAKE_TIMEOUT_MS]，10s）自动断开并释放；
  * - 同一时间只处理一个握手会话，忙时直接拒绝新请求；
+ * - MTU 协商先行：默认 ATT MTU=23 单包载荷仅 20B，150B 握手 JSON 传不过去，连接成功后先
+ *   requestMtu(512)，onMtuChanged 后再 discoverServices；写入前按协商 MTU 做长度校验；
  * - 回调运行在 Binder 线程，统一切回主线程；disconnect/close 防泄漏。
  */
 class GattClient(
@@ -34,6 +36,9 @@ class GattClient(
     private var handshakeDone = false
     private var cleaned = false
 
+    /** 当前 ATT MTU（requestMtu 协商结果；未协商/协商失败兜底默认 23）。 */
+    private var mtu: Int = DEFAULT_ATT_MTU
+
     private val timeoutRunnable = Runnable {
         fail("握手超时(${Constants.HANDSHAKE_TIMEOUT_MS}ms)")
     }
@@ -46,6 +51,7 @@ class GattClient(
         }
         handshakeDone = false
         cleaned = false
+        mtu = DEFAULT_ATT_MTU
         targetAddress = device.address
         Log.d(TAG, "连接 ${device.address} 开始握手")
         @Suppress("DEPRECATION")
@@ -76,13 +82,28 @@ class GattClient(
                         if (status != BluetoothGatt.GATT_SUCCESS) {
                             fail("连接失败(status=$status)")
                         } else {
-                            gatt.discoverServices()
+                            // MTU 协商先行：默认 ATT MTU=23 时单包载荷仅 20B，150B 握手 JSON 传不过去；
+                            // 先 requestMtu(512)，随后由 onMtuChanged 触发 discoverServices
+                            if (!gatt.requestMtu(REQUESTED_MTU)) {
+                                Log.w(TAG, "requestMtu 返回 false，按默认 MTU 继续服务发现")
+                                gatt.discoverServices()
+                            }
                         }
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         if (!handshakeDone && !cleaned) fail("连接断开")
                     }
                 }
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            mainHandler.post {
+                if (cleaned) return@post
+                // 成功取协商值；失败兜底默认 23（ATT 标准最小 MTU）。无论结果都继续服务发现
+                this@GattClient.mtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else DEFAULT_ATT_MTU
+                Log.d(TAG, "MTU 协商: mtu=${this@GattClient.mtu} status=$status，继续服务发现")
+                gatt.discoverServices()
             }
         }
 
@@ -111,6 +132,12 @@ class GattClient(
                     writeDescriptorCompat(gatt, ccc, byteArrayOf(0x01, 0x00))
                 }
                 val bytes = HandshakeProtocol.encode(HandshakeProtocol.buildLocal(context))
+                // 写入前长度校验（防御）：ATT 层 3 字节头开销，单包载荷上限 = mtu - 3
+                val maxPayload = mtu - 3
+                if (bytes.size > maxPayload) {
+                    fail("握手消息 ${bytes.size}B 超出当前 MTU ${maxPayload}B")
+                    return@post
+                }
                 writeCharacteristicCompat(gatt, write, bytes)
             }
         }
@@ -118,6 +145,20 @@ class GattClient(
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "CCC 写入失败 status=$status")
+            }
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            mainHandler.post {
+                // 握手写入结果确认：失败立即终止，避免干等 10s 超时；
+                // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    fail("握手消息发送失败(status=$status)")
+                }
             }
         }
 
@@ -219,5 +260,11 @@ class GattClient(
 
     companion object {
         private const val TAG = "GattClient"
+
+        /** 请求协商的 ATT MTU（Android 常见上限 512，对端取较小值）。 */
+        private const val REQUESTED_MTU = 512
+
+        /** BLE 默认 ATT MTU（未协商/协商失败兜底，载荷上限 = mtu - 3 = 20B）。 */
+        private const val DEFAULT_ATT_MTU = 23
     }
 }

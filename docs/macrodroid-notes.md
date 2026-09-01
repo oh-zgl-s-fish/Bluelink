@@ -27,10 +27,11 @@ wifi / WifiAPState / ForceLegacy / com.arlosoft.macrodroid.MACRO_NAME
 3. **shell 兜底**：`svc wifi enable` 等命令经 common shell 工具（需 ADB/Shizuku/root 身份）。
 4. **Shizuku 集成**＝以 shell(2000)/root 身份运行上述 Binder 调用与 shell 命令（MacroDroid「ADB/Shizuku 模式」的载体）。
 
-## 可行性定论
+## 可行性定论（待实测修正）
 
-- **无提权（普通 App）**：Binder 直呼 `connectivity.startTethering` 会被**系统服务端权限校验拒绝**（startTethering 要求 `NETWORK_SETTINGS`/网络栈特权；`Binder.getCallingUid` 检查，SecurityException）——**推断高置信**（Android TetheringManager 权限模型如此）。MacroDroid 能行，前提是 **Shizuku/ADB（shell uid）或设备所有者**。
-- 与我们的 ② 反射（blacklist → sdk11/12 起 NoSuchMethod）同为「私有 API 只能做开关」，且 Binder 直呼同样存在**权限门**——**不构成无感开热点的捷径**。
+- **基于 AOSP 权限模型推断**：Binder 直呼 `connectivity.startTethering` 通常会被服务端权限校验拒绝（要求 `NETWORK_SETTINGS`/网络栈特权）——但 **ROMI/版本差异可能未严格校验**，且若 MacroDroid 是「先无条件 transact、失败才引导 Shizuku/ADB」，就能解释「**无 Shizuku 也能开**」的用户实测反馈。
+- ⏳ 待第 3 次逆向确认 SetHotspotAction 内是否存在无条件直连路径；并结合真机实测（无 Shizuku 的 A12/MacroDroid 开热点成功与否）修正此节。
+- 与我们的 ② 反射（blacklist → sdk11/12 起 NoSuchMethod）同为「私有 API 只能做开关」；Binder 直呼有无权限门以实测为准。
 
 ## 对 Bluelink 的结论
 

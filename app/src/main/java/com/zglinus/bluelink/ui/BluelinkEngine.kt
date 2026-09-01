@@ -400,13 +400,31 @@ class BluelinkEngine(private val context: Context) {
         netStateMachine?.cancel()
     }
 
-    /** ④ 手动配网确认：登记密码 → 打开系统热点设置 → 回填状态机 onManualConfigured。 */
+    /**
+     * ④ 手动配网确认：登记密码 → 打开系统热点设置 → 回填状态机 onManualConfigured。
+     *
+     * 孤儿确认兜底：若状态机已 TEARDOWN / 为 null / 不活动（用户跳系统开热点+设密码期间
+     * 状态机可能已超时中止并置空），自动补一次 [startNetworking]（其「忽略已在进程中」守卫
+     * 保证不重复启动/不递归）后再回填 onManualConfigured(ssid,pwd)。
+     */
     fun confirmManualPwd() {
         val pwd = ui.manualPwdInput.trim()
         val ssid = ui.manualSsidInput.trim().ifBlank { "Bluelink" }
         DiagLogger.log(TAG, "④ 手动配网确认：ssid=$ssid pwdLen=${pwd.length}")
         hotspotManager.setPassword(pwd) // 密码登记（App 不生成不指定）
         openHotspotSettings() // 打开系统热点设置（用户手动开启/保存热点）
+        val m = netStateMachine
+        val active = m != null &&
+            m.currentState != NetState.IDLE &&
+            m.currentState != NetState.TEARDOWN
+        if (!active) {
+            // 孤儿确认兜底：状态机不活动（已中止置空 / TEARDOWN / IDLE）→ 补一次 startNetworking
+            DiagLogger.log(
+                TAG,
+                "④ 手动配网确认时状态机不活动（machine=${m != null} state=${m?.currentState}），补 startNetworking()",
+            )
+            startNetworking()
+        }
         netStateMachine?.onManualConfigured(ssid, pwd.ifBlank { null })
         ui.manualPwdDialog = false
     }

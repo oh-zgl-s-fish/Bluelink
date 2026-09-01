@@ -19,7 +19,7 @@ package com.zglinus.bluelink.networking
 data class Capability(
     /** 是否具备 root 权限（root 通道可走 L1 自动热点）。 */
     val isRoot: Boolean,
-    /** 是否具备私有 API 能力（一期按 sdkInt in 26..28 启发，B 包按机型实测替换）。 */
+    /** 是否具备私有 API 能力（一期按 sdkInt in 26..33 启发——可尝试范围；真实可行性由 B 包 HotspotManager 反射 try 实测收口）。 */
     val privateApiCapable: Boolean,
     /** 是否具备 Local-only 热点能力（Android 8-9 或 13+，10-12 盲区禁用）。 */
     val localOnlyAvailable: Boolean,
@@ -145,14 +145,16 @@ private fun batteryWins(mine: Int?, peer: Int?): Boolean =
  *
  * - `localOnlyAvailable`：`sdkInt in 26..28 || sdkInt >= 33`（Android 8-9 或 13+；
  *   10-12 为 Local-only 热点盲区，禁用）；
- * - `privateApiCapable`：一期按 `sdkInt in 26..28` 启发（B 包按机型实测替换，见设计文档）；
+ * - `privateApiCapable`：一期按 `sdkInt in 26..33` 启发（可尝试范围；真实可行性由 B 包
+ *   HotspotManager 反射 try 实测收口，见设计文档）；
  * - `isRoot`、`battery` 由调用方采集后透传。
  */
 fun buildLocalCapability(isRoot: Boolean, battery: Int?, sdkInt: Int): Capability {
-    // 8-9（26..28）或 13+（>=33）可用；10-12 盲区禁用
+    // 8-9（26..28）或 13+（>=33）可用；10-12 盲区禁用（localOnlyAvailable 判定不动）
     val localOnlyAvailable = sdkInt in 26..28 || sdkInt >= 33
-    // 一期私有 API 启发：仅 8-9；B 包按机型实测替换
-    val privateApiCapable = sdkInt in 26..28
+    // 一期私有 API 启发：可尝试范围放宽到 8-13（26..33，如小米 12S / Android 12）；
+    // 真实可行性由后续 B 包 HotspotManager 反射 try 实测收口（仅标记「可尝试」，启动失败仍会逐级降级）
+    val privateApiCapable = sdkInt in 26..33
     return Capability(
         isRoot = isRoot,
         privateApiCapable = privateApiCapable,

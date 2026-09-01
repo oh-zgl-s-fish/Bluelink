@@ -56,13 +56,15 @@ enum class NetState {
  *   → 收到 ack → TRANSPORT → [Callbacks.onTransportReady]；
  * - 手动（`who == null` 即 MANUAL）：NEGOTIATING → HOTSPOT_STARTING（触发 ④ UI）→ `onManualConfigured(ssid,pwd)`
  *   → offer → OFFER_SENT（后续同热点方）；
- * - 超时/失败：任意等待步骤 15s 超时或失败 → 发 abort(type=abort, reason) → TEARDOWN → [Callbacks.onAbort](reason)；
+ * - 超时/失败：任意等待步骤超时（默认 15s；④ 手动配网等待用户配置回填为 120s）或失败
+ *   → 发 abort(type=abort, reason) → TEARDOWN → [Callbacks.onAbort](reason)；
  * - 切角色：收到对端 abort 且 reason 含「[REASON_CANT_OPEN_HOTSPOT]」、本机能力可用 →
  *   Arbiter 重算（对端能力按无法开启置零）→ 重新走热点方流程；
  * - `cancel()`：发 abort（用户取消）→ TEARDOWN。
  *
  * 线程模型：与 [SessionManager] 一致，所有公开方法由主线程调用（engine 的 BLE 回调均已切回主线程）；
- * 超时用 [Handler]（主 Looper，工程内既有 mainHandler 模式），每步 15s。
+ * 超时用 [Handler]（主 Looper，工程内既有 mainHandler 模式），默认每步 15s；
+ * ④ 手动配网等待用户配置回填（MANUAL）为独立常量 [MANUAL_TIMEOUT_MS]（120s，用户需跳系统开热点+设密码）。
  *
  * @param session 持久信令会话（attach 后收发 [SignalMessage]）。
  * @param hotspot 热点管理器（启动等级枚举为 [HotspotStartLevel]；仲裁的 [HotspotLevel] 仅用于结果携带）。
@@ -113,6 +115,9 @@ class NetworkingStateMachine(
     private var offerPeerIp: String = ""
 
     private val timeoutRunnable = Runnable { onStepTimeout() }
+
+    /** 当前步骤超时时长（scheduleTimeout 记录；超时日志/失败文案用实际时长，支持 MANUAL 120s）。 */
+    private var currentTimeoutMs: Long = STEP_TIMEOUT_MS
 
     /** 当前状态（只读）。 */
     val currentState: NetState get() = state
@@ -249,7 +254,7 @@ class NetworkingStateMachine(
     /** 手动④ 专用入口：仲裁 MANUAL 时直接触发 UI 等待回填（跳过自动等级）。 */
     private fun startManualFlow() {
         enter(NetState.HOTSPOT_STARTING)
-        scheduleTimeout("MANUAL 等待用户配置")
+        scheduleTimeout("MANUAL 等待用户配置", MANUAL_TIMEOUT_MS)
         val result = hotspot.start(HotspotStartLevel.MANUAL) // 触发 HotspotListener.onManualRequest（UI）
         DiagLogger.log(tag, "手动④ 启动结果 success=${result.success} error=${result.error}")
         if (result.success) {
@@ -282,8 +287,11 @@ class NetworkingStateMachine(
             HotspotStartLevel.MANUAL -> {
                 if (result.error == AWAITING_MANUAL) {
                     // ④ 手动配网进行中（start(MANUAL) 已触发 UI）：等待 onManualConfigured 回填
-                    DiagLogger.log(tag, "④ 手动配网进行中：等待 onManualConfigured(ssid,pwd)（15s 超时）")
-                    scheduleTimeout("MANUAL 等待用户配置")
+                    DiagLogger.log(
+                        tag,
+                        "④ 手动配网进行中：等待 onManualConfigured(ssid,pwd)（${MANUAL_TIMEOUT_MS / 1000}s 超时）",
+                    )
+                    scheduleTimeout("MANUAL 等待用户配置", MANUAL_TIMEOUT_MS)
                 } else {
                     fail("热点全部等级均无法启动（末级 MANUAL 失败：${result.error}）")
                 }
@@ -486,10 +494,11 @@ class NetworkingStateMachine(
 
     // ---------- 超时与失败 ----------
 
-    private fun scheduleTimeout(stage: String) {
+    private fun scheduleTimeout(stage: String, timeoutMs: Long = STEP_TIMEOUT_MS) {
         cancelTimer()
-        DiagLogger.log(tag, "启动 $stage 超时定时（${STEP_TIMEOUT_MS / 1000}s）")
-        handler.postDelayed(timeoutRunnable, STEP_TIMEOUT_MS)
+        currentTimeoutMs = timeoutMs
+        DiagLogger.log(tag, "启动 $stage 超时定时（${timeoutMs / 1000}s）")
+        handler.postDelayed(timeoutRunnable, timeoutMs)
     }
 
     private fun cancelTimer() {
@@ -506,8 +515,8 @@ class NetworkingStateMachine(
             NetState.JOINED -> "等待 ack"
             else -> state.name
         }
-        DiagLogger.log(tag, "步骤超时（${STEP_TIMEOUT_MS / 1000}s）：$stage（state=$state）")
-        fail("${STEP_TIMEOUT_MS / 1000}s 步骤超时：$stage")
+        DiagLogger.log(tag, "步骤超时（${currentTimeoutMs / 1000}s）：$stage（state=$state）")
+        fail("${currentTimeoutMs / 1000}s 步骤超时：$stage")
     }
 
     /** 失败收敛：发 abort（type=abort, reason）→ TEARDOWN → onAbort(reason)（上层决定降级/切角色）。 */
@@ -548,7 +557,10 @@ class NetworkingStateMachine(
         /** HotspotManager 手动④ 的骨架返回标记（error 字段，等待回填）。 */
         private const val AWAITING_MANUAL = "AwaitingManual"
 
-        /** 每步超时：15s。 */
+        /** 每步超时（默认）：15s。 */
         private const val STEP_TIMEOUT_MS: Long = 15_000L
+
+        /** ④ 手动配网等待用户配置回填超时：120s（用户需跳系统开热点+设密码+回来确认，15s 必超时）。 */
+        private const val MANUAL_TIMEOUT_MS: Long = 120_000L
     }
 }

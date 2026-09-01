@@ -18,7 +18,7 @@ enum class HotspotStartLevel {
     /** ① L1 自动热点：root 通道（su 提权创建系统热点）。 */
     L1_ROOT,
 
-    /** ② L1 自动热点：私有 API 通道（反射系统隐藏接口；一期按 `sdkInt in 26..28` 启发，B 包按机型实测替换）。 */
+    /** ② L1 自动热点：私有 API 通道（反射系统隐藏接口；一期按 `sdkInt in 26..33` 可尝试启发，与 [Arbiter] 一致；真实可行性由 B 包反射 try 实测收口）。 */
     L1_PRIVATE_API,
 
     /** ③ L2 本地热点：Local-only 无密码局域网（Android 8-9 或 13+，10-12 盲区禁用）。 */
@@ -67,8 +67,8 @@ interface HotspotListener {
  *   返回骨架 `HotspotResult(false, error = "AwaitingManual")`；用户密码经 [setPassword] 登记，
  *   供后续 offer（热点信息广播）使用。
  *
- * 私有 API 一期按 `sdkInt in 26..28` 启发（与 [Arbiter.buildLocalCapability] 的
- * `privateApiCapable` 判定一致），B 包按机型实测替换。
+ * 私有 API 一期按 `sdkInt in 26..33` 启发（可尝试范围，与 [Arbiter.buildLocalCapability] 的
+ * `privateApiCapable` 判定一致）；真实可行性由 B 包反射 try 实测收口。
  */
 class HotspotManager(private val listener: HotspotListener) {
 

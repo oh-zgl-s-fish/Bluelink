@@ -199,6 +199,28 @@ private fun LocalStatusCard(
                     color = MaterialTheme.colorScheme.error,
                 )
             }
+
+            // ============ 信令自测（验证包）：状态行 + 开/关按钮 ============
+            ui.signalTestStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (ui.signalTestRunning) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+            BluelinkEngine.current()?.let { engine ->
+                TextButton(
+                    onClick = {
+                        if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
+                    },
+                ) {
+                    Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测")
+                }
+            }
         }
     }
 }

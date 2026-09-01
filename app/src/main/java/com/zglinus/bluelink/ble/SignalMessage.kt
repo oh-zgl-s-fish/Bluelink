@@ -9,7 +9,7 @@ import org.json.JSONObject
  *
  * 单条消息（UTF-8，静态上限 500B，与 [Constants.MAX_HANDSHAKE_BYTES] 对齐的安全上限）字段定稿：
  * {
- *   "type": "offer" | "joined" | "abort" | "ack",
+ *   "type": "offer" | "joined" | "abort" | "ack" | "ping" | "pong",
  *   "payload": { ... } | null    // ack 无 payload
  * }
  *
@@ -18,6 +18,8 @@ import org.json.JSONObject
  * - joined: { "ip": "<对端 IPv4>" }
  * - abort:  { "reason": "<原因>" }
  * - ack:    无 payload（encode 省略 payload 键；decode 对缺失/null 均还原为 null）
+ * - ping:   { "seq": <Int 序号>, "t": <Long 毫秒时间戳> }   // 信令自测（验证包）心跳：
+ * - pong:   同 ping 的 payload（对端原样回显 seq/t），本端按 seq 匹配记 RTT=now-t
  *
  * 对称性：encode 产出的 JSON 均可被 decode 还原（type 非空、payload 缺失或 NULL 均还原为 null）。
  */
@@ -32,6 +34,10 @@ object SignalProtocol {
     const val TYPE_JOINED = "joined"
     const val TYPE_ABORT = "abort"
     const val TYPE_ACK = "ack"
+
+    /** 信令自测（验证包）心跳类型：ping 携带 {seq, t}，对端回 pong（同 seq/t）。 */
+    const val TYPE_PING = "ping"
+    const val TYPE_PONG = "pong"
 
     private const val TAG = "SignalProtocol"
     private const val F_TYPE = "type"

@@ -73,6 +73,14 @@ class BluelinkUiState {
     /** 最近一条会话信令（持久信令会话 A2；engine 转发 SessionManager 上抛，供 UI 后续展示）。 */
     var lastSignal by mutableStateOf<Pair<String, SignalMessage>?>(null)
 
+    // ============ 信令自测（Bluelink 验证包） ============
+
+    /** 信令自测状态行文本（engine 经 SignalTest 回调同步，netPoller 500ms 兑底刷新；null = 尚未开始）。 */
+    var signalTestStatus by mutableStateOf<String?>(null)
+
+    /** 信令自测是否运行中（「信令自测」开/关按钮状态依据）。 */
+    var signalTestRunning by mutableStateOf(false)
+
     // ============ A5 组网（networking）UI 状态 ============
 
     /** 组网阶段展示文本（engine 轮询状态机 currentState 映射；null = 未组网）。 */

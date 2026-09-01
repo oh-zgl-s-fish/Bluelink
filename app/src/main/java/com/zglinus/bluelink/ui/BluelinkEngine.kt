@@ -22,6 +22,8 @@ import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.RootDetector
 import com.zglinus.bluelink.ble.SessionManager
 import com.zglinus.bluelink.ble.SignalMessage
+import com.zglinus.bluelink.ble.SignalProtocol
+import com.zglinus.bluelink.ble.SignalTest
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.NetworkSummary
@@ -129,6 +131,9 @@ class BluelinkEngine(private val context: Context) {
     /** 持久信令会话管理器（A2）：握手成功后 attach 保留连接，信令经 WRITE/NOTIFY 通道收发。 */
     private lateinit var sessionManager: SessionManager
 
+    /** 信令自测（验证包）：attach 后自动 120s 心跳 ping/pong 收发（真机验证通道长时双工可靠性）。 */
+    private lateinit var signalTest: SignalTest
+
     val ui = BluelinkUiState()
 
     // ============ A5 组网接线 ============
@@ -210,6 +215,10 @@ class BluelinkEngine(private val context: Context) {
      */
     private val netPoller = object : Runnable {
         override fun run() {
+            // 信令自测（验证包）：500ms 轮询同步最新状态（主来源为 SignalTest 事件回调，此处兑底刷新；
+            // 组网不活动时轮询自停，由回调继续驱动）
+            ui.signalTestStatus = signalTest.status()
+            ui.signalTestRunning = signalTest.isRunning
             val m = netStateMachine ?: run {
                 ui.netActive = false
                 mainHandler.removeCallbacks(this)
@@ -232,9 +241,20 @@ class BluelinkEngine(private val context: Context) {
         // 回调统一转发给 SessionManager；SessionManager 上抛的信令（onRemoteSignal）落库到 ui。
         // lateinit 说明：gattClient/gattServer 回调 lambda 仅在运行期触发，此时 sessionManager 已赋值。
         sessionManager = SessionManager(appContext, gattClient, gattServer)
+        // 信令自测（验证包）：绑定 SessionManager + 主线程定时器；状态变化（start/每条 send/pong/stop）
+        // 经回调实时同步 ui.signalTestStatus（netPoller 另有 500ms 兜底刷新）
+        signalTest = SignalTest(sessionManager, mainHandler) { running, status ->
+            ui.signalTestRunning = running
+            ui.signalTestStatus = status
+        }
         sessionManager.setCallbacks(object : SessionManager.Callbacks {
             override fun onRemoteSignal(peerAddress: String, msg: SignalMessage) {
                 DiagLogger.log(TAG, "引擎上抛会话信令: $peerAddress type=${msg.type}")
+                // 信令自测（验证包）：ping/pong 仅用于测通道（ping 回 pong、pong 统计），不进状态机
+                if (msg.type == SignalProtocol.TYPE_PING || msg.type == SignalProtocol.TYPE_PONG) {
+                    signalTest.onRemoteSignal(msg)
+                    return
+                }
                 ui.lastSignal = peerAddress to msg
                 // A5：转发组网状态机（A3c 按 type 分发 offer/joined/ack/abort；
                 // offer 经状态机回调 onOfferReceived 驱动 WifiJoiner 接入）
@@ -321,6 +341,7 @@ class BluelinkEngine(private val context: Context) {
         if (sessionManager.isAttached) {
             DiagLogger.log(TAG, "发起新握手 ${device.address}：先 detach 当前会话 ${sessionManager.currentPeer()}")
             sessionManager.detach()
+            signalTest.stop() // 信令自测随会话结束停止（防定时器泄漏）
         }
         // 握手连接仲裁：若本机 Server 已与该设备建立反连接，先断开对端反连，
         // 避免同一设备 Client→对端 + 对端 Client→本机 Server 双 GATT 连接并发（蓝牙栈写入挂起根因）；
@@ -337,6 +358,23 @@ class BluelinkEngine(private val context: Context) {
     fun dismissSheet() {
         ui.selectedDevice = null
         updateNetBtnVisibility()
+    }
+
+    // ============ 信令自测（验证包） ============
+
+    /** 手动启动信令自测（attach 后已自动开始；此入口供 UI「信令自测」按钮手动重跑/补跑）。 */
+    fun startSignalTest() {
+        if (!sessionManager.isAttached) {
+            DiagLogger.log(TAG, "信令自测：当前无持久会话（未 attach），忽略手动启动")
+            ui.signalTestStatus = "信令测试: 未附着会话（握手后自动开始）"
+            return
+        }
+        signalTest.start()
+    }
+
+    /** 手动停止信令自测。 */
+    fun stopSignalTest() {
+        signalTest.stop()
     }
 
     // ============ A5 组网动作（UI 入口） ============
@@ -471,6 +509,7 @@ class BluelinkEngine(private val context: Context) {
 
     /** 退出：停掉所有 BLE 并注销接收器（防泄漏）。 */
     fun release() {
+        signalTest.stop() // 信令自测停止（防定时器泄漏）
         stopAllBle()
         try {
             appContext.unregisterReceiver(bleStateReceiver)
@@ -503,6 +542,7 @@ class BluelinkEngine(private val context: Context) {
         scanner.stop()
         gattServer.stop()
         sessionManager.detach() // 会话结束：恢复原 cleanup（内部 gattClient.release()）
+        signalTest.stop() // 信令自测随会话停止（防定时器泄漏）
         gattClient.release() // 静默中断进行中的握手（幂等）
         ui.advertising = false
         ui.scanning = false
@@ -542,6 +582,8 @@ class BluelinkEngine(private val context: Context) {
         // 持久信令会话：握手成功（Client 或 Server 任一通道）即 attach；
         // Client 侧由 keepAlive() 保留底层连接替代原硬 cleanup；Server 侧保留连接腿
         sessionManager.attach(deviceAddress)
+        // 信令自测（验证包）：attach 成功后自动开始 120s 心跳收发（每 5s 一条 ping，对端回 pong）
+        signalTest.start()
     }
 
     private fun refreshAllLanStatus() {

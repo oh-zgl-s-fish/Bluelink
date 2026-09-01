@@ -62,4 +62,10 @@ class BluelinkUiState {
 
     /** 最近一次握手失败原因。 */
     var handshakeError by mutableStateOf<String?>(null)
+
+    /** 诊断日志弹窗是否可见。 */
+    var diagVisible by mutableStateOf(false)
+
+    /** 诊断日志弹窗当前展示的文本（打开/刷新时由 UI 侧填充 DiagLogger.dump()）。 */
+    var diagnosticText by mutableStateOf("")
 }

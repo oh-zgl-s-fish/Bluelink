@@ -13,6 +13,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.util.Log
+import com.zglinus.bluelink.diag.DiagLogger
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -44,6 +45,7 @@ class GattServer(
         val server = bluetoothManager.openGattServer(context, serverCallback)
         if (server == null) {
             Log.w(TAG, "openGattServer 返回 null（蓝牙未开或权限不足）")
+            DiagLogger.log(TAG, "openGattServer 返回 null（蓝牙未开或权限不足）")
             return
         }
         gattServer = server
@@ -70,6 +72,7 @@ class GattServer(
         service.addCharacteristic(writeChar)
         service.addCharacteristic(notifyChar)
         server.addService(service)
+        DiagLogger.log(TAG, "GATT Server 已启动，Service 已注册")
     }
 
     fun stop() {
@@ -83,13 +86,16 @@ class GattServer(
                 server.clearServices()
             } catch (e: Exception) {
                 Log.w(TAG, "clearServices 异常: $e")
+                DiagLogger.log(TAG, "clearServices 异常: $e")
             }
             try {
                 server.close()
             } catch (e: Exception) {
                 Log.w(TAG, "close 异常: $e")
+                DiagLogger.log(TAG, "close 异常: $e")
             }
         }
+        DiagLogger.log(TAG, "GATT Server 已停止")
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
@@ -97,10 +103,12 @@ class GattServer(
             mainHandler.post {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     connectedDevices[device.address] = device
+                    DiagLogger.log(TAG, "${device.address} 已连接 Server")
                 } else {
                     connectedDevices.remove(device.address)
                     subscribedDevices.remove(device.address)
                     pendingNotify.remove(device.address)
+                    DiagLogger.log(TAG, "${device.address} 已断开 Server")
                 }
             }
         }
@@ -122,16 +130,20 @@ class GattServer(
                 val msg = HandshakeProtocol.decode(value)
                 if (msg != null) {
                     Log.d(TAG, "收到 ${device.address} 握手: ${HandshakeProtocol.toJson(msg)}")
+                    DiagLogger.log(TAG, "收到 ${device.address} 握手: ${HandshakeProtocol.toJson(msg)}")
                     callbacks.onRemoteHandshake(device.address, msg)
                     // 回发本机握手（尚未订阅则挂起，订阅后补发）
                     val reply = HandshakeProtocol.encode(HandshakeProtocol.buildLocal(context))
                     if (subscribedDevices[device.address] == true) {
+                        DiagLogger.log(TAG, "${device.address} 已订阅，立即回发握手 ${reply.size}B")
                         sendNotify(device, reply)
                     } else {
+                        DiagLogger.log(TAG, "${device.address} 尚未订阅，握手回复挂起 ${reply.size}B")
                         pendingNotify[device.address] = reply
                     }
                 } else {
                     Log.w(TAG, "握手 JSON 无效，来自 ${device.address}")
+                    DiagLogger.log(TAG, "握手 JSON 无效，来自 ${device.address}")
                 }
             }
         }
@@ -152,8 +164,12 @@ class GattServer(
                 }
                 val enabled = value.isNotEmpty() && value[0].toInt() == 1
                 subscribedDevices[device.address] = enabled
+                DiagLogger.log(TAG, "${device.address} 订阅 NOTIFY: enabled=$enabled")
                 if (enabled) {
-                    pendingNotify.remove(device.address)?.let { sendNotify(device, it) }
+                    pendingNotify.remove(device.address)?.let {
+                        DiagLogger.log(TAG, "${device.address} 订阅后补发挂起握手 ${it.size}B")
+                        sendNotify(device, it)
+                    }
                 }
             }
         }
@@ -161,6 +177,7 @@ class GattServer(
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "onNotificationSent status=$status 到 ${device.address}")
+                DiagLogger.log(TAG, "onNotificationSent 非成功 status=$status 到 ${device.address}")
             }
         }
     }
@@ -180,6 +197,7 @@ class GattServer(
             }
         } catch (e: Exception) {
             Log.w(TAG, "notifyCharacteristicChanged 异常: $e")
+            DiagLogger.log(TAG, "notifyCharacteristicChanged 异常: $e")
         }
     }
 

@@ -1,6 +1,8 @@
 package com.zglinus.bluelink.ui
 
+import android.content.Context
 import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -9,11 +11,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -29,14 +35,23 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.HandshakeProtocol
+import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 主页面（docs/ui-design.md §4.1 一期最简版）：
@@ -99,6 +114,23 @@ fun MainScreen(
             }
         }
     }
+
+    // 诊断日志弹窗：打开时自动加载一次 dump
+    LaunchedEffect(ui.diagVisible) {
+        if (ui.diagVisible) ui.diagnosticText = DiagLogger.dump()
+    }
+
+    if (ui.diagVisible) {
+        DiagnosticLogDialog(
+            text = ui.diagnosticText,
+            onDismiss = { ui.diagVisible = false },
+            onRefresh = { ui.diagnosticText = DiagLogger.dump() },
+            onClear = {
+                DiagLogger.clear()
+                ui.diagnosticText = DiagLogger.dump()
+            },
+        )
+    }
 }
 
 /** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）。 */
@@ -123,6 +155,7 @@ private fun LocalStatusCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                TextButton(onClick = { ui.diagVisible = true }) { Text("诊断") }
                 Switch(
                     checked = advertisingWanted,
                     onCheckedChange = onAdvertisingWantedChange,
@@ -385,5 +418,66 @@ fun DeviceDetailSheet(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("关闭") }
         }
+    }
+}
+
+/** 诊断日志弹窗：可滚动文本 + 刷新/复制/导出/清空（导出写 App 外部私有目录，无需存储权限）。 */
+@Composable
+private fun DiagnosticLogDialog(
+    text: String,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("诊断日志") },
+        text = {
+            Column {
+                Text(
+                    text = text.ifBlank { "（暂无日志）" },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onRefresh) { Text("刷新") }
+                    TextButton(onClick = {
+                        clipboard.setText(AnnotatedString(text))
+                        Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                    }) { Text("复制全部") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { exportDiagnosticFile(context, text) }) { Text("导出文件") }
+                    TextButton(onClick = onClear) { Text("清空") }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+/** 导出诊断日志到 getExternalFilesDir(null)/diag_<yyyyMMdd_HHmmss>.txt，Toast 提示完整路径。 */
+private fun exportDiagnosticFile(context: Context, text: String) {
+    val dir = context.getExternalFilesDir(null)
+    if (dir == null) {
+        Toast.makeText(context, "外部存储不可用，导出失败", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val name = "diag_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
+    val file = File(dir, name)
+    try {
+        file.writeText(text)
+        Toast.makeText(context, "已导出: ${file.absolutePath}", Toast.LENGTH_LONG).show()
+    } catch (e: Exception) {
+        Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }

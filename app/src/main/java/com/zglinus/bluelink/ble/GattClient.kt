@@ -10,6 +10,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.util.Log
+import com.zglinus.bluelink.diag.DiagLogger
 
 /**
  * GATT Client 端：连接对方 → 订阅 NOTIFY → 写入本机握手 JSON → 等待对方握手通知。
@@ -46,6 +47,7 @@ class GattClient(
     fun connect(device: BluetoothDevice) {
         if (gatt != null) {
             Log.w(TAG, "已有进行中的握手会话，忽略 ${device.address}")
+            DiagLogger.log(TAG, "已有进行中的握手会话，拒绝新请求 ${device.address}")
             callbacks.onHandshakeFailed(device.address, "本机握手会话忙")
             return
         }
@@ -54,6 +56,7 @@ class GattClient(
         mtu = DEFAULT_ATT_MTU
         targetAddress = device.address
         Log.d(TAG, "连接 ${device.address} 开始握手")
+        DiagLogger.log(TAG, "连接 ${device.address} 开始握手")
         @Suppress("DEPRECATION")
         val g = device.connectGatt(context, false, gattCallback)
         if (g == null) {
@@ -68,7 +71,10 @@ class GattClient(
     fun cancel() {
         val addr = targetAddress
         cleanup()
-        if (addr != null) callbacks.onHandshakeFailed(addr, "已取消")
+        if (addr != null) {
+            DiagLogger.log(TAG, "主动取消握手 $addr")
+            callbacks.onHandshakeFailed(addr, "已取消")
+        }
     }
 
     /** 释放资源（静默）。 */
@@ -82,10 +88,12 @@ class GattClient(
                         if (status != BluetoothGatt.GATT_SUCCESS) {
                             fail("连接失败(status=$status)")
                         } else {
+                            DiagLogger.log(TAG, "已连接 ${targetAddress}，开始 MTU 协商")
                             // MTU 协商先行：默认 ATT MTU=23 时单包载荷仅 20B，150B 握手 JSON 传不过去；
                             // 先 requestMtu(512)，随后由 onMtuChanged 触发 discoverServices
                             if (!gatt.requestMtu(REQUESTED_MTU)) {
                                 Log.w(TAG, "requestMtu 返回 false，按默认 MTU 继续服务发现")
+                                DiagLogger.log(TAG, "requestMtu 返回 false，按默认 MTU 继续服务发现")
                                 gatt.discoverServices()
                             }
                         }
@@ -103,6 +111,7 @@ class GattClient(
                 // 成功取协商值；失败兜底默认 23（ATT 标准最小 MTU）。无论结果都继续服务发现
                 this@GattClient.mtu = if (status == BluetoothGatt.GATT_SUCCESS) mtu else DEFAULT_ATT_MTU
                 Log.d(TAG, "MTU 协商: mtu=${this@GattClient.mtu} status=$status，继续服务发现")
+                DiagLogger.log(TAG, "onMtuChanged: mtu=${this@GattClient.mtu} status=$status，继续服务发现")
                 gatt.discoverServices()
             }
         }
@@ -139,12 +148,14 @@ class GattClient(
                     return@post
                 }
                 writeCharacteristicCompat(gatt, write, bytes)
+                DiagLogger.log(TAG, "握手写入已发起: ${bytes.size}B（MTU=$mtu，单包上限=${maxPayload}B）")
             }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "CCC 写入失败 status=$status")
+                DiagLogger.log(TAG, "CCC 写入失败 status=$status")
             }
         }
 
@@ -158,6 +169,8 @@ class GattClient(
                 // fail 内部有 cleaned 防重入，握手成功路径 cleanup 后不会再走到
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     fail("握手消息发送失败(status=$status)")
+                } else {
+                    DiagLogger.log(TAG, "onCharacteristicWrite 握手写入确认成功 status=$status")
                 }
             }
         }
@@ -185,10 +198,12 @@ class GattClient(
                 handshakeDone = true
                 val addr = targetAddress
                 Log.d(TAG, "收到 ${addr} 握手: ${HandshakeProtocol.toJson(msg)}")
+                DiagLogger.log(TAG, "收到对方 ${addr} 握手: ${HandshakeProtocol.toJson(msg)}")
                 cleanup()
                 if (addr != null) callbacks.onHandshakeCompleted(addr, msg)
             } else {
                 Log.w(TAG, "对方握手通知解析失败")
+                DiagLogger.log(TAG, "对方握手通知解析失败（${value.size}B）")
             }
         }
     }
@@ -209,6 +224,7 @@ class GattClient(
             }
         } catch (e: Exception) {
             Log.w(TAG, "writeCharacteristic 异常: $e")
+            DiagLogger.log(TAG, "writeCharacteristic 异常: $e")
             fail("写入异常: ${e.message}")
         }
     }
@@ -225,6 +241,7 @@ class GattClient(
             }
         } catch (e: Exception) {
             Log.w(TAG, "writeDescriptor 异常: $e")
+            DiagLogger.log(TAG, "writeDescriptor 异常: $e")
         }
     }
 
@@ -232,6 +249,7 @@ class GattClient(
         if (cleaned) return
         val addr = targetAddress
         Log.w(TAG, "握手失败 ${addr}: $reason")
+        DiagLogger.log(TAG, "握手失败 ${addr}: $reason")
         cleanup()
         if (addr != null) callbacks.onHandshakeFailed(addr, reason)
     }
@@ -249,11 +267,13 @@ class GattClient(
                 g.disconnect()
             } catch (e: Exception) {
                 Log.w(TAG, "disconnect 异常: $e")
+                DiagLogger.log(TAG, "disconnect 异常: $e")
             }
             try {
                 g.close()
             } catch (e: Exception) {
                 Log.w(TAG, "close 异常: $e")
+                DiagLogger.log(TAG, "close 异常: $e")
             }
         }
     }

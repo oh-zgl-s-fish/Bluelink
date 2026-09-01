@@ -16,6 +16,7 @@ import com.zglinus.bluelink.ble.GattClient
 import com.zglinus.bluelink.ble.GattServer
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.RootDetector
+import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.SameLanChecker
 
@@ -42,11 +43,13 @@ class BluelinkEngine(private val context: Context) {
         override fun onAdvertisingStarted() {
             ui.advertising = true
             ui.advertiserError = null
+            DiagLogger.log(TAG, "广播已启动（回调 UI）")
         }
 
         override fun onAdvertisingFailed(reason: String) {
             ui.advertising = false
             ui.advertiserError = reason
+            DiagLogger.log(TAG, "广播启动失败回调 UI: $reason")
         }
     })
 
@@ -57,11 +60,13 @@ class BluelinkEngine(private val context: Context) {
 
         override fun onScanFailed(reason: String) {
             ui.scanError = reason
+            DiagLogger.log(TAG, "扫描失败回调 UI: $reason")
         }
     })
 
     private val gattServer = GattServer(appContext, mainHandler, object : GattServer.Callbacks {
         override fun onRemoteHandshake(deviceAddress: String, handshake: HandshakeMessage) {
+            DiagLogger.log(TAG, "Server 收到远端握手: $deviceAddress alias=${handshake.alias}")
             applyRemoteHandshake(deviceAddress, handshake)
         }
     })
@@ -70,12 +75,14 @@ class BluelinkEngine(private val context: Context) {
         override fun onHandshakeCompleted(deviceAddress: String, handshake: HandshakeMessage) {
             ui.handshaking = false
             ui.handshakeError = null
+            DiagLogger.log(TAG, "握手完成回调 UI: $deviceAddress alias=${handshake.alias}")
             applyRemoteHandshake(deviceAddress, handshake)
         }
 
         override fun onHandshakeFailed(deviceAddress: String, reason: String) {
             ui.handshaking = false
             ui.handshakeError = reason
+            DiagLogger.log(TAG, "握手失败回调 UI: $deviceAddress reason=$reason")
         }
     })
 
@@ -86,6 +93,7 @@ class BluelinkEngine(private val context: Context) {
             val state = intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
             mainHandler.post {
                 ui.btEnabled = state == BluetoothAdapter.STATE_ON
+                DiagLogger.log(TAG, "蓝牙状态变更: ${btStateName(state ?: BluetoothAdapter.ERROR)}")
                 if (ui.btEnabled) startBleIfNeeded() else stopAllBle()
             }
         }
@@ -106,6 +114,7 @@ class BluelinkEngine(private val context: Context) {
     /** 权限请求结果回填。 */
     fun onPermissionsResult(granted: Boolean) {
         ui.permissionsGranted = granted
+        DiagLogger.log(TAG, "权限请求结果 granted=$granted")
         if (granted) {
             ui.btEnabled = adapter?.isEnabled == true
             if (ui.btEnabled) startBleIfNeeded()
@@ -117,6 +126,7 @@ class BluelinkEngine(private val context: Context) {
     /** 顶部广播开关。 */
     fun setAdvertisingWanted(wanted: Boolean) {
         ui.advertisingWanted = wanted
+        DiagLogger.log(TAG, "用户设置广播/扫描开关 wanted=$wanted")
         if (wanted && ui.permissionsGranted && ui.btEnabled) {
             startBleIfNeeded()
         } else if (!wanted) {
@@ -140,10 +150,12 @@ class BluelinkEngine(private val context: Context) {
             a.getRemoteDevice(entry.address)
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "非法 MAC: ${entry.address}")
+            DiagLogger.log(TAG, "非法 MAC: ${entry.address}")
             return
         }
         ui.handshaking = true
         ui.handshakeError = null
+        DiagLogger.log(TAG, "点设备发起握手 ${device.address}")
         gattClient.connect(device)
     }
 
@@ -169,6 +181,7 @@ class BluelinkEngine(private val context: Context) {
         val a = adapter ?: return
         if (!a.isEnabled) return
         stopAllBle() // 幂等重启
+        DiagLogger.log(TAG, "启动 BLE：广播/扫描/GATT Server")
         advertiser.start(a)
         scanner.start(a)
         bluetoothManager?.let { gattServer.start(it) }
@@ -176,6 +189,7 @@ class BluelinkEngine(private val context: Context) {
     }
 
     private fun stopAllBle() {
+        DiagLogger.log(TAG, "停止 BLE：广播/扫描/GATT Server/客户端")
         advertiser.stop()
         scanner.stop()
         gattServer.stop()
@@ -226,5 +240,13 @@ class BluelinkEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "BluelinkEngine"
+
+        private fun btStateName(state: Int): String = when (state) {
+            BluetoothAdapter.STATE_ON -> "开"
+            BluetoothAdapter.STATE_OFF -> "关"
+            BluetoothAdapter.STATE_TURNING_ON -> "正在开启"
+            BluetoothAdapter.STATE_TURNING_OFF -> "正在关闭"
+            else -> "未知($state)"
+        }
     }
 }

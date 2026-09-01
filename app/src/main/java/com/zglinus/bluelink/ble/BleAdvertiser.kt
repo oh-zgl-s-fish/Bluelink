@@ -7,6 +7,7 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.os.Handler
 import android.util.Log
+import com.zglinus.bluelink.diag.DiagLogger
 
 /**
  * BLE 广播封装：载荷仅携带自定义 Service UUID（128 位，18 字节，单包内放得下），
@@ -26,10 +27,12 @@ class BleAdvertiser(
 
     private val advCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            DiagLogger.log(TAG, "onStartSuccess 广播已启动")
             mainHandler.post { callbacks.onAdvertisingStarted() }
         }
 
         override fun onStartFailure(errorCode: Int) {
+            DiagLogger.log(TAG, "onStartFailure code=$errorCode: ${errorCodeToString(errorCode)}")
             mainHandler.post { callbacks.onAdvertisingFailed(errorCodeToString(errorCode)) }
         }
     }
@@ -38,6 +41,7 @@ class BleAdvertiser(
         stop()
         val leAdvertiser = adapter.bluetoothLeAdvertiser
         if (leAdvertiser == null) {
+            DiagLogger.log(TAG, "bluetoothLeAdvertiser 为 null，本机不支持 BLE 广播")
             mainHandler.post { callbacks.onAdvertisingFailed("本机不支持 BLE 广播") }
             return
         }
@@ -54,6 +58,7 @@ class BleAdvertiser(
             leAdvertiser.startAdvertising(settings, data, advCallback)
         } catch (e: Exception) {
             Log.w(TAG, "startAdvertising 异常: $e")
+            DiagLogger.log(TAG, "startAdvertising 异常: $e")
             mainHandler.post { callbacks.onAdvertisingFailed("startAdvertising: ${e.message}") }
             advertiser = null
         }
@@ -67,6 +72,7 @@ class BleAdvertiser(
                 a.stopAdvertising(advCallback)
             } catch (e: Exception) {
                 Log.w(TAG, "stopAdvertising 异常: $e")
+                DiagLogger.log(TAG, "stopAdvertising 异常: $e")
             }
         }
     }

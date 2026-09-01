@@ -8,6 +8,7 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.os.Handler
 import android.util.Log
+import com.zglinus.bluelink.diag.DiagLogger
 
 /**
  * BLE 扫描封装：ScanFilter 按 [Constants.SERVICE_UUID] 过滤，只关注 Bluelink 设备。
@@ -26,11 +27,14 @@ class BleScanner(
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            Log.i(TAG, "onScanResult device=${result.device?.address} rssi=${result.rssi}")
+            val msg = "onScanResult device=${result.device?.address} rssi=${result.rssi}"
+            Log.i(TAG, msg)
+            DiagLogger.log(TAG, msg)
             mainHandler.post { callbacks.onScanResult(result) }
         }
 
         override fun onScanFailed(errorCode: Int) {
+            DiagLogger.log(TAG, "onScanFailed code=$errorCode: ${errorCodeToString(errorCode)}")
             mainHandler.post { callbacks.onScanFailed(errorCodeToString(errorCode)) }
         }
     }
@@ -39,6 +43,7 @@ class BleScanner(
         stop()
         val leScanner = adapter.bluetoothLeScanner
         if (leScanner == null) {
+            DiagLogger.log(TAG, "bluetoothLeScanner 为 null，本机不支持 BLE 扫描")
             mainHandler.post { callbacks.onScanFailed("本机不支持 BLE 扫描") }
             return
         }
@@ -55,6 +60,7 @@ class BleScanner(
             leScanner.startScan(filters, settings, scanCallback)
         } catch (e: Exception) {
             Log.w(TAG, "startScan 异常: $e")
+            DiagLogger.log(TAG, "startScan 异常: $e")
             mainHandler.post { callbacks.onScanFailed("startScan: ${e.message}") }
             scanner = null
         }
@@ -68,6 +74,7 @@ class BleScanner(
                 s.stopScan(scanCallback)
             } catch (e: Exception) {
                 Log.w(TAG, "stopScan 异常: $e")
+                DiagLogger.log(TAG, "stopScan 异常: $e")
             }
         }
     }

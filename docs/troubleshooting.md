@@ -49,6 +49,22 @@
 
 ---
 
+## 4. 组网链路排障（v0.2.x 系列）
+
+| # | 问题 | 现象 | 根因 | 修复（版本） | 状态 |
+|---|---|---|---|---|---|
+| 4.1 | ④ 手动 15s 超时 | MANUAL 弹窗后用户来不及去系统开热点，必超时 abort | 手动配网超时 15s 过短 | 独立 120s 常量（A.1） | ✅ v0.2.1 |
+| 4.1b | 孤儿密码确认 | 状态机已 TEARDOWN 后用户才确认密码，操作丢失 | 无兜底 | 确认时自动补 `startNetworking()`（A.1） | ✅ v0.2.1 |
+| 4.1c | privateApiCapable 误杀 | sdk 29–33 的私有 API 能力机（小米 12S/Android 12）被判无能力 → 落 MANUAL | 一期静态启发 `sdk in 26..28` | 放宽 `sdk in 26..33` 可尝试，可行性由 B 包运行时 try 定夺（A.1） | ✅ v0.2.1 |
+| 4.2 | offer 发送失败 | 热点方 waiting joined 前对端先 abort | 对端 PEER 等 offer 15s ≠ 热点方 ④ 手动 120s | PEER 等 offer 对齐 120s 同常量（A2） | ✅ v0.2.3 |
+| 4.3 | 信令并发互踩 | ping/pong/offer 背靠背时 `writeCharacteristic 返回 false` 被拒，消息丢失 | GATT 单请求模型下发送无互斥（握手已串行、信令未串） | FIFO 写队列 + inFlight 互斥，onCharacteristicWrite 驱动出队（A.3） | ✅ v0.2.4 |
+| 4.4 | 对端收到 offer 被忽略 | B 收 offer 后无 join、无 joined 回报 → A 等 joined 超时 | 对端状态机未启动（无人触发），offer 在 engine 被丢弃 | 对端 offer 自动接管：收到 offer 即 WifiJoiner.join 并回 joined（A4） | ✅ v0.2.4 |
+| 4.5 | Specifier 无权限异常 | `requestNetwork` 抛 SecurityException「没有权限」 | Android 12 缺 ACCESS_FINE_LOCATION；13+ 缺 NEARBY_WIFI_DEVICES 运行时授权 | join 前置权限检查 + 缺失回调请求 + 授权后重试（v0.2.5） | ⏳ 修复中 |
+
+**经验**：组网链路（握手→仲裁→热点→offer→join→joined）每环节都依赖「信令在正确状态、正确时机、单连接上可靠收发」——任何一步的并发/时序/权限缺口都会表现为「下一步无响应」，诊断日志（SignalTest 心跳 + 状态机日志）是唯一快速定位手段。
+
+---
+
 ## 附：诊断手段（v0.1.3+ 以 App 内置为主）
 
 - **App 内置诊断**（推荐）：主页面状态卡 →「诊断」→ 查看/复制全部/导出文件（`Android/data/com.zglinus.bluelink/files/diag_*.txt`）——不依赖 adb

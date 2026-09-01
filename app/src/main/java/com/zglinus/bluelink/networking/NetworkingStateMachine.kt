@@ -20,7 +20,7 @@ import org.json.JSONObject
  * - [NEGOTIATING]：已记录仲裁结果并分流（who==ME 热点方 / who==PEER 等 offer / MANUAL 手动 UI）；
  * - [HOTSPOT_STARTING]：热点方逐级启动热点（L1_ROOT→L1_PRIVATE_API→L2_LOCAL_ONLY→MANUAL，
  *   含 ④ 手动配网等待回填）；
- * - [OFFER_SENT]：offer 已发送，15s 内等待对端 joined（热点方）；
+ * - [OFFER_SENT]：offer 已发送，120s 内等待对端 joined（热点方，与④ 手动配置/等 offer 对齐）；
  * - [WAIT_JOIN]：对端已收到 offer，等待 WifiJoiner 包完成加入（随后发 joined）；
  * - [JOINED]：热点方已收 joined（同网复核中）；对端已发 joined（等 ack）；
  * - [TRANSPORT]：传输就绪，[NetworkingStateMachine.Callbacks.onTransportReady] 已上抛；
@@ -50,7 +50,7 @@ enum class NetState {
  *   →[HotspotStartLevel.L2_LOCAL_ONLY]→[HotspotStartLevel.MANUAL]，逐级失败自动降级下一级；
  *   ①②③ 均经异步桥 [HotspotManager.startAsync]（③ L2 为 startLocalOnlyHotspot 真异步，
  *   结果经 LocalOnlyHotspotCallback 主线程收敛），见 [tryStartLevel]）
- *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（15s 等 joined）
+ *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（120s 等 joined，与④ 手动配置/对端等 offer 对齐）
  *   → 收到 joined → JOINED（同网复核 SameLanChecker+probeTcp 占位）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
  * - 对端（`who == PEER`）：NEGOTIATING（120s 等 offer，与④ 手动配置对齐）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
@@ -58,7 +58,7 @@ enum class NetState {
  *   → 收到 ack → TRANSPORT → [Callbacks.onTransportReady]；
  * - 手动（`who == null` 即 MANUAL）：NEGOTIATING → HOTSPOT_STARTING（触发 ④ UI）→ `onManualConfigured(ssid,pwd)`
  *   → offer → OFFER_SENT（后续同热点方）；
- * - 超时/失败：任意等待步骤超时（两阶段 120s：手动配置/等 offer 对齐；其余 15s）或失败
+ * - 超时/失败：任意等待步骤超时（三处 120s：手动配置/等 offer/等 joined 对齐；其余 15s）或失败
  *   → 发 abort(type=abort, reason) → TEARDOWN → [Callbacks.onAbort](reason)；
  * - 切角色：收到对端 abort 且 reason 含「[REASON_CANT_OPEN_HOTSPOT]」、本机能力可用 →
  *   Arbiter 重算（对端能力按无法开启置零）→ 重新走热点方流程；
@@ -66,8 +66,9 @@ enum class NetState {
  *
  * 线程模型：与 [SessionManager] 一致，所有公开方法由主线程调用（engine 的 BLE 回调均已切回主线程）；
  * 超时用 [Handler]（主 Looper，工程内既有 mainHandler 模式），默认每步 15s；
- * 两阶段 120s：④ 手动配网等待用户配置回填（MANUAL）与对端等待 offer（PEER）共用对齐常量
- * [MANUAL_TIMEOUT_MS]（120s；用户需跳系统开热点+设密码，期间对端不得 15s 先 abort）。
+ * 三处 120s：④ 手动配网等待用户配置回填（MANUAL）、对端等待 offer（PEER）与热点方等待 joined
+ * （OFFER_SENT）共用对齐常量 [MANUAL_TIMEOUT_MS]（120s；用户需跳系统开热点+设密码，且对端接入含
+ * 「用户点系统 Specifier 确认弹窗」环节，期间任一方不得 15s 先 abort）。
  *
  * @param session 持久信令会话（attach 后收发 [SignalMessage]）。
  * @param hotspot 热点管理器（启动等级枚举为 [HotspotStartLevel]；仲裁的 [HotspotLevel] 仅用于结果携带）。
@@ -119,7 +120,7 @@ class NetworkingStateMachine(
 
     private val timeoutRunnable = Runnable { onStepTimeout() }
 
-    /** 当前步骤超时时长（scheduleTimeout 记录；超时日志/失败文案用实际时长，支持 MANUAL/PEER 等 offer 120s）。 */
+    /** 当前步骤超时时长（scheduleTimeout 记录；超时日志/失败文案用实际时长，支持 MANUAL/PEER 等 offer/OFFER_SENT 等 joined 120s）。 */
     private var currentTimeoutMs: Long = STEP_TIMEOUT_MS
 
     /** 当前状态（只读）。 */
@@ -428,7 +429,7 @@ class NetworkingStateMachine(
 
     /**
      * 热点就绪：④ 登记后 setPassword → 构造 offer（SignalProtocol，ssid/pwd/ip=热点 IP 占位""/hotspotType）
-     * → SessionManager.sendSignal → OFFER_SENT（15s 等 joined）。
+     * → SessionManager.sendSignal → OFFER_SENT（120s 等 joined，与④ 手动配置/对端等 offer 对齐）。
      */
     private fun onHotspotReady(level: HotspotStartLevel, ssid: String?, pwd: String?) {
         if (state != NetState.HOTSPOT_STARTING) return
@@ -448,7 +449,7 @@ class NetworkingStateMachine(
         }
         cancelTimer()
         enter(NetState.OFFER_SENT)
-        scheduleTimeout("OFFER_SENT 等待 joined")
+        scheduleTimeout("OFFER_SENT 等待 joined", PEER_JOIN_TIMEOUT_MS)
     }
 
     /** 构造 offer 信令：payload { ssid, pwd, ip=热点 IP 占位"", hotspotType=启动等级名 }。 */
@@ -692,5 +693,8 @@ class NetworkingStateMachine(
 
         /** 对端等待 offer 超时：与④ 手动配网回填对齐为 120s（引用 [MANUAL_TIMEOUT_MS] 同一值；手动配置期间对端若 15s 先 abort 会导致 offer 发送失败）。 */
         private const val PEER_OFFER_TIMEOUT_MS: Long = MANUAL_TIMEOUT_MS
+
+        /** 热点方等待 joined 超时：与④ 手动配网回填/对端等 offer 对齐为 120s（引用 [MANUAL_TIMEOUT_MS] 同一值；对端接入含「用户点系统 Specifier 确认弹窗」环节，15s 必不够，热点被 abort 关闭）。 */
+        private const val PEER_JOIN_TIMEOUT_MS: Long = MANUAL_TIMEOUT_MS
     }
 }

@@ -47,7 +47,7 @@ enum class HotspotStartLevel {
     /** ② L1 自动热点：私有 API 通道（v0.3.8 改 k1/c 式按名枚举：ConnectivityManager 类自身 getDeclaredMethods 找 "startTethering"（MakroDroid k1/c 手法，真机实锤覆盖 sdk31 的 IConnectivityManager 签名差异）→ invoke 成功 + 状态确认 → systemTetherSuccess 登记复用；失败降级反射 setWifiApEnabled，见 [tryPrivateApiHotspot]）。 */
     L1_PRIVATE_API,
 
-    /** ③ L2 本地热点：Local-only 无密码局域网（Android 8-9 或 13+，10-12 盲区禁用）。 */
+    /** ③ L2 本地热点：Local-only 无密码局域网（Android 8-9 或 13+ 可用；10-12 盲区假设 v0.3.9.2 起放行调用 + onStarted 统一先试读实测：试读非空即推翻假设）。 */
     L2_LOCAL_ONLY,
 
     /** ④ 手动配网：UI 提示用户手工输入/分享热点。 */
@@ -59,11 +59,11 @@ enum class HotspotStartLevel {
  *
  * @param success 是否成功开启热点；false 时 [error] 给出降级/等待原因。
  * @param ssid 热点 SSID（成功时返回，供对端连接；手动路径由 UI 回填）。
- * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；③ L2 本地热点 26-28 由系统下发
- *   （onStarted 读 preSharedKey）、33+ 先试读 preSharedKey（v0.3.9-verify ③-①：网页版主张授权后
- *   可直接读，实测定案），试读空/null 才由用户按系统弹窗回填登记；手动路径由 UI 回填）。
+ * @param pwd 热点密码（成功时返回；② 私有 API 路径由本包自设随机密码；③ L2 本地热点 onStarted 统一
+ *   先试读 preSharedKey（v0.3.9-verify ③-① 实测定案；v0.3.9.2 起 26-32 同样先试读）——非空自动完成；
+ *   空/null 时 33+ 由用户按系统弹窗回填登记、26-32 按盲区失败降级；手动路径由 UI 回填）。
  * @param ip 热点本机 IPv4（② 私有 API 路径启动后采集；未取到为空串 ""，一期允许）。
- * @param error 失败/等待原因（如 root 路径已停用(B1 移除) 降级、③ L2 盲区禁用/系统 reason/启动异常
+ * @param error 失败/等待原因（如 root 路径已停用(B1 移除) 降级、③ L2 盲区失败（sdk 26-32 试读空）/系统 reason/启动异常
  *   降级、`"AwaitingManual"` 等待手动、`"AwaitingWriteSettings"` 等待 WRITE_SETTINGS 授权）。
  */
 data class HotspotResult(
@@ -96,7 +96,7 @@ interface HotspotListener {
      * 网页版主张 13+ 授权 NEARBY_WIFI_DEVICES 后可直接读，以实测定案），试读为空/null
      * （软 AP 配置未回传密码；系统弹窗/通知展示 SSID 与密码）才触发本回调——请求 UI 弹出密码
      * 登记框，请用户按系统弹窗回填密码；回填后经 [HotspotManager.completeLocalOnlyPassword]
-     * 完成 L2 成功结果（26-28 全自动路径不触发本回调）。
+     * 完成 L2 成功结果（26-32 试读为空按盲区失败降级 ④，不触发本回调）。
      */
     fun onLocalOnlyPasswordRequest(ssid: String)
 
@@ -153,14 +153,18 @@ interface HotspotListener {
  *   - 运行时 try 实测降级、不预验：真机（A15/KernelSU）大概率 `NoSuchMethodException` 落失败 ③，
  *     8-13 部分机型/ROM 仍可（压力路径）；
  * - ③（[HotspotStartLevel.L2_LOCAL_ONLY]，B3 真实现）：Local-only 本地热点——公开 API
- *   `WifiManager.startLocalOnlyHotspot(callback, handler)` 三版本分流（design 定稿，见 [tryLocalOnlyHotspot]）：
+ *   `WifiManager.startLocalOnlyHotspot(callback, handler)` 三版本分流（design 定稿 + v0.3.9.2 补丁，
+ *   见 [tryLocalOnlyHotspot]）：
  *   sdk 26-28 全自动（onStarted 读 `reservation.wifiConfiguration` 的 SSID/preSharedKey + 采集 IP）；
- *   sdk 29-32 本级禁用（密码盲区，直接失败 `"LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④"`）；
+ *   sdk 29-32 v0.3.9.2 起**放行调用**（移除「盲区直接禁用」）——onStarted 统一先试读 preSharedKey
+ *   实测「10-12 盲区」假设（真机 A12/sdk31）：非空 → 推翻假设、自动完成；空 → 确认盲区，
+ *   报 `"LocalOnlyHotspot 密码不可读（sdk=X 实测盲区），降级 ④"`；
  *   sdk 33+ 调 startLocalOnlyHotspot 前置 NEARBY_WIFI_DEVICES 运行时授权（v0.3.9-verify ③-②：
  *   未授权 → [HotspotListener.onNeedNearbyPermission] 引导、授权后重试；返回 AwaitingNearbyPermission）；
- *   onStarted 统一先试读 preSharedKey（v0.3.9-verify ③-①：网页版主张 13+ 授权后可读，实测定案——
- *   非空自动完成，空/null 才走回填）→ 33+ 空/null 触发 [HotspotListener.onLocalOnlyPasswordRequest]
- *   请用户回填，[completeLocalOnlyPassword] 完成后返回成功结果。真异步：系统回调经主线程
+ *   onStarted 统一先试读 preSharedKey（26-33 全走同一逻辑；v0.3.9-verify ③-①：网页版主张 13+ 授权后
+ *   可读，实测定案）——非空自动完成（无论 sdk），空/null：33+ 触发
+ *   [HotspotListener.onLocalOnlyPasswordRequest] 请用户回填、26-32 盲区失败降级 ④；
+ *   [completeLocalOnlyPassword] 完成后返回成功结果。真异步：系统回调经主线程
  *   [dispatchLocalOnlyResult] 收敛（同步返回 [LOCAL_ONLY_PENDING] 标记）；reservation 持有到组网收尾，
  *   [stopLocalOnly] 为 B4 正式收尾前的释放入口；
  * - ④（[HotspotStartLevel.MANUAL]）：触发 [HotspotListener.onManualRequest] 走 UI 手动配网，
@@ -327,7 +331,7 @@ class HotspotManager(
         HotspotStartLevel.L1_PRIVATE_API -> tryPrivateApiHotspot()
 
         // ③ L2 本地热点（Local-only，无密码局域网）：B3 真实现——三版本分流
-        // （26-28 全自动 / 29-32 盲区禁用 / 33+ 密码回填），见 [tryLocalOnlyHotspot]
+        // （26-28 全自动 / 29-32 放行调用+onStarted 统一先试读实测盲区（v0.3.9.2） / 33+ 密码回填），见 [tryLocalOnlyHotspot]
         HotspotStartLevel.L2_LOCAL_ONLY -> tryLocalOnlyHotspot()
 
         // ④ 手动路径：请求 UI 引导用户手动配网；密码回填后走 onHotspotReady。
@@ -352,7 +356,8 @@ class HotspotManager(
     /**
      * ③ L2 本地热点（Local-only，无密码局域网）可用性：
      * Android 8-9（`sdkInt in 26..28`）或 13+（`sdkInt >= 33`）可用；
-     * 10-12 为盲区禁用（与 [Arbiter] 的 `localOnlyAvailable` 判定一致）。
+     * 10-12 按盲区保守判定（与 [Arbiter] 的 `localOnlyAvailable` 一致；v0.3.9.2 不改此仲裁判定——
+     * 29-32 放行实测以 [localOnlySelfTest] 自测入口为主，状态机仲裁仍按现状）。
      */
     fun isLevel2Available(sdkInt: Int): Boolean = sdkInt in 26..28 || sdkInt >= 33
 
@@ -1271,21 +1276,25 @@ class HotspotManager(
     // ================= ③ L2_LOCAL_ONLY 真路径（B3：Local-only 本地热点） =================
 
     /**
-     * ③ L2 本地热点（Local-only，无密码局域网；B3 真实现）——三版本分流（design 定稿）：
+     * ③ L2 本地热点（Local-only，无密码局域网；B3 真实现）——三版本分流（design 定稿 + v0.3.9.2 补丁）：
      * - sdk 26–28（Android 8-9）：`WifiManager.startLocalOnlyHotspot(callback, mainHandler)`（公开
      *   API 26+）→ [LocalOnlyHotspotReservation.wifiConfiguration] 读 SSID（已含引号，去引号）与
      *   preSharedKey（系统下发的随机密码）→ 全自动返回成功 [HotspotResult]（IP 经 [collectHotspotIp]
      *   采集，参考 ②；此路径免人工）；
-     * - sdk 29–32（Android 10-12）：**本级禁用**（密码盲区：系统不下发可读密码，行为不可靠）→
-     *   直接返回 `HotspotResult(false, error="LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④")`
+     * - sdk 29–32（Android 10-12）：v0.3.9.2 起**放行调用**（不再直接禁用）——与其它版本一致调
+     *   `startLocalOnlyHotspot`，onStarted 统一先试读 preSharedKey 实测「10-12 盲区」假设
+     *   （真机 A12/sdk31 定案）：试读非空 → 推翻假设、自动完成成功 [HotspotResult]；
+     *   试读空 → 确认盲区，返回 `HotspotResult(false, error="LocalOnlyHotspot 密码不可读（sdk=X 实测盲区），降级 ④")`
      *   交状态机降级 ④（手动）；
      * - sdk 33+（Android 13+）：调 startLocalOnlyHotspot 前先做 NEARBY_WIFI_DEVICES 运行时授权前置
      *   （v0.3.9-verify ③-②：未授权 → 回调 [HotspotListener.onNeedNearbyPermission] 引导授权、返回
      *   `AwaitingNearbyPermission` 待授权后重试，复用 Engine requestedPermission 链）；onStarted 后
-     *   **先试读 preSharedKey**（v0.3.9-verify ③-①：网页版主张 13+ 授权后 App 侧可直接读，以实测定
-     *   案）——非空 → 自动完成；空/null（软 AP 配置未回传密码；系统弹窗/通知展示）→ 触发
+     *   **统一先试读 preSharedKey**（26-33 全走同一逻辑；v0.3.9-verify ③-①：网页版主张 13+ 授权后
+     *   App 侧可直接读，以实测定案；v0.3.9.2 扩展 26-32）——非空 → 自动完成（无论 sdk）；空/null
+     *   （软 AP 配置未回传密码；系统弹窗/通知展示）→ 33+ 触发
      *   [HotspotListener.onLocalOnlyPasswordRequest](ssid) 请 UI 弹密码登记框、用户按系统弹窗回填 →
      *   [completeLocalOnlyPassword] 完成后返回成功 [HotspotResult]（ssid / pwd=用户登记值 / ip）；
+     *   26-32 空 → 盲区失败降级 ④；
      * - 失败路径：onFailed(reason)（系统 reason 映射见 [localOnlyErrorText]）/ onStopped（等待期被
      *   系统停止）/ 异常 → 失败透传，交状态机降级 ④。
      *
@@ -1302,12 +1311,10 @@ class HotspotManager(
     @Suppress("DEPRECATION") // startLocalOnlyHotspot(callback, handler) 自 API 33 起弃用（改无 handler 重载），26+ 统一走此重载
     private fun tryLocalOnlyHotspot(): HotspotResult {
         val sdk = Build.VERSION.SDK_INT
-        // sdk 29–32：本级禁用（密码盲区）——直接失败交状态机降级 ④（不调系统 API）
-        if (sdk in 29..32) {
-            val err = "LocalOnlyHotspot 密码盲区(10-12 禁用)，降级 ④"
-            DiagLogger.log(tag, "L2_LOCAL_ONLY 本级禁用：sdk=$sdk → $err")
-            return HotspotResult(success = false, error = err)
-        }
+        // v0.3.9.2：sdk 29-32 不再直接禁用（移除「盲区直接失败」）——放行调用，与 26-28/33+ 一致
+        // 走 startLocalOnlyHotspot + onStarted 统一先试读 preSharedKey，实测「10-12 盲区」假设
+        // （真机 A12/sdk31）：试读非空 → 推翻假设、自动完成；空 → 确认盲区降级 ④
+        // （NEARBY 前置仅 sdk 33+ 生效，29-32 不经此前置直接落调用路径）
 
         val ctx = resolveContext()
         if (ctx == null) {
@@ -1348,7 +1355,7 @@ class HotspotManager(
         DiagLogger.log(
             tag,
             "L2_LOCAL_ONLY：sdk=$sdk 调用 startLocalOnlyHotspot(callback, mainHandler)" +
-                "（26-28 全自动 / 33+ 密码回填；结果主线程回调收敛）",
+                "（v0.3.9.2 起 29-32 放行实测盲区；结果主线程回调收敛）",
         )
         return try {
             wm.startLocalOnlyHotspot(localOnlyCallback, mainHandler)
@@ -1366,7 +1373,8 @@ class HotspotManager(
 
     /**
      * ③ L2 系统回调（startLocalOnlyHotspot 结果；经 mainHandler 主线程回调）：
-     * onStarted → 三版本分流（26-28 全自动 / 33+ 密码回填）；onFailed → 失败透传（含系统 reason）；
+     * onStarted → 统一先试读 preSharedKey（26-33 全走同一逻辑：非空自动完成 / 空→33+ 回填、26-32 盲区失败）；
+     * onFailed → 失败透传（含系统 reason）；
      * onStopped → 释放持有并收敛（等待期被系统停止时按失败处理）。
      */
     @Suppress("DEPRECATION") // LocalOnlyHotspotCallback 与 startLocalOnlyHotspot 同源弃用（API 33+），26+ 唯一公开路径
@@ -1384,8 +1392,9 @@ class HotspotManager(
         }
     }
 
-    /** ③ onStarted 收敛（主线程）：持有 reservation → 统一先试读 preSharedKey（v0.3.9-verify ③-①）：
-     *  非空 → 自动完成（无论 sdk）；空/null → 33+ 请求密码回填、26-28 如实失败降级。 */
+    /** ③ onStarted 收敛（主线程）：持有 reservation → 统一先试读 preSharedKey（v0.3.9-verify ③-① +
+     *  v0.3.9.2 扩展 26-32，26-33 全走同一逻辑）：非空 → 自动完成（无论 sdk，含 29-32 推翻盲区假设）；
+     *  空/null → 33+ 请求密码回填、26-32 报「密码不可读（sdk=X 实测盲区），降级 ④」（29-32 确认盲区）。 */
     @Suppress("DEPRECATION") // reservation.wifiConfiguration 为 WifiConfiguration 旧 API（26+ 公开），软 AP 密码回传行为随版本分流
     private fun handleLocalOnlyStarted(reservation: LocalOnlyHotspotReservation) {
         localOnlyReservation = reservation // 持有到组网收尾（B4 正式收尾前由 [stopLocalOnly] 释放）
@@ -1404,9 +1413,11 @@ class HotspotManager(
             )
             return
         }
-        // ★ v0.3.9-verify ③-①：统一先试读 preSharedKey（不再按 sdk 分「可读/不可读」单路径）——
-        // 网页版主张 Android 13+（sdk 33+）授权 NEARBY_WIFI_DEVICES 后 onStarted 可直接读密码，
-        // 以实测定案：非空 → 自动完成（无论 sdk）；空/null → 33+ 走回填兜底、26-28 如实失败降级。
+        // ★ v0.3.9-verify ③-① + v0.3.9.2：统一先试读 preSharedKey（26-33 全走同一逻辑，不再按 sdk
+        // 分「可读/不可读」单路径）——网页版主张 Android 13+（sdk 33+）授权 NEARBY_WIFI_DEVICES 后
+        // onStarted 可直接读密码，以实测定案；v0.3.9.2 扩展：29-32 同样先试读，实测「10-12 盲区」
+        // 假设（真机 A12/sdk31）——非空 → 推翻假设、自动完成（无论 sdk）；空 → 33+ 走回填兜底、
+        // 26-32 确认盲区、按失败降级 ④。
         // 注：cfg 已在上面 try/catch 读好（reservation.wifiConfiguration 访问可能抛异常），语义与
         // reservation.wifiConfiguration?.preSharedKey 一致，仅多一层异常防护。
         val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
@@ -1414,16 +1425,20 @@ class HotspotManager(
             val ip = collectHotspotIp()
             DiagLogger.log(
                 tag,
-                "L2_LOCAL_ONLY 密码自动读取成功（33+ 也先试读）：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
+                "L2_LOCAL_ONLY 密码自动读取成功（统一先试读）：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
             )
             dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
             return
         }
-        if (sdk in 26..28) {
-            // 26-28 自动读取失败：preSharedKey 空/null（系统未下发密码）→ 如实失败降级（语义与现状一致）
-            DiagLogger.log(tag, "L2_LOCAL_ONLY onStarted(sdk=$sdk)：自动读取 preSharedKey 为空（系统未下发密码），按失败处理")
+        if (sdk in 26..32) {
+            // 26-32 试读为空：密码不可读（29-32 实测定案盲区，确认假设；26-28 系统未下发密码同语义
+            // 失败）→ 如实失败降级 ④（文案注明 sdk 与「实测盲区」）
+            DiagLogger.log(
+                tag,
+                "L2_LOCAL_ONLY onStarted(sdk=$sdk)：试读 preSharedKey 为空（密码不可读，sdk=$sdk 实测盲区），按失败处理降级 ④",
+            )
             dispatchLocalOnlyResult(
-                HotspotResult(success = false, ssid = ssid, error = "LocalOnlyHotspot 已启动但系统未下发密码"),
+                HotspotResult(success = false, ssid = ssid, error = "LocalOnlyHotspot 密码不可读（sdk=$sdk 实测盲区），降级 ④"),
             )
             return
         }

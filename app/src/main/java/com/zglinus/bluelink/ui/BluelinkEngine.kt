@@ -65,6 +65,8 @@ import org.json.JSONObject
  * 验证（专测 A15/sdk35 上 ③ 的行为：热点是否自动开、系统弹窗/密码回填、reservation close）；
  * 结果写 [BluelinkUiState.localOnlyTestInfo] / [BluelinkUiState.localOnlyTestRunning]，
  * 与 [HotspotManager] ③ 真路径同源同 API 但独立实现（互不影响，各自持有 reservation）。
+ * v0.3.9.2 自测同步：onStarted 统一先试读 preSharedKey（26-33 全走同一逻辑，与主路径一致）——
+ * 29-32 盲区假设实测入口：试读非空 → 推翻假设（自动完成文案）；空 → 「盲区（实测确认）」落 ④。
  *
  * Bluelink 组网补丁：对端收到 offer 但状态机未启动（netStateMachine==null）或不在等 offer 态时，
  * offer 会被状态机分发忽略 → 无人 join、无人回 joined、热点方等 joined 超时。
@@ -252,8 +254,8 @@ class BluelinkEngine(private val context: Context) {
 
     /**
      * 热点管理器（A3b）：① root 真路径，② 私有 API 反射真路径（B2），③ Local-only 本地热点真路径
-     * （B3：startLocalOnlyHotspot 三版本分流——26-28 全自动 / 29-32 盲区禁用 / 33+ 密码回填，
-     * 见 HotspotManager.tryLocalOnlyHotspot），④ 手动路径触发 UI 密码登记。
+     * （B3：startLocalOnlyHotspot 三版本分流——26-28 全自动 / 29-32 放行调用+onStarted 统一先试读
+     * 实测盲区（v0.3.9.2） / 33+ 密码回填，见 HotspotManager.tryLocalOnlyHotspot），④ 手动路径触发 UI 密码登记。
      * Bluelink ANR 修复（构造/回调兼容确认）：L1_ROOT / L1_PRIVATE_API 均改由
      * [HotspotManager.startAsync] 后台线程执行、主线程回调——mainHandler 由 HotspotManager
      * 内部经 Looper.getMainLooper() 自建，无需注入；本构造（listener + context=null）下
@@ -694,11 +696,12 @@ class BluelinkEngine(private val context: Context) {
      * （热点是否自动开、系统弹窗/密码回填、reservation close）；app 生命周期外随时可点，不自动进 ④。
      *
      * 与 [HotspotManager] ③ 真路径（B3）同源同 API，但独立实现（不注入 listener、不接线状态机、
-     * 不影响正式组网的 reservation），onStarted 三版本分流：
-     * - sdk 26-28：自动读 preSharedKey → 「密码已自动读取（长度=N）」（不回显明文）；
-     * - sdk 29-32：显示「盲区禁用（预演 ④）」（设计定稿盲区，本自测仅验证 API 行为）；
-     * - sdk 33+（A15/sdk35 主测目标）：弹密码登记框（复用 manualPwdInput 输入，提示按系统弹窗
-     *   抄写）→ [confirmLocalOnlySelfTestPwd] → 完成标记 + 「密码已登记」。
+     * 不影响正式组网的 reservation），onStarted 统一先试读（v0.3.9.2 起 26-33 全走同一逻辑）：
+     * - 读成功（无论 sdk，含 29-32 推翻盲区假设）→ 「密码自动读取成功（长度=N）」（不回显明文）；
+     * - 读空：sdk 33+（A15/sdk35 主测目标）弹密码登记框（复用 manualPwdInput 输入，提示按系统弹窗
+     *   抄写）→ [confirmLocalOnlySelfTestPwd] → 完成标记 + 「密码已登记」；
+     *   sdk 29-32 → 「盲区（实测确认）」（10-12 盲区假设成立，落 ④）；
+     *   sdk 26-28 → 「系统未下发密码（缺失）」（语义与现状一致）。
      * onFailed(reason) → 失败原因（1/2/3/4 字面量映射）；onStopped → 状态复位。
      * 结果写入 [BluelinkUiState.localOnlyTestInfo] / [BluelinkUiState.localOnlyTestRunning]。
      */
@@ -774,7 +777,8 @@ class BluelinkEngine(private val context: Context) {
 
     /**
      * ③ LocalOnly 自测系统回调（startLocalOnlyHotspot 结果；经 mainHandler 主线程）：
-     * onStarted → 三版本分流（26-28 自动读密码 / 29-32 盲区禁用预演 / 33+ 密码登记框）；
+     * onStarted → 统一先试读 preSharedKey（26-33 全走同一逻辑：读成功 → 「密码自动读取成功（长度=N）」；
+     * 读空 → 33+ 密码登记框 / 29-32「盲区（实测确认）」/ 26-28「系统未下发密码（缺失）」）；
      * onFailed → 失败原因（reason 字面量映射）；onStopped → 状态复位。密码全程不回显。
      */
     @Suppress("DEPRECATION") // LocalOnlyHotspotCallback 与 startLocalOnlyHotspot 同源弃用（API 33+），26+ 唯一公开路径
@@ -792,7 +796,9 @@ class BluelinkEngine(private val context: Context) {
         }
     }
 
-    /** ③ LocalOnly 自测 onStarted（主线程）：持有 reservation → 三版本分流（26-28 自动读 / 29-32 盲区 / 33+ 登记框）。 */
+    /** ③ LocalOnly 自测 onStarted（主线程）：持有 reservation → 统一先试读 preSharedKey（26-33 全走
+     *  同一逻辑，v0.3.9.2 与主路径同步）：读成功 → 「密码自动读取成功（长度=N）」；读空 → 33+ 登记框、
+     *  29-32「盲区（实测确认）」、26-28「系统未下发密码（缺失）」。 */
     @Suppress("DEPRECATION") // reservation.wifiConfiguration 为 WifiConfiguration 旧 API（26+ 公开），软 AP 密码回传行为随版本分流
     private fun handleLoTestStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
         loTestReservation = reservation
@@ -808,32 +814,35 @@ class BluelinkEngine(private val context: Context) {
         val base = if (ssid.isBlank()) "③ LocalOnly 已开（SSID 缺失）" else "③ LocalOnly 已开：SSID=$ssid"
         ui.localOnlyTestInfo = base
         DiagLogger.log(TAG, "LocalOnly 自测 onStarted：ssid=${ssid.ifBlank { "<缺失>" }} sdk=$sdk（密码不回显）")
+        // ★ v0.3.9.2：统一先试读 preSharedKey（26-33 全走同一逻辑，与 HotspotManager 主路径同步）——
+        // 读成功（无论 sdk，含 29-32 推翻盲区假设）→ 「密码自动读取成功（长度=N）」；
+        // 读空 → 33+ 登记框 / 29-32「盲区（实测确认）」/ 26-28「系统未下发密码（缺失）」
+        val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
+        if (pwd != null) {
+            ui.localOnlyTestInfo = "$base；密码自动读取成功（长度=${pwd.length}）"
+            DiagLogger.log(
+                TAG,
+                "LocalOnly 自测 onStarted(sdk=$sdk)：密码自动读取成功（统一先试读）pwdLen=${pwd.length}（密码不回显）",
+            )
+            return
+        }
         when {
-            // sdk 33+（A15/sdk35 主测目标）：App 侧密码不可读（软 AP 配置不回传密码；系统弹窗/通知
-            // 展示 SSID 与密码）→ 弹密码登记框（复用 manualPwdInput 输入），请用户按系统弹窗抄写回填
+            // sdk 33+（A15/sdk35 主测目标）：试读为空（软 AP 配置不回传密码；系统弹窗/通知展示 SSID
+            // 与密码）→ 弹密码登记框（复用 manualPwdInput 输入），请用户按系统弹窗抄写回填
             sdk >= 33 -> {
                 ui.localOnlyTestInfo = "$base；请按系统弹窗抄密码回填登记"
                 ui.manualPwdInput = "" // 新流程清空上次输入
                 ui.loTestPwdDialog = true
             }
-            // sdk 26-28：公开 API 26+ 可读 preSharedKey（系统随机密码）→ 全自动（只显示长度，不回显）
-            sdk in 26..28 -> {
-                val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")
-                if (pwd.isNullOrBlank()) {
-                    ui.localOnlyTestInfo = "$base；系统未下发密码（缺失）"
-                    DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：preSharedKey 缺失（系统未下发密码）")
-                } else {
-                    ui.localOnlyTestInfo = "$base；密码已自动读取（长度=${pwd.length}）"
-                    DiagLogger.log(
-                        TAG,
-                        "LocalOnly 自测 onStarted(sdk=$sdk)：密码已自动读取 pwdLen=${pwd.length}（密码不回显）",
-                    )
-                }
-            }
-            // sdk 29-32：设计定稿盲区（密码不可读/行为不可靠，本级正式路径禁用）——自测仅验证 API 行为，预演 ④（手动）
+            // sdk 29-32：试读为空 → 10-12 盲区假设成立（实测确认，A12/sdk31 定案）——显示盲区文案，落 ④（手动）
             sdk in 29..32 -> {
-                ui.localOnlyTestInfo = "$base；盲区禁用（预演 ④）"
-                DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：盲区禁用（预演 ④）")
+                ui.localOnlyTestInfo = "$base；盲区（实测确认）"
+                DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：试读 preSharedKey 为空 → 盲区（实测确认，10-12 假设成立）")
+            }
+            // sdk 26-28：试读为空（系统未下发密码）→ 缺失提示（语义与现状一致）
+            sdk in 26..28 -> {
+                ui.localOnlyTestInfo = "$base；系统未下发密码（缺失）"
+                DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：preSharedKey 缺失（系统未下发密码）")
             }
             // sdk < 26：startLocalOnlyHotspot 要求 API 26+（理论不可达，防御分支）
             else -> {

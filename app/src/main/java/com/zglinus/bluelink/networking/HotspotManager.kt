@@ -217,6 +217,18 @@ class HotspotManager(
     @Volatile
     private var pendingBinderTetherCb: ((HotspotResult) -> Unit)? = null
 
+    /** 热点启动前的接口快照（接口名 → 首个 IPv4；旧 Wi-Fi 排除 / 热点开启后新接口识别用；不联网）。 */
+    @Volatile
+    private var preHotspotIfaces: Map<String, String> = emptyMap()
+
+    /** 热点启动前旧 Wi-Fi 的网段（IP & mask，int；对应握手 net.ssid 时刻连接的旧 Wi-Fi；null=未采到则不排除）。 */
+    @Volatile
+    private var preHotspotWifiNet: Int? = null
+
+    /** 热点启动前旧 Wi-Fi 的掩码（int；与 [preHotspotWifiNet] 配套）。 */
+    @Volatile
+    private var preHotspotWifiMask: Int? = null
+
     /** 异步桥：矩阵（含 L1_ROOT su/IO、L1_PRIVATE_API 反射/轮询）专用后台单线程（daemon，不阻止进程退出）。 */
     private val hotspotExecutor: ExecutorService =
         Executors.newSingleThreadExecutor { r ->
@@ -409,6 +421,8 @@ class HotspotManager(
      */
     @Suppress("DEPRECATION") // WifiConfiguration / WifiManager 热点 API 自 API 26 起弃用，私有反射路径唯一可用通道
     private fun tryPrivateApiHotspot(): HotspotResult {
+        // v0.4.0：先快照热点启动前的旧 Wi-Fi 接口（collectHotspotIp 排除旧 Wi-Fi 网段用）
+        snapshotPreHotspotInterfaces()
         // 临时「禁用②」开关（LocalOnly 测试包）：② 私有 API 路径直接失败，状态机既有降级链自动落 ③
         if (DISABLE_PRIVATE_API) return HotspotResult(success = false, error = "② 已禁用(LocalOnly 测试包)，降级 ③")
         val ctx = resolveContext()
@@ -1310,6 +1324,8 @@ class HotspotManager(
      */
     @Suppress("DEPRECATION") // startLocalOnlyHotspot(callback, handler) 自 API 33 起弃用（改无 handler 重载），26+ 统一走此重载
     private fun tryLocalOnlyHotspot(): HotspotResult {
+        // v0.4.0：先快照热点启动前的旧 Wi-Fi 接口（collectHotspotIp 排除旧 Wi-Fi 网段/识别新接口用）
+        snapshotPreHotspotInterfaces()
         val sdk = Build.VERSION.SDK_INT
         // v0.3.9.2：sdk 29-32 不再直接禁用（移除「盲区直接失败」）——放行调用，与 26-28/33+ 一致
         // 走 startLocalOnlyHotspot + onStarted 统一先试读 preSharedKey，实测「10-12 盲区」假设
@@ -1616,10 +1632,13 @@ class HotspotManager(
     }
 
     /**
-     * 取热点本机 IPv4（② 用；NetworkInterface 枚举按热点网段打分）：
-     * 枚举全部接口，按接口名/网段打分（ap 系 +100、192.168.43.x 默认热点网段 +50、
-     * 192.168.x +20、wlan +10、10./172. +5）取最优；无候选返回空串 ""（一期允许占位）。
-     * 本路径免 root（② 为 root 降级后的非 root 通道），故不执行 su 命令采集。
+     * 取热点本机 IPv4（②③ 用；NetworkInterface 枚举按热点网段打分）：
+     * 枚举全部接口，按接口名/网段打分（ap 系 +100、热点开启后新出现的接口 +80、
+     * 192.168.43.x 默认热点网段 +50、192.168.x +20、wlan +10、10./172. +5）取最优；
+     * 并**排除旧 Wi-Fi 接口**（v0.4.0：热点启动前 [snapshotPreHotspotInterfaces] 快照的旧 Wi-Fi
+     * 网段——对应握手 net.ssid 时刻设备所连旧 Wi-Fi，热点网段与之必然不同，排除避免旧 Wi-Fi IP
+     * 平票/压过热点网段 IP）；无候选返回空串 ""（一期允许占位）。
+     * 本路径免 root（②③ 均为非 root 通道），故不执行 su 命令采集。
      */
     private fun collectHotspotIp(): String {
         val candidates = mutableListOf<Pair<String, String>>()
@@ -1637,23 +1656,117 @@ class HotspotManager(
             DiagLogger.log(tag, "NetworkInterface 枚举失败: $e")
             return ""
         }
-        val best = candidates.maxByOrNull { scoreHotspotIface(it.first, it.second) } ?: return ""
+        // v0.4.0：排除旧 Wi-Fi 网段（热点启动前快照；对应握手 net.ssid 时刻的旧 Wi-Fi 接口）
+        val oldNet = preHotspotWifiNet
+        val oldMask = preHotspotWifiMask
+        val filtered = if (oldNet != null && oldMask != null) {
+            candidates.filter { (iface, ip) ->
+                val keep = (ipToInt(ip)?.and(oldMask) ?: oldNet) != oldNet
+                if (!keep) {
+                    DiagLogger.log(tag, "collectHotspotIp 排除旧 Wi-Fi 接口：iface=$iface ip=$ip（旧 Wi-Fi 网段）")
+                }
+                keep
+            }
+        } else {
+            candidates
+        }
+        val best = filtered.maxByOrNull { scoreHotspotIface(it.first, it.second) } ?: return ""
         val ip = best.second
         if (ip.isBlank()) return ""
-        DiagLogger.log(tag, "L1_PRIVATE_API 取 IP：iface=${best.first} ip=$ip")
+        DiagLogger.log(tag, "collectHotspotIp：iface=${best.first} ip=$ip（候选 ${filtered.size}/${candidates.size} 个）")
         return ip
     }
 
-    /** 接口名/网段打分（② 用）：ap 系 +100、192.168.43.x +50、192.168.x +20、wlan +10、10./172. +5。 */
+    /**
+     * 接口名/网段打分（②③ 用）：ap 系 +100、热点开启后新出现的接口 +80、192.168.43.x +50、
+     * 192.168.x +20、wlan +10、10./172. +5。
+     */
     private fun scoreHotspotIface(iface: String, ip: String): Int {
         val n = iface.lowercase(Locale.US)
         var s = 0
         if (n.startsWith("ap") || n.contains("softap")) s += 100
+        // v0.4.0 增强：热点开启后新出现的接口（LocalOnly 网段非 43.x 且接口名非 ap* 时（如
+        // 192.168.49.x/wlan1 等）的兜底识别——旧接口（含旧 Wi-Fi wlan0）在快照 preHotspotIfaces 中，不获此加分）
+        if (preHotspotIfaces.isNotEmpty() && !preHotspotIfaces.containsKey(iface)) s += 80
         if (ip.startsWith("192.168.43.")) s += 50 // Android 默认热点网段
-        if (ip.startsWith("192.168.")) s += 20
+        if (ip.startsWith("192.168.")) s += 20 // 全部 192.168.x 均计入（LocalOnly 常用 192.168.49.x）
         if (n.contains("wlan")) s += 10
         if (ip.startsWith("10.") || ip.startsWith("172.")) s += 5
         return s
+    }
+
+    /**
+     * 快照热点启动前的网络接口（②③ 启动前调用；旧 Wi-Fi 排除与新接口识别共用）：
+     * - [preHotspotIfaces]：当前全部 up 的非回环 IPv4 接口（接口名 → IP）；
+     * - [preHotspotWifiNet]/[preHotspotWifiMask]：旧 Wi-Fi 主接口（优先 wlan*）的网段与掩码——
+     *   对应握手 net.ssid 时刻设备所连旧 Wi-Fi；热点网段与之必然不同，collectHotspotIp 据此排除。
+     * 线程：随 [startAsync] 后台线程执行（枚举网络接口无阻塞 IO）；volatile 供主线程 collect 读取。
+     */
+    private fun snapshotPreHotspotInterfaces() {
+        val ifaces = enumerateIpv4Interfaces()
+        preHotspotIfaces = ifaces
+        val oldEntry = ifaces.entries.firstOrNull { it.key.contains("wlan") } ?: ifaces.entries.firstOrNull()
+        if (oldEntry != null) {
+            // 旧 Wi-Fi 接口前缀长度：从接口地址取（缺省按 /24）
+            val prefix = try {
+                NetworkInterface.getByName(oldEntry.key)?.interfaceAddresses
+                    ?.firstOrNull { it.address is Inet4Address }
+                    ?.networkPrefixLength?.toInt() ?: 24
+            } catch (e: Exception) {
+                24
+            }
+            preHotspotWifiNet = ipToInt(oldEntry.value)?.and(prefixToMaskInt(prefix))
+            preHotspotWifiMask = prefixToMaskInt(prefix)
+            DiagLogger.log(
+                tag,
+                "热点启动前接口快照：${ifaces.size} 个 IPv4 接口，旧 Wi-Fi iface=${oldEntry.key} " +
+                    "ip=${oldEntry.value} mask=/$prefix（collectHotspotIp 将排除旧 Wi-Fi 网段）",
+            )
+        } else {
+            preHotspotWifiNet = null
+            preHotspotWifiMask = null
+            DiagLogger.log(tag, "热点启动前接口快照：${ifaces.size} 个 IPv4 接口，未识别旧 Wi-Fi 接口（不排除）")
+        }
+    }
+
+    /** 枚举全部 up 的非回环 IPv4 接口（接口名 → 首个 IPv4；无则空 map；不联网）。 */
+    private fun enumerateIpv4Interfaces(): Map<String, String> {
+        val m = linkedMapOf<String, String>()
+        try {
+            NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { ni ->
+                if (!ni.isUp || ni.isLoopback) return@forEach
+                for (ia in ni.interfaceAddresses) {
+                    val a = ia.address
+                    if (a is Inet4Address && !a.isLoopbackAddress && !a.isLinkLocalAddress) {
+                        val ip = a.hostAddress
+                        if (!ip.isNullOrBlank() && !m.containsKey(ni.name)) m[ni.name] = ip
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            DiagLogger.log(tag, "NetworkInterface 枚举失败: $e")
+        }
+        return m
+    }
+
+    /** IPv4 点分十进制 → int（解析失败 null）。 */
+    private fun ipToInt(s: String?): Int? {
+        if (s == null) return null
+        val parts = s.split('.')
+        if (parts.size != 4) return null
+        var v = 0
+        for (p in parts) {
+            val b = p.toIntOrNull() ?: return null
+            if (b !in 0..255) return null
+            v = (v shl 8) or b
+        }
+        return v
+    }
+
+    /** 前缀长度 → 掩码 int（0..32 收敛）。 */
+    private fun prefixToMaskInt(prefix: Int): Int {
+        val bits = prefix.coerceIn(0, 32)
+        return if (bits == 0) 0 else (0xFFFFFFFFL shl (32 - bits)).toInt()
     }
 
     /** SSID = "Bluelink-" + 4 位随机数字（如 Bluelink-0831）。 */

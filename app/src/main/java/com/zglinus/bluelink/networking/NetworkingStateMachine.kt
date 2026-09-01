@@ -7,7 +7,6 @@ import com.zglinus.bluelink.ble.SessionManager
 import com.zglinus.bluelink.ble.SignalMessage
 import com.zglinus.bluelink.ble.SignalProtocol
 import com.zglinus.bluelink.diag.DiagLogger
-import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.net.NetworkSummary
 import com.zglinus.bluelink.net.SameLanChecker
 import org.json.JSONObject
@@ -51,7 +50,7 @@ enum class NetState {
  *   ①②③ 均经异步桥 [HotspotManager.startAsync]（③ L2 为 startLocalOnlyHotspot 真异步，
  *   结果经 LocalOnlyHotspotCallback 主线程收敛），见 [tryStartLevel]）
  *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（120s 等 joined，与④ 手动配置/对端等 offer 对齐）
- *   → 收到 joined → JOINED（同网复核 SameLanChecker+probeTcp 占位）→ 发 ack → TRANSPORT
+ *   → 收到 joined → JOINED（同网复核：isSameLan 子网一致为通过条件，probeTcp 仅辅助不阻断）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
  * - 对端（`who == PEER`）：NEGOTIATING（120s 等 offer，与④ 手动配置对齐）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
  *   → WAIT_JOIN（等 WifiJoiner）→ `onWifiJoined(ip)` 发 joined → JOINED（15s 等 ack）
@@ -77,7 +76,8 @@ enum class NetState {
  * @param handler 超时调度器（默认主 Looper）。
  * @param mineCapability 本机能力（切角色时 Arbiter 重算用；缺省时无法重算，仅按 HotspotManager 探测兜底）。
  * @param peerCapability 对端能力（切角色时按"无法开启"置零重算用）。
- * @param localNetwork 本机网络摘要（同网复核 SameLanChecker 占位输入；缺省时按通过处理）。
+ * @param localNetwork 本机网络摘要（同网复核输入；复核以 SameLanChecker.isSameLan 子网一致为通过条件，
+ *   并优先使用热点方采集的本机热点 IP（[localHotspotIp]）作本机侧参考；缺省时按通过处理）。
  */
 class NetworkingStateMachine(
     private val session: SessionManager,
@@ -117,6 +117,9 @@ class NetworkingStateMachine(
 
     /** 对端 offer 携带的热点 IP（一期占位 ""；对端侧经 ack 确认后上抛给 onTransportReady）。 */
     private var offerPeerIp: String = ""
+
+    /** 本机热点侧采集的 IPv4（HotspotResult.ip 收敛进 offer；同网复核时优先作为本机子网参考，规避旧 Wi-Fi IP）。 */
+    private var localHotspotIp: String = ""
 
     private val timeoutRunnable = Runnable { onStepTimeout() }
 
@@ -356,7 +359,9 @@ class NetworkingStateMachine(
                 "热点启动成功 level=${HotspotStartLevel.L1_ROOT} ssid=${result.ssid} " +
                     "pwdLen=${result.pwd?.length ?: 0}",
             )
-            onHotspotReady(HotspotStartLevel.L1_ROOT, result.ssid, result.pwd)
+            // HotspotResult.ip 为 String?，其语义哨兵是空串""（未采集），onHotspotReady 已对空串
+            // 按"未采集"处理（localHotspotIp 保持默认）→ 用 ?: "" 安全归一，与下方日志约定一致
+            onHotspotReady(HotspotStartLevel.L1_ROOT, result.ssid, result.pwd, result.ip ?: "")
             return
         }
         DiagLogger.log(
@@ -386,7 +391,8 @@ class NetworkingStateMachine(
                 "热点启动成功 level=${HotspotStartLevel.L1_PRIVATE_API} ssid=${result.ssid} " +
                     "pwdLen=${result.pwd?.length ?: 0}",
             )
-            onHotspotReady(HotspotStartLevel.L1_PRIVATE_API, result.ssid, result.pwd)
+            // 同上：ip 未采集（null）→ 空串，语义与 HotspotResult 文档"未取到为空串"一致
+            onHotspotReady(HotspotStartLevel.L1_PRIVATE_API, result.ssid, result.pwd, result.ip ?: "")
             return
         }
         DiagLogger.log(
@@ -417,7 +423,8 @@ class NetworkingStateMachine(
                 "热点启动成功 level=${HotspotStartLevel.L2_LOCAL_ONLY} ssid=${result.ssid} " +
                     "pwdLen=${result.pwd?.length ?: 0} ip=${result.ip ?: ""}（密码不回显）",
             )
-            onHotspotReady(HotspotStartLevel.L2_LOCAL_ONLY, result.ssid, result.pwd)
+            // 同上：L2 未采集 IP（null）→ 空串；offer 载荷一期占位空，同网复核回退 localNetwork
+            onHotspotReady(HotspotStartLevel.L2_LOCAL_ONLY, result.ssid, result.pwd, result.ip ?: "")
             return
         }
         DiagLogger.log(
@@ -428,14 +435,20 @@ class NetworkingStateMachine(
     }
 
     /**
-     * 热点就绪：④ 登记后 setPassword → 构造 offer（SignalProtocol，ssid/pwd/ip=热点 IP 占位""/hotspotType）
-     * → SessionManager.sendSignal → OFFER_SENT（120s 等 joined，与④ 手动配置/对端等 offer 对齐）。
+     * 热点就绪：④ 登记后 setPassword → 记录本机热点 IP（hotspotIp，供 offer/同网复核）→ 构造 offer
+     * （SignalProtocol，ssid/pwd/ip=hotspotIp/hotspotType）→ SessionManager.sendSignal → OFFER_SENT
+     * （120s 等 joined，与④ 手动配置/对端等 offer 对齐）。
      */
-    private fun onHotspotReady(level: HotspotStartLevel, ssid: String?, pwd: String?) {
+    private fun onHotspotReady(level: HotspotStartLevel, ssid: String?, pwd: String?, hotspotIp: String = "") {
         if (state != NetState.HOTSPOT_STARTING) return
         if (ssid == null || ssid.isBlank()) {
             fail("热点启动成功但 SSID 缺失（level=$level）")
             return
+        }
+        // v0.4.0：记录热点侧采集 IP（HotspotManager.collectHotspotIp 已按热点网段采集）；
+        // 手动④ 未采集（hotspotIp 默认 ""）时保持空，同网复核回退注入的 localNetwork
+        if (hotspotIp.isNotBlank()) {
+            localHotspotIp = hotspotIp
         }
         // ④ 登记后 setPassword（App 不生成不指定，仅登记供 offer 携带）
         if (level == HotspotStartLevel.MANUAL && pwd != null) {
@@ -452,12 +465,12 @@ class NetworkingStateMachine(
         scheduleTimeout("OFFER_SENT 等待 joined", PEER_JOIN_TIMEOUT_MS)
     }
 
-    /** 构造 offer 信令：payload { ssid, pwd, ip=热点 IP 占位"", hotspotType=启动等级名 }。 */
+    /** 构造 offer 信令：payload { ssid, pwd, ip=本机热点 IP（v0.4.0 起携带 HotspotResult.ip，供对端 onTransportReady 用；未采到为空串）, hotspotType=启动等级名 }。 */
     private fun buildOffer(level: HotspotStartLevel, ssid: String, pwd: String?): SignalMessage {
         val payload = JSONObject()
         payload.put("ssid", ssid)
         payload.put("pwd", pwd ?: "")
-        payload.put("ip", "") // 当前本机热点 IP 占位""（一期不采集，二期由热点实现回填）
+        payload.put("ip", localHotspotIp)
         payload.put("hotspotType", level.name)
         return SignalMessage(type = SignalProtocol.TYPE_OFFER, payload = payload)
     }
@@ -580,32 +593,52 @@ class NetworkingStateMachine(
     }
 
     /**
-     * 同网复核（一期占位）：SameLanChecker 子网比较 + probeTcp 均为占位。
-     * - 无本机网络摘要（localNetwork=null）或信息不足（UNKNOWN，如对端 IP 一期为 ""）→ 占位通过；
-     * - DIFFERENT_NETWORK → 不通过（走 abort）；
-     * - probeTcp 一期不实际执行（恒 false），仅记录，不参与判定。
+     * 同网复核（v0.4.0 修复）：**以 [SameLanChecker.isSameLan]（子网一致）为通过条件**；
+     * [SameLanChecker.probeTcp] 仅辅助、结果只记日志，**不阻断 TRANSPORT**。
+     * - 本机侧参考：优先用热点方采集的本机热点 IPv4（[localHotspotIp]，与对端 joined IP 同子网，
+     *   见 HotspotManager.collectHotspotIp；掩码按热点 DHCP /24）；未采到（手动④ 等）回退注入的 [localNetwork]；
+     * - 无本机网络摘要（localNetwork=null 且无热点 IP）→ 按通过处理；
+     * - isSameLan=true → 通过；false → 不通过（走 abort）；判定详录双方 IP/网段与 probe 结果。
      */
     private fun verifySameLan(peerIp: String): Boolean {
-        val local = localNetwork
+        val local = buildReviewLocalSummary()
         if (local == null) {
-            DiagLogger.log(tag, "同网复核占位：无本机网络摘要（localNetwork=null），按通过处理")
+            DiagLogger.log(tag, "同网复核：无本机网络摘要且无热点 IP，按通过处理")
             return true
         }
+        // 对端 joined 载荷仅携带 IP（掩码缺失）；isSameLan 内部按本机掩码同粒度比较
         val remote = NetworkSummary(wifi = true, ip = peerIp.takeIf { it.isNotBlank() })
-        val status = SameLanChecker.check(local, remote)
-        DiagLogger.log(tag, "同网复核 SameLanChecker：local=${local.describe()} peerIp=$peerIp → $status")
-        if (peerIp.isNotBlank()) {
+        val same = SameLanChecker.isSameLan(local, remote)
+        val localSub = SameLanChecker.describeSubnet(local.ip, local.mask)
+        val remoteSub = SameLanChecker.describeSubnet(remote.ip, remote.mask)
+        val probeText = if (peerIp.isNotBlank()) {
             val probe = SameLanChecker.probeTcp(peerIp)
-            DiagLogger.log(tag, "probeTcp($peerIp) 占位结果=$probe（一期不执行，不参与判定）")
+            if (probe) "成功" else "失败（服务未监听，忽略）"
+        } else {
+            "未执行（peerIp 为空）"
         }
-        return when (status) {
-            LanStatus.SAME_LAN -> true
-            LanStatus.UNKNOWN -> {
-                DiagLogger.log(tag, "同网信息不足（UNKNOWN），占位按通过处理（二期由 probeTcp 兜底）")
-                true
-            }
-            LanStatus.DIFFERENT_NETWORK -> false
+        DiagLogger.log(
+            tag,
+            "同网复核：本机=${local.describe()}（子网 $localSub）对端 peerIp=$peerIp（子网 $remoteSub）" +
+                "→ isSameLan=$same（子网一致=$same；TCP 探测 53317=$probeText，仅辅助不阻断 TRANSPORT）",
+        )
+        return same
+    }
+
+    /**
+     * 同网复核的本机侧参考：优先热点方采集的热点 IP（与对端 joined 同子网；掩码按热点 DHCP /24），
+     * 否则回退注入的 localNetwork（真实 ip/mask）。返回 null 表示两者皆无（调用方按通过处理）。
+     */
+    private fun buildReviewLocalSummary(): NetworkSummary? {
+        if (localHotspotIp.isNotBlank()) {
+            return NetworkSummary(
+                wifi = true,
+                ssid = localNetwork?.ssid,
+                ip = localHotspotIp,
+                mask = "255.255.255.0", // Android LocalOnly/私有 API 热点 DHCP 均为 /24
+            )
         }
+        return localNetwork
     }
 
     /** 本机是否具备任意热点能力（root / 私有 API / L2 本地热点）。 */

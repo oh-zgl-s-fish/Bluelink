@@ -11,7 +11,7 @@
 | A2 | PEER 等 offer 超时对齐 120s | ✅ 已完成（与④手动配置同常量） |
 | A3 | 信令发送串行队列（FIFO + inFlight） | ✅ 已完成（v0.2.4，消 ping/pong/offer 并发互踩） |
 | A4 | 对端 offer 自动接管（收到 offer→join→回 joined） | ✅ 已完成（v0.2.4） |
-| A5 | **v0.2.4 双机联测**：A ④手动开热点 → B 自动 join（可切走当前 Wi-Fi）→ 回 joined → TRANSPORT | ⏳ **待实测闭环** |
+| A5 | **双机联测**：A ④手动开热点 → B 自动 join → 回 joined → TRANSPORT | 🟡 **部分通**：v0.2.5 实测《写队列 24/24 零失败 ✓、对端 offer 接管生效 ✓》；从机接入卡「缺 CHANGE_NETWORK_STATE」→ **v0.2.6 修（进行中）** |
 | A6 | Wi-Fi 变化监听：手动连上热点（SSID 匹配 offer）→ 自动回 joined | 📝 已提需求（B 连其他 Wi-Fi 转投场景），未开工 |
 | A7 | 「root 失败不静默落④」（①②失败给原因提示而非直接手动） | 📝 讨论中，并入 B 包规格 |
 

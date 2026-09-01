@@ -25,7 +25,8 @@ import java.util.Locale
  * 双路径分流（按任务约定）：
  * - **Android 11+（API 29+）**：[WifiNetworkSpecifier]（[WifiNetworkSpecifier.Builder.setSsid] +
  *   [WifiNetworkSpecifier.Builder.setWpa2Passphrase]，pwd 为空则仅 SSID 匹配开放网络）→
- *   权限前置（13+ 需 NEARBY_WIFI_DEVICES / 29–32 需 ACCESS_FINE_LOCATION，缺失回调 onNeedPermission）→
+ *   权限前置（13+ 需 NEARBY_WIFI_DEVICES / 12 需 CHANGE_NETWORK_STATE / 29–30 需 ACCESS_FINE_LOCATION，
+ *   缺失回调 onNeedPermission；requestNetwork 仍抛 SecurityException 时引导 WRITE_SETTINGS 兜底）→
  *   [ConnectivityManager.requestNetwork] —— **系统弹窗由用户确认**；
  *   [ConnectivityManager.NetworkCallback.onAvailable] → 接入成功（延迟取 IP），
  *   [ConnectivityManager.NetworkCallback.onUnavailable] → 失败；
@@ -70,18 +71,24 @@ class WifiJoiner(private val context: Context) {
         fun onFailed(reason: String)
 
         /**
-         * Android 8–10 路径需要 WRITE_SETTINGS 授权：
+         * 需要 WRITE_SETTINGS 授权（「修改系统设置」app-op）：
+         * - Android 8–10（API 26–28）接入路径前置检查；
+         * - Android 12（31–32）部分 ROM requestNetwork 抛 SecurityException 的兜底（见 joinWithSpecifier）。
          * 上层引导用户到 `Settings.ACTION_MANAGE_WRITE_SETTINGS`，授权后重新调用 [join]。
          */
         fun onNeedWriteSettingsPermission()
 
         /**
-         * API 29+（Specifier）路径需要运行时权限（缺失时 requestNetwork 会抛 SecurityException，
-         * 真机实锤：Android 12 未授 ACCESS_FINE_LOCATION、Android 13+ 未授 NEARBY_WIFI_DEVICES）：
-         * 上层发起系统授权，授权成功后重新调用 [join]（join 幂等，可安全重试）。
+         * API 29+（Specifier）路径需要权限（缺失时 requestNetwork 会抛 SecurityException，
+         * 真机实锤：Android 12 缺 CHANGE_NETWORK_STATE/WRITE_SETTINGS、Android 13+ 未授
+         * NEARBY_WIFI_DEVICES）：上层发起系统授权，授权成功后重新调用 [join]（join 幂等，可安全重试）。
+         * 注意 `WRITE_SETTINGS` 为 app-op（「修改系统设置」），无法经运行时授权弹窗授予，
+         * 上层需引导 `Settings.ACTION_MANAGE_WRITE_SETTINGS`。
          *
          * @param permission 缺失的权限：Android 13+ 为 `Manifest.permission.NEARBY_WIFI_DEVICES`，
-         *   Android 12 及以下（29–32）为 `Manifest.permission.ACCESS_FINE_LOCATION`。
+         *   Android 12（31–32）为 `Manifest.permission.CHANGE_NETWORK_STATE`（normal，声明即授予，
+         *   缺失理论上不可能）、Android 11 及以下（29–30）为 `Manifest.permission.ACCESS_FINE_LOCATION`；
+         *   requestNetwork 抛 SecurityException 兜底时为 `Manifest.permission.WRITE_SETTINGS`。
          */
         fun onNeedPermission(permission: String)
     }
@@ -180,23 +187,29 @@ class WifiJoiner(private val context: Context) {
      */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun joinWithSpecifier(attempt: Attempt) {
-        // 权限前置（真机实锤）：API 29+ 路径缺失运行时权限时 requestNetwork 直接抛 SecurityException。
-        // Android 13+ 需 NEARBY_WIFI_DEVICES；Android 12 及以下（29–32）需 ACCESS_FINE_LOCATION。
+        // 权限前置（真机实锤）：API 29+ 路径缺失对应权限时 requestNetwork 直接抛 SecurityException。
+        // Android 13+ 需 NEARBY_WIFI_DEVICES；Android 12（31–32）需 CHANGE_NETWORK_STATE（normal，
+        // 声明即自动授予——原查 ACCESS_FINE_LOCATION 是错的，enforceChangePermission 要求
+        // CHANGE_NETWORK_STATE 或 WRITE_SETTINGS）；Android 11 及以下（29–30）维持查 ACCESS_FINE_LOCATION。
         // 缺失 → 回调 onNeedPermission（不调 requestNetwork），由上层发起系统授权，授权后重新 join。
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.NEARBY_WIFI_DEVICES
-        } else {
-            Manifest.permission.ACCESS_FINE_LOCATION
+        val permission = when {
+            // Android 13+（33+）：NEARBY_WIFI_DEVICES（neverForLocation，运行时权限）
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> Manifest.permission.NEARBY_WIFI_DEVICES
+            // Android 12（31–32）：CHANGE_NETWORK_STATE（normal，声明即授予，缺失理论上不可能，
+            // 但保留检查回调 onNeedPermission 兜底）
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> Manifest.permission.CHANGE_NETWORK_STATE
+            // Android 11 及以下（29–30）：ACCESS_FINE_LOCATION（specifier 路径运行时定位权限）
+            else -> Manifest.permission.ACCESS_FINE_LOCATION
         }
         if (appContext.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
             DiagLogger.log(
                 tag,
-                "API 29+ 路径：缺少运行时权限 $permission，回调 onNeedPermission（不调 requestNetwork）",
+                "API 29+ 路径（sdk=${Build.VERSION.SDK_INT}）：缺少权限 $permission，回调 onNeedPermission（不调 requestNetwork）",
             )
             complete(attempt) { attempt.callbacks.onNeedPermission(permission) }
             return
         }
-        DiagLogger.log(tag, "API 29+ 路径：运行时权限 $permission 已授权，继续 Specifier 流程")
+        DiagLogger.log(tag, "API 29+ 路径（sdk=${Build.VERSION.SDK_INT}）：权限 $permission 已就绪，继续 Specifier 流程")
         val cm = connectivityManager
         if (cm == null) {
             fail(attempt, "ConnectivityManager 不可用")
@@ -237,6 +250,24 @@ class WifiJoiner(private val context: Context) {
         }
         try {
             cm.requestNetwork(request, callback, mainHandler)
+        } catch (e: SecurityException) {
+            // 真机实锤（Android 12）：requestNetwork 抛 SecurityException
+            // 「was not granted either of: CHANGE_NETWORK_STATE, WRITE_SETTINGS」。
+            // Manifest 已声明 CHANGE_NETWORK_STATE（normal，声明即授予）后绝大多数机型直接通过；
+            // 部分 ROM 仍要求「修改系统设置」（WRITE_SETTINGS app-op）→ 引导授权作为兜底。
+            val message = e.message ?: ""
+            DiagLogger.log(tag, "requestNetwork 抛 SecurityException（权限缺失兜底）: $e")
+            if (message.contains("WRITE_SETTINGS") || message.contains("CHANGE_NETWORK_STATE")) {
+                // 错误消息明确提及 CHANGE_NETWORK_STATE / WRITE_SETTINGS：CHANGE_NETWORK_STATE 已
+                // 在 Manifest 声明（正常权限）仍抛 → 只能以 WRITE_SETTINGS 兜底，回调
+                // onNeedPermission(WRITE_SETTINGS)，由上层复用 WriteSettingsDialog/openWriteSettings
+                // 引导「修改系统设置」（Android 12 部分 ROM 仍需）。
+                complete(attempt) { attempt.callbacks.onNeedPermission(Manifest.permission.WRITE_SETTINGS) }
+            } else {
+                // 其它 SecurityException：同样以「修改系统设置」兜底（变更网络状态类权限缺失的通用解）。
+                complete(attempt) { attempt.callbacks.onNeedWriteSettingsPermission() }
+            }
+            return
         } catch (e: Exception) {
             fail(attempt, "requestNetwork 异常: $e")
             return

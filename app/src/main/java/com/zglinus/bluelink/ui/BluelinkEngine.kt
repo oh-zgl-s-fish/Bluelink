@@ -1,5 +1,6 @@
 package com.zglinus.bluelink.ui
 
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
@@ -148,7 +149,7 @@ class BluelinkEngine(private val context: Context) {
     /** 对端接入器（A4）：对端流程收到 offer 后接入对方热点，结果经 [wifiJoinCallbacks] 回灌。 */
     private val wifiJoiner = WifiJoiner(appContext)
 
-    /** WifiJoiner 结果回调：成功→状态机 onWifiJoined；失败→手动密码重试对话框；8-10 需 WRITE_SETTINGS 引导。 */
+    /** WifiJoiner 结果回调：成功→状态机 onWifiJoined；失败→手动密码重试对话框；需 WRITE_SETTINGS 引导（8-10 前置 / 12+ 兜底）。 */
     private val wifiJoinCallbacks = object : WifiJoiner.Callbacks {
         override fun onJoined(ip: String) {
             DiagLogger.log(TAG, "WifiJoiner 接入成功 ip=${ip.ifEmpty { "<空>" }}，回灌状态机 onWifiJoined")
@@ -164,12 +165,21 @@ class BluelinkEngine(private val context: Context) {
         }
 
         override fun onNeedWriteSettingsPermission() {
-            DiagLogger.log(TAG, "Android 8–10 路径需要 WRITE_SETTINGS 授权，引导系统设置")
+            DiagLogger.log(TAG, "需要 WRITE_SETTINGS 授权（8–10 前置 / 12+ SecurityException 兜底），引导系统设置")
             ui.writeSettingsDialog = true
         }
 
         override fun onNeedPermission(permission: String) {
-            DiagLogger.log(TAG, "WifiJoiner 缺少运行时权限 $permission：置 requestedPermission 发起系统授权，授权后自动重试 join")
+            DiagLogger.log(TAG, "WifiJoiner 缺少权限 $permission：置 requestedPermission 发起系统授权，授权后自动重试 join")
+            if (permission == Manifest.permission.WRITE_SETTINGS || permission == Manifest.permission.CHANGE_NETWORK_STATE) {
+                // CHANGE_NETWORK_STATE（normal，声明即授予）/ WRITE_SETTINGS（app-op「修改系统设置」）
+                // 均无法经系统运行时授权弹窗授予（Android 12 部分 ROM requestNetwork 仍要求
+                // WRITE_SETTINGS 兜底）：复用 WriteSettingsDialog / openWriteSettings 引导。
+                DiagLogger.log(TAG, "权限 $permission 非运行时权限：引导「修改系统设置」（WRITE_SETTINGS）授权")
+                ui.writeSettingsDialog = true
+                ui.netState = "接入需「修改系统设置」（WRITE_SETTINGS）授权，请授权后重试"
+                return
+            }
             pendingJoinPermission = permission
             ui.requestedPermission = permission
             ui.joinRetryNeeded = true
@@ -181,7 +191,7 @@ class BluelinkEngine(private val context: Context) {
      * 引擎接管 offer 时的 WifiJoiner 结果回调（Bluelink 组网补丁）：
      * 状态机不在等 offer 态（null / 未启动 / 已中止 / 非等待态）时由 engine 直接接管——
      * 成功 → 直接发 joined{ip} 回报热点方（复用 [SignalProtocol.TYPE_JOINED] 载荷）；
-     * 失败 → 手动密码重试对话框；Android 8–10 → WRITE_SETTINGS 授权引导。
+     * 失败 → 手动密码重试对话框；需 WRITE_SETTINGS 时引导授权（8–10 前置 / 12+ 兜底）。
      */
     private val peerOfferJoinCallbacks = object : WifiJoiner.Callbacks {
         override fun onJoined(ip: String) {
@@ -206,13 +216,21 @@ class BluelinkEngine(private val context: Context) {
         }
 
         override fun onNeedWriteSettingsPermission() {
-            DiagLogger.log(TAG, "接管路径 Android 8–10 需要 WRITE_SETTINGS 授权，引导系统设置")
+            DiagLogger.log(TAG, "接管路径需要 WRITE_SETTINGS 授权（8–10 前置 / 12+ SecurityException 兜底），引导系统设置")
             ui.writeSettingsDialog = true
-            ui.netState = "接入需 WRITE_SETTINGS 授权（Android 8–10），请先授权后重试"
+            ui.netState = "接入需 WRITE_SETTINGS 授权，请先授权后重试"
         }
 
         override fun onNeedPermission(permission: String) {
-            DiagLogger.log(TAG, "接管路径 WifiJoiner 缺少运行时权限 $permission：发起系统授权，授权后自动重试 join")
+            DiagLogger.log(TAG, "接管路径 WifiJoiner 缺少权限 $permission：发起系统授权，授权后自动重试 join")
+            if (permission == Manifest.permission.WRITE_SETTINGS || permission == Manifest.permission.CHANGE_NETWORK_STATE) {
+                // 同 wifiJoinCallbacks：非运行时权限，无法经运行时弹窗授予 → 复用
+                // WriteSettingsDialog / openWriteSettings 引导「修改系统设置」兜底。
+                DiagLogger.log(TAG, "接管路径权限 $permission 非运行时权限：引导「修改系统设置」（WRITE_SETTINGS）授权")
+                ui.writeSettingsDialog = true
+                ui.netState = "接入需「修改系统设置」（WRITE_SETTINGS）授权，请授权后重试"
+                return
+            }
             pendingJoinPermission = permission
             ui.requestedPermission = permission
             ui.joinRetryNeeded = true

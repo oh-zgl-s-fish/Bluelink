@@ -59,7 +59,7 @@
 | 4.2 | offer 发送失败 | 热点方 waiting joined 前对端先 abort | 对端 PEER 等 offer 15s ≠ 热点方 ④ 手动 120s | PEER 等 offer 对齐 120s 同常量（A2） | ✅ v0.2.3 |
 | 4.3 | 信令并发互踩 | ping/pong/offer 背靠背时 `writeCharacteristic 返回 false` 被拒，消息丢失 | GATT 单请求模型下发送无互斥（握手已串行、信令未串） | FIFO 写队列 + inFlight 互斥，onCharacteristicWrite 驱动出队（A.3） | ✅ v0.2.4 |
 | 4.4 | 对端收到 offer 被忽略 | B 收 offer 后无 join、无 joined 回报 → A 等 joined 超时 | 对端状态机未启动（无人触发），offer 在 engine 被丢弃 | 对端 offer 自动接管：收到 offer 即 WifiJoiner.join 并回 joined（A4） | ✅ v0.2.4 |
-| 4.5 | Specifier 无权限异常 | `requestNetwork` 抛 SecurityException「没有权限」 | Android 12 缺 ACCESS_FINE_LOCATION；13+ 缺 NEARBY_WIFI_DEVICES 运行时授权 | join 前置权限检查 + 缺失回调请求 + 授权后重试（v0.2.5） | ⏳ 修复中 |
+| 4.5 | Specifier 无权限异常 | `requestNetwork` 抛 SecurityException：「未授予 CHANGE_NETWORK_STATE 或 WRITE_SETTINGS」 | **Android 12（sdk 31–32）真正需要 `CHANGE_NETWORK_STATE`（normal，Manifest 缺声明）**；13+ 需 NEARBY_WIFI_DEVICES；12 一部分 ROM 仍需 WRITE_SETTINGS 兜底 | v0.2.5 先加了 13+ 近距/12 定位前置；**v0.2.6 补 Manifest CHANGE_NETWORK_STATE + 31–32 查它 + requestNetwork SecurityException 兜底引导 WRITE_SETTINGS**（写队列 24/24 实锤已通） | ⏳ v0.2.6 修复中 |
 
 **经验**：组网链路（握手→仲裁→热点→offer→join→joined）每环节都依赖「信令在正确状态、正确时机、单连接上可靠收发」——任何一步的并发/时序/权限缺口都会表现为「下一步无响应」，诊断日志（SignalTest 心跳 + 状态机日志）是唯一快速定位手段。
 

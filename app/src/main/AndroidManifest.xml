@@ -29,6 +29,10 @@
     <!-- 网络状态（同网判定 / 热点管理） -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- 变更网络状态（normal，声明即自动授予）：Android 12 真机实锤 requestNetwork（WifiNetworkSpecifier）
+         经 ConnectivityService.enforceChangePermission 要求 CHANGE_NETWORK_STATE 或 WRITE_SETTINGS，
+         缺失抛 SecurityException「was not granted either of: CHANGE_NETWORK_STATE, WRITE_SETTINGS」 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
     <!-- 通知与前台服务（传输状态通知） -->

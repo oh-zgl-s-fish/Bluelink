@@ -1,7 +1,7 @@
 # Bluelink · 待办清单
 
-> 2026-09-01 快照（v0.2.4 时点）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
-> 代码约定：编码/编译修复一律 pi 子 agent，主管负责构建/验收/文档/归档。
+> 2026-09-01 快照（v0.2.6 时点，异网组网核心链路已闭环）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
+> 代码约定：编码/编译修复一律 pi 子 agent，主管负责构建/验收/文档/归档；**每次出包/修复同步更新文档**。
 
 ## A. 组网链路（修复批次）
 
@@ -12,8 +12,9 @@
 | A3 | 信令发送串行队列（FIFO + inFlight） | ✅ 已完成（v0.2.4，消 ping/pong/offer 并发互踩） |
 | A4 | 对端 offer 自动接管（收到 offer→join→回 joined） | ✅ 已完成（v0.2.4） |
 | A5 | **双机联测**：A ④手动开热点 → B 自动 join → 回 joined → TRANSPORT | 🟡 **部分通**：v0.2.5 实测《写队列 24/24 零失败 ✓、对端 offer 接管生效 ✓》；从机接入卡「缺 CHANGE_NETWORK_STATE」→ **v0.2.6 修（进行中）** |
-| A6 | Wi-Fi 变化监听：手动连上热点（SSID 匹配 offer）→ 自动回 joined | 📝 已提需求（B 连其他 Wi-Fi 转投场景），未开工 |
+| A6 | Wi-Fi 变化监听：手动连上热点（SSID 匹配 offer）→ 自动回 joined | 📝 已确认，后续做 |
 | A7 | 「root 失败不静默落④」（①②失败给原因提示而非直接手动） | 📝 讨论中，并入 B 包规格 |
+| A8 | **同网判定优先**（无感）：握手后先探同网，同网直接直连、异网才进热点流程 | 📝 无感核心方案（待办） |
 
 ## B. 组网 B 包（热点真实现）
 

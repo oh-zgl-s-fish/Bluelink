@@ -429,7 +429,7 @@ class GattClient(
      */
     private fun pumpWriteQueue() {
         if (writeInFlight) return
-        val next = writeQueue.pollFirst() ?: return
+        val next = writeQueue.removeFirstOrNull() ?: return
         DiagLogger.log(TAG, "写入出队: 队列剩余=${writeQueue.size} ${if (next.handshake) "握手" else "信令"} ${next.bytes.size}B")
         startWrite(next)
     }

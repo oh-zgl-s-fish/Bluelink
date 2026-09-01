@@ -282,6 +282,7 @@ Root 模式可越过多数权限（`pm grant` / `appops set` / shell uid 自带�
 | 20 | LocalSend 协议 | 仅 v2（与官方互通），不做 v3 |
 | 21 | 仓库 | git init + 推远端（远端地址待定） |
 | 22 | BLE 扫描权限 | `BLUETOOTH_SCAN` 加 `neverForLocation`（12+ 无需定位权限即可投递扫描结果；本 App 不派生位置） |
+| 23 | GATT 握手链路 | ATT 操作串行化（CCC 写完再写 WRITE）+ 握手 JSON 不截断（上限 500、按协商 MTU 校验）；v0.1.6/v0.1.7 双机实测握手成功 |
 
 ## 7. Root 增强（可选）命令矩阵
 

@@ -51,12 +51,12 @@ enum class NetState {
  *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（15s 等 joined）
  *   → 收到 joined → JOINED（同网复核 SameLanChecker+probeTcp 占位）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
- * - 对端（`who == PEER`）：NEGOTIATING（15s 等 offer）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
+ * - 对端（`who == PEER`）：NEGOTIATING（120s 等 offer，与④ 手动配置对齐）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
  *   → WAIT_JOIN（等 WifiJoiner）→ `onWifiJoined(ip)` 发 joined → JOINED（15s 等 ack）
  *   → 收到 ack → TRANSPORT → [Callbacks.onTransportReady]；
  * - 手动（`who == null` 即 MANUAL）：NEGOTIATING → HOTSPOT_STARTING（触发 ④ UI）→ `onManualConfigured(ssid,pwd)`
  *   → offer → OFFER_SENT（后续同热点方）；
- * - 超时/失败：任意等待步骤超时（默认 15s；④ 手动配网等待用户配置回填为 120s）或失败
+ * - 超时/失败：任意等待步骤超时（两阶段 120s：手动配置/等 offer 对齐；其余 15s）或失败
  *   → 发 abort(type=abort, reason) → TEARDOWN → [Callbacks.onAbort](reason)；
  * - 切角色：收到对端 abort 且 reason 含「[REASON_CANT_OPEN_HOTSPOT]」、本机能力可用 →
  *   Arbiter 重算（对端能力按无法开启置零）→ 重新走热点方流程；
@@ -64,7 +64,8 @@ enum class NetState {
  *
  * 线程模型：与 [SessionManager] 一致，所有公开方法由主线程调用（engine 的 BLE 回调均已切回主线程）；
  * 超时用 [Handler]（主 Looper，工程内既有 mainHandler 模式），默认每步 15s；
- * ④ 手动配网等待用户配置回填（MANUAL）为独立常量 [MANUAL_TIMEOUT_MS]（120s，用户需跳系统开热点+设密码）。
+ * 两阶段 120s：④ 手动配网等待用户配置回填（MANUAL）与对端等待 offer（PEER）共用对齐常量
+ * [MANUAL_TIMEOUT_MS]（120s；用户需跳系统开热点+设密码，期间对端不得 15s 先 abort）。
  *
  * @param session 持久信令会话（attach 后收发 [SignalMessage]）。
  * @param hotspot 热点管理器（启动等级枚举为 [HotspotStartLevel]；仲裁的 [HotspotLevel] 仅用于结果携带）。
@@ -116,7 +117,7 @@ class NetworkingStateMachine(
 
     private val timeoutRunnable = Runnable { onStepTimeout() }
 
-    /** 当前步骤超时时长（scheduleTimeout 记录；超时日志/失败文案用实际时长，支持 MANUAL 120s）。 */
+    /** 当前步骤超时时长（scheduleTimeout 记录；超时日志/失败文案用实际时长，支持 MANUAL/PEER 等 offer 120s）。 */
     private var currentTimeoutMs: Long = STEP_TIMEOUT_MS
 
     /** 当前状态（只读）。 */
@@ -126,7 +127,7 @@ class NetworkingStateMachine(
      * 启动组网：IDLE→NEGOTIATING，记录仲裁结果并分流。
      *
      * - who==ME：热点方流程（逐级启动热点 → offer → OFFER_SENT）；
-     * - who==PEER：等 offer（15s）；
+     * - who==PEER：等 offer（120s，与④ 手动配置对齐）；
      * - who==null（MANUAL）：触发手动④ UI，回填后本机作为热点方广播 offer。
      */
     fun start() {
@@ -147,8 +148,8 @@ class NetworkingStateMachine(
             }
 
             Who.PEER -> {
-                DiagLogger.log(tag, "本机为对端（who=PEER），等待 offer（15s 超时）")
-                scheduleTimeout("NEGOTIATING 等待 offer")
+                DiagLogger.log(tag, "本机为对端（who=PEER），等待 offer（120s 超时，与④ 手动配置对齐）")
+                scheduleTimeout("NEGOTIATING 等待 offer", PEER_OFFER_TIMEOUT_MS)
             }
 
             null -> {
@@ -562,5 +563,8 @@ class NetworkingStateMachine(
 
         /** ④ 手动配网等待用户配置回填超时：120s（用户需跳系统开热点+设密码+回来确认，15s 必超时）。 */
         private const val MANUAL_TIMEOUT_MS: Long = 120_000L
+
+        /** 对端等待 offer 超时：与④ 手动配网回填对齐为 120s（引用 [MANUAL_TIMEOUT_MS] 同一值；手动配置期间对端若 15s 先 abort 会导致 offer 发送失败）。 */
+        private const val PEER_OFFER_TIMEOUT_MS: Long = MANUAL_TIMEOUT_MS
     }
 }

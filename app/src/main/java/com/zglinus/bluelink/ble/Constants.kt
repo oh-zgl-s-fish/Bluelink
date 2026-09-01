@@ -8,7 +8,7 @@ import java.util.UUID
  *
  * - 广播载荷携带自定义 GATT Service UUID；扫描按同 UUID 过滤（ScanFilter）；
  * - GATT 服务含 1 个 WRITE 特征（收消息）+ 1 个 NOTIFY 特征（发消息），无需配对；
- * - 握手消息单包上限 150 字节（一期不分包，超限截断）。
+ * - 握手消息单包静态兜底上限 [MAX_HANDSHAKE_BYTES]；真实单包上限由 GattClient 按协商 MTU 动态校验。
  */
 object Constants {
 
@@ -27,8 +27,12 @@ object Constants {
     /** GATT 握手超时：连接后 10s 内未完成握手即自动断开。 */
     const val HANDSHAKE_TIMEOUT_MS: Long = 10_000L
 
-    /** 握手 JSON 单包上限（一期不分包，超限打 Log 警告并截断）。 */
-    const val MAX_HANDSHAKE_BYTES: Int = 150
+    /**
+     * 握手 JSON 单包静态兜底上限（与 MTU=517 单包 514B 对齐的安全上限）。
+     * 真实长度校验由 GattClient#sendHandshake 按协商 MTU（mtu-3）动态执行，超限即 fail；
+     * 此处仅为静态兜底参考，encode 超限不再截断（按原长度发送）。
+     */
+    const val MAX_HANDSHAKE_BYTES: Int = 500
 
     /** 同网 TCP 探测默认端口（LocalSend 标准端口；一期仅预留接口，不实际执行）。 */
     const val DEFAULT_TCP_PROBE_PORT: Int = 53317

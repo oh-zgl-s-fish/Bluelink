@@ -3,6 +3,7 @@ package com.zglinus.bluelink.ble
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.NetworkSummary
 import org.json.JSONObject
@@ -12,7 +13,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 一期握手协议：org.json 内置实现（禁第三方 JSON 库）。
  *
- * 单条消息（UTF-8，≤150 字节）字段定稿：
+ * 单条消息（UTF-8，静态兜底上限 [Constants.MAX_HANDSHAKE_BYTES]）字段定稿：
  * {
  *   "v": 1,
  *   "alias": "<本机别名，默认 Build.MODEL>",
@@ -86,17 +87,16 @@ object HandshakeProtocol {
     }
 
     /**
-     * 编码为 UTF-8 字节。超过 [Constants.MAX_HANDSHAKE_BYTES] 时打 Log 警告并截断
-     * （一期单包限制，不做分包）。
+     * 编码为 UTF-8 字节。超过静态上限 [Constants.MAX_HANDSHAKE_BYTES] 时仅打警告
+     * （Log + DiagLogger），**不截断**、按原长度返回完整 bytes；
+     * 真实单包长度校验由 GattClient#sendHandshake 按协商 MTU（mtu-3）动态执行，超限即 fail。
      */
     fun encode(m: HandshakeMessage): ByteArray {
         val bytes = toJson(m).toByteArray(Charsets.UTF_8)
         if (bytes.size > Constants.MAX_HANDSHAKE_BYTES) {
-            Log.w(
-                TAG,
-                "握手消息 ${bytes.size}B 超过 ${Constants.MAX_HANDSHAKE_BYTES}B 上限，已截断（一期不分包）",
-            )
-            return bytes.copyOf(Constants.MAX_HANDSHAKE_BYTES)
+            val msg = "握手消息 ${bytes.size}B 超过静态上限 ${Constants.MAX_HANDSHAKE_BYTES}B（将按原长度发送，由调用方按协商 MTU 校验，不再截断）"
+            Log.w(TAG, msg)
+            DiagLogger.log(TAG, msg)
         }
         return bytes
     }
@@ -121,6 +121,7 @@ object HandshakeProtocol {
         )
     } catch (e: Exception) {
         Log.w(TAG, "握手 JSON 解析失败: $e")
+        DiagLogger.log(TAG, "握手 JSON 解析失败: $e，原始串前 80 字符: ${json.take(80)}")
         null
     }
 

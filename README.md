@@ -17,6 +17,7 @@ Android 8+（API 26+）设备间文件传输客户端：
 ## 目录
 
 - `docs/ui-design.md` — UI 设计定稿（页面线框 + 交互规则 + 决策清单 + root 命令矩阵）
+- `docs/troubleshooting.md` — 真机排障手册（BLE 扫描静默坑 / GATT 握手 MTU 超时 / logcat 标签）
 - `docs/`（后续）— 架构/协议/权限矩阵细化文档
 
 ## 关键设计原则

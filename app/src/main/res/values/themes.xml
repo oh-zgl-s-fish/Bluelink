@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 基础主题占位：保证 manifest 可引用、Activity 可启动；
+         实际视觉样式完全由 Compose 的 MaterialTheme（BluelinkTheme）决定。 -->
+    <style name="Theme.Bluelink" parent="android:Theme.Material.NoActionBar" />
+</resources>

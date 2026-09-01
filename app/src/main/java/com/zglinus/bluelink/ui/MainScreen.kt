@@ -58,6 +58,10 @@ import java.util.Locale
 /**
  * 主页面（docs/ui-design.md §4.1 一期最简版）：
  * 权限/蓝牙引导卡 → 本机状态卡（广播开关 + 网络摘要）→ 附近设备列表 → 空态文案。
+ *
+ * v0.3.9：本机状态卡新增「LocalOnly 自测」独立入口（不经过组网/状态机）——
+ * running 时按钮变「关闭 LocalOnly」，下方展示 [BluelinkUiState.localOnlyTestInfo] 状态行；
+ * sdk 33+ 密码登记框（[LoTestPwdDialog]）在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -133,9 +137,14 @@ fun MainScreen(
             },
         )
     }
+
+    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（主界面独立入口，经 BluelinkEngine.current() 取引擎，与设备详情弹层无关）
+    BluelinkEngine.current()?.let { engine ->
+        if (ui.loTestPwdDialog) LoTestPwdDialog(engine)
+    }
 }
 
-/** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）。 */
+/** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）+ 信令自测 + ③ LocalOnly 自测。 */
 @Composable
 private fun LocalStatusCard(
     ui: BluelinkUiState,
@@ -219,6 +228,40 @@ private fun LocalStatusCard(
                     },
                 ) {
                     Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测")
+                }
+            }
+
+            // ============ ③ LocalOnly 自测（v0.3.9 独立入口，不经过组网/状态机） ============
+            BluelinkEngine.current()?.let { engine ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = {
+                            if (ui.localOnlyTestRunning) {
+                                engine.closeLocalOnlySelfTest()
+                            } else {
+                                engine.localOnlySelfTest()
+                            }
+                        },
+                    ) {
+                        Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测")
+                    }
+                    if (ui.localOnlyTestRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
+                ui.localOnlyTestInfo?.let { info ->
+                    Text(
+                        text = if (ui.localOnlyTestPasswordSet) "✅ $info" else info,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ui.localOnlyTestRunning) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
                 }
             }
         }
@@ -634,6 +677,43 @@ private fun LocalOnlyPwdDialog(engine: BluelinkEngine) {
         },
         dismissButton = {
             TextButton(onClick = { ui.localOnlyPwdDialog = false }) { Text("取消") }
+        },
+    )
+}
+
+/** ③ LocalOnly 自测（v0.3.9，sdk 33+）密码登记框：系统弹窗/通知已展示 SSID 与密码（App 侧不可读），
+ *  请用户按系统弹窗抄写回填（复用 manualPwdInput 输入；确认走 confirmLocalOnlySelfTestPwd）。 */
+@Composable
+private fun LoTestPwdDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.loTestPwdDialog = false },
+        title = { Text("LocalOnly 密码登记（自测 ③）") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "系统已弹出本地热点通知/弹窗，展示 SSID 与密码（App 侧不可读）：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "请按系统弹窗抄写密码并填写如下：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = ui.manualPwdInput,
+                    onValueChange = { ui.manualPwdInput = it },
+                    label = { Text("热点密码（按系统弹窗抄写）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmLocalOnlySelfTestPwd() }) { Text("确认") }
+        },
+        dismissButton = {
+            TextButton(onClick = { ui.loTestPwdDialog = false }) { Text("取消") }
         },
     )
 }

@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -56,6 +57,12 @@ import org.json.JSONObject
  *   阶段经轮询 [NetworkingStateMachine.currentState] 映射到 [BluelinkUiState.netState]；
  * - [WifiJoiner]（A4）：对端流程收到 offer → join，结果 onJoined/onFailed 回灌状态机；
  * - ④ 手动流程：密码登记（setPassword + 打开系统热点设置）→ onManualConfigured → offer。
+ *
+ * v0.3.9 ③ LocalOnly 自测（独立入口，不经过组网/状态机）：主界面「LocalOnly 自测」按钮 →
+ * [localOnlySelfTest] 直接驱动 `WifiManager.startLocalOnlyHotspot(callback, mainHandler)` 单环节
+ * 验证（专测 A15/sdk35 上 ③ 的行为：热点是否自动开、系统弹窗/密码回填、reservation close）；
+ * 结果写 [BluelinkUiState.localOnlyTestInfo] / [BluelinkUiState.localOnlyTestRunning]，
+ * 与 [HotspotManager] ③ 真路径同源同 API 但独立实现（互不影响，各自持有 reservation）。
  *
  * Bluelink 组网补丁：对端收到 offer 但状态机未启动（netStateMachine==null）或不在等 offer 态时，
  * offer 会被状态机分发忽略 → 无人 join、无人回 joined、热点方等 joined 超时。
@@ -661,6 +668,204 @@ class BluelinkEngine(private val context: Context) {
     /** 手动停止信令自测。 */
     fun stopSignalTest() {
         signalTest.stop()
+    }
+
+    // ============ ③ LocalOnly 自测（v0.3.9 独立入口，不经过组网/状态机） ============
+
+    /** ③ LocalOnly 自测：onStarted 后持有的 LocalOnlyHotspotReservation（[closeLocalOnlySelfTest] 时 close 释放）。 */
+    private var loTestReservation: WifiManager.LocalOnlyHotspotReservation? = null
+
+    /** ③ LocalOnly 自测：onStarted 取得的 SSID（去引号；密码登记完成后文案拼接用）。 */
+    private var loTestSsid: String? = null
+
+    /** ③ LocalOnly 自测：用户主动关闭标记（[closeLocalOnlySelfTest] 置位；系统 onStopped 到来时保留「已关闭」文案，不被「状态复位」覆盖）。 */
+    private var loTestClosedByUser = false
+
+    /**
+     * ③ LocalOnly 自测（v0.3.9）：独立单环节验证入口——不经过组网/状态机，直接驱动
+     * `WifiManager.startLocalOnlyHotspot(callback, mainHandler)`，专测 A15/sdk35 上 ③ 的行为
+     * （热点是否自动开、系统弹窗/密码回填、reservation close）；app 生命周期外随时可点，不自动进 ④。
+     *
+     * 与 [HotspotManager] ③ 真路径（B3）同源同 API，但独立实现（不注入 listener、不接线状态机、
+     * 不影响正式组网的 reservation），onStarted 三版本分流：
+     * - sdk 26-28：自动读 preSharedKey → 「密码已自动读取（长度=N）」（不回显明文）；
+     * - sdk 29-32：显示「盲区禁用（预演 ④）」（设计定稿盲区，本自测仅验证 API 行为）；
+     * - sdk 33+（A15/sdk35 主测目标）：弹密码登记框（复用 manualPwdInput 输入，提示按系统弹窗
+     *   抄写）→ [confirmLocalOnlySelfTestPwd] → 完成标记 + 「密码已登记」。
+     * onFailed(reason) → 失败原因（1/2/3/4 字面量映射）；onStopped → 状态复位。
+     * 结果写入 [BluelinkUiState.localOnlyTestInfo] / [BluelinkUiState.localOnlyTestRunning]。
+     */
+    @Suppress("DEPRECATION") // startLocalOnlyHotspot(callback, handler) 自 API 33 起弃用（改无 handler 重载），26+ 统一走此重载
+    fun localOnlySelfTest() {
+        if (ui.localOnlyTestRunning) {
+            DiagLogger.log(TAG, "LocalOnly 自测忽略：上一次自测仍在进行中（localOnlyTestRunning=true）")
+            return
+        }
+        ui.localOnlyTestPasswordSet = false
+        ui.loTestPwdDialog = false
+        val wm = appContext.getSystemService(WifiManager::class.java)
+        if (wm == null) {
+            ui.localOnlyTestRunning = false
+            ui.localOnlyTestInfo = "③ LocalOnly 自测失败：WifiManager 不可用"
+            DiagLogger.log(TAG, "LocalOnly 自测失败：WifiManager 不可用（getSystemService 返回 null）")
+            return
+        }
+        ui.localOnlyTestRunning = true
+        ui.localOnlyTestInfo = "③ LocalOnly 自测：正在启动…（sdk=${Build.VERSION.SDK_INT}）"
+        DiagLogger.log(
+            TAG,
+            "LocalOnly 自测：调用 startLocalOnlyHotspot(callback, mainHandler) sdk=${Build.VERSION.SDK_INT}",
+        )
+        try {
+            wm.startLocalOnlyHotspot(loTestCallback, mainHandler)
+        } catch (e: Exception) {
+            // 不吞异常：记录 + 如实回显（如 SecurityException / UnsupportedOperationException）
+            ui.localOnlyTestRunning = false
+            ui.localOnlyTestInfo = "③ LocalOnly 自测启动异常：${e.javaClass.simpleName}: ${e.message}"
+            DiagLogger.log(TAG, "LocalOnly 自测 startLocalOnlyHotspot 调用异常（不吞）: $e")
+        }
+    }
+
+    /**
+     * ③ LocalOnly 自测：关闭已开启的热点（reservation.close → 系统随后回调 onStopped → 状态复位）；
+     * 状态「已关闭」；无 reservation 时幂等 no-op。
+     */
+    fun closeLocalOnlySelfTest() {
+        val r = loTestReservation
+        loTestReservation = null
+        loTestClosedByUser = true // 系统 onStopped 到来时保留「已关闭」文案，不被「状态复位」覆盖
+        ui.localOnlyTestRunning = false
+        ui.loTestPwdDialog = false
+        if (r != null) {
+            try {
+                r.close()
+                ui.localOnlyTestInfo = "③ LocalOnly 已关闭"
+                DiagLogger.log(TAG, "LocalOnly 自测：已 close LocalOnlyHotspotReservation")
+            } catch (e: Exception) {
+                ui.localOnlyTestInfo = "③ LocalOnly 关闭异常：${e.javaClass.simpleName}: ${e.message}"
+                DiagLogger.log(TAG, "LocalOnly 自测 close 异常（不吞）: $e")
+            }
+        } else {
+            ui.localOnlyTestInfo = "③ LocalOnly 已关闭（无 reservation，幂等）"
+            DiagLogger.log(TAG, "LocalOnly 自测：无持有中的 reservation（幂等 no-op）")
+        }
+    }
+
+    /** ③ LocalOnly 自测（sdk 33+）密码登记框确认：用户按系统弹窗抄写回填 → 完成标记 + 「密码已登记」（只记长度，不回显明文）。 */
+    fun confirmLocalOnlySelfTestPwd() {
+        val pwd = ui.manualPwdInput.trim()
+        if (pwd.isBlank()) {
+            ui.localOnlyTestInfo = "③ LocalOnly：密码为空，请按系统弹窗抄写后确认"
+            DiagLogger.log(TAG, "LocalOnly 自测：密码为空，保持登记框等待回填")
+            return
+        }
+        ui.localOnlyTestPasswordSet = true
+        ui.loTestPwdDialog = false
+        ui.localOnlyTestInfo = "③ LocalOnly 已开：SSID=${loTestSsid ?: "未知"}；密码已登记（长度=${pwd.length}）"
+        DiagLogger.log(TAG, "LocalOnly 自测（sdk 33+）密码登记完成：pwdLen=${pwd.length}（密码不回显）")
+    }
+
+    /**
+     * ③ LocalOnly 自测系统回调（startLocalOnlyHotspot 结果；经 mainHandler 主线程）：
+     * onStarted → 三版本分流（26-28 自动读密码 / 29-32 盲区禁用预演 / 33+ 密码登记框）；
+     * onFailed → 失败原因（reason 字面量映射）；onStopped → 状态复位。密码全程不回显。
+     */
+    @Suppress("DEPRECATION") // LocalOnlyHotspotCallback 与 startLocalOnlyHotspot 同源弃用（API 33+），26+ 唯一公开路径
+    private val loTestCallback = object : WifiManager.LocalOnlyHotspotCallback() {
+        override fun onStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+            handleLoTestStarted(reservation)
+        }
+
+        override fun onFailed(reason: Int) {
+            handleLoTestFailed(reason)
+        }
+
+        override fun onStopped() {
+            handleLoTestStopped()
+        }
+    }
+
+    /** ③ LocalOnly 自测 onStarted（主线程）：持有 reservation → 三版本分流（26-28 自动读 / 29-32 盲区 / 33+ 登记框）。 */
+    @Suppress("DEPRECATION") // reservation.wifiConfiguration 为 WifiConfiguration 旧 API（26+ 公开），软 AP 密码回传行为随版本分流
+    private fun handleLoTestStarted(reservation: WifiManager.LocalOnlyHotspotReservation) {
+        loTestReservation = reservation
+        val sdk = Build.VERSION.SDK_INT
+        val cfg = try {
+            reservation.wifiConfiguration
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "LocalOnly 自测 onStarted 读 wifiConfiguration 异常: $e")
+            null
+        }
+        val ssid = cfg?.SSID?.trim()?.removeSurrounding("\"") ?: ""
+        loTestSsid = ssid
+        val base = if (ssid.isBlank()) "③ LocalOnly 已开（SSID 缺失）" else "③ LocalOnly 已开：SSID=$ssid"
+        ui.localOnlyTestInfo = base
+        DiagLogger.log(TAG, "LocalOnly 自测 onStarted：ssid=${ssid.ifBlank { "<缺失>" }} sdk=$sdk（密码不回显）")
+        when {
+            // sdk 33+（A15/sdk35 主测目标）：App 侧密码不可读（软 AP 配置不回传密码；系统弹窗/通知
+            // 展示 SSID 与密码）→ 弹密码登记框（复用 manualPwdInput 输入），请用户按系统弹窗抄写回填
+            sdk >= 33 -> {
+                ui.localOnlyTestInfo = "$base；请按系统弹窗抄密码回填登记"
+                ui.manualPwdInput = "" // 新流程清空上次输入
+                ui.loTestPwdDialog = true
+            }
+            // sdk 26-28：公开 API 26+ 可读 preSharedKey（系统随机密码）→ 全自动（只显示长度，不回显）
+            sdk in 26..28 -> {
+                val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")
+                if (pwd.isNullOrBlank()) {
+                    ui.localOnlyTestInfo = "$base；系统未下发密码（缺失）"
+                    DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：preSharedKey 缺失（系统未下发密码）")
+                } else {
+                    ui.localOnlyTestInfo = "$base；密码已自动读取（长度=${pwd.length}）"
+                    DiagLogger.log(
+                        TAG,
+                        "LocalOnly 自测 onStarted(sdk=$sdk)：密码已自动读取 pwdLen=${pwd.length}（密码不回显）",
+                    )
+                }
+            }
+            // sdk 29-32：设计定稿盲区（密码不可读/行为不可靠，本级正式路径禁用）——自测仅验证 API 行为，预演 ④（手动）
+            sdk in 29..32 -> {
+                ui.localOnlyTestInfo = "$base；盲区禁用（预演 ④）"
+                DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：盲区禁用（预演 ④）")
+            }
+            // sdk < 26：startLocalOnlyHotspot 要求 API 26+（理论不可达，防御分支）
+            else -> {
+                ui.localOnlyTestInfo = "$base；sdk<26 不支持 LocalOnlyHotspot"
+                DiagLogger.log(TAG, "LocalOnly 自测 onStarted(sdk=$sdk)：sdk<26 不支持（理论不可达）")
+            }
+        }
+    }
+
+    /** ③ LocalOnly 自测 onFailed（主线程）：系统 reason 字面量映射（1/2/3/4，与 HotspotManager.localOnlyErrorText 同表），失败状态复位。 */
+    private fun handleLoTestFailed(reason: Int) {
+        val text = loTestErrorText(reason)
+        ui.localOnlyTestRunning = false
+        ui.loTestPwdDialog = false
+        ui.localOnlyTestInfo = "③ LocalOnly 启动失败（reason=$reason: $text）"
+        DiagLogger.log(TAG, "LocalOnly 自测 onFailed(reason=$reason: $text)")
+    }
+
+    /** ③ LocalOnly 自测 onStopped（主线程）：状态复位（系统停止 / close 后触发）；用户主动关闭时保留「已关闭」文案。 */
+    private fun handleLoTestStopped() {
+        loTestReservation = null
+        ui.localOnlyTestRunning = false
+        ui.loTestPwdDialog = false
+        if (loTestClosedByUser) {
+            loTestClosedByUser = false
+            DiagLogger.log(TAG, "LocalOnly 自测 onStopped（用户已主动关闭，保留「已关闭」文案）")
+        } else {
+            ui.localOnlyTestInfo = "③ LocalOnly 已停止（状态复位）"
+            DiagLogger.log(TAG, "LocalOnly 自测 onStopped（系统停止，状态复位）")
+        }
+    }
+
+    /** ③ LocalOnly 自测 onFailed reason → 字面量（AOSP 常量；compileSdk37 内置 jar 对 Kotlin 不可见，用字面量 1/2/3/4）。 */
+    private fun loTestErrorText(reason: Int): String = when (reason) {
+        1 -> "ERROR_GENERIC"
+        2 -> "ERROR_NO_CHANNEL"
+        3 -> "ERROR_INCOMPATIBLE_MODE"
+        4 -> "ERROR_TETHERING_DISALLOWED"
+        else -> "未知($reason)"
     }
 
     // ============ A5 组网动作（UI 入口） ============

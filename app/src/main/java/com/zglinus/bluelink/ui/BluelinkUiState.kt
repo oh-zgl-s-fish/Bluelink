@@ -127,4 +127,18 @@ class BluelinkUiState {
 
     /** WifiJoiner 权限前置挂起 join 是否待授权后自动重试（授权成功后 engine 自动重试 join 并复位）。 */
     var joinRetryNeeded by mutableStateOf(false)
+
+    // ============ ③ LocalOnly 自测（v0.3.9 独立入口，不经过组网/状态机） ============
+
+    /** ③ LocalOnly 自测状态行文本（engine 经 LocalOnlyHotspotCallback 同步；null = 尚未开始）。 */
+    var localOnlyTestInfo by mutableStateOf<String?>(null)
+
+    /** ③ LocalOnly 自测是否运行中（热点已开 / 等待密码登记；「LocalOnly 自测」按钮 running 时变「关闭 LocalOnly」）。 */
+    var localOnlyTestRunning by mutableStateOf(false)
+
+    /** ③ LocalOnly 自测（sdk 33+）密码登记框是否可见（onStarted 后系统弹窗/通知展示密码、App 侧不可读，请用户按系统弹窗抄写回填；复用 manualPwdInput 输入）。 */
+    var loTestPwdDialog by mutableStateOf(false)
+
+    /** ③ LocalOnly 自测（sdk 33+）：用户已按系统弹窗回填并确认登记密码（完成标记；UI 据此显示「密码已登记」）。 */
+    var localOnlyTestPasswordSet by mutableStateOf(false)
 }

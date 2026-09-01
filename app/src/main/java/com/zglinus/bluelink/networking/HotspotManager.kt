@@ -394,6 +394,8 @@ class HotspotManager(
      */
     @Suppress("DEPRECATION") // WifiConfiguration / WifiManager 热点 API 自 API 26 起弃用，私有反射路径唯一可用通道
     private fun tryPrivateApiHotspot(): HotspotResult {
+        // 临时「禁用②」开关（LocalOnly 测试包）：② 私有 API 路径直接失败，状态机既有降级链自动落 ③
+        if (DISABLE_PRIVATE_API) return HotspotResult(success = false, error = "② 已禁用(LocalOnly 测试包)，降级 ③")
         val ctx = resolveContext()
         if (ctx == null) {
             val err = "L1_PRIVATE_API：Context 不可用（注入与 ActivityThread.currentApplication() 兜底均失败）"
@@ -1611,6 +1613,9 @@ class HotspotManager(
     }
 
     companion object {
+        /** 临时「禁用②」开关：LocalOnly 测试包临时禁用②，验证后移除。 */
+        private const val DISABLE_PRIVATE_API = true
+
         /** SSID 前缀。 */
         private const val SSID_PREFIX = "Bluelink-"
 

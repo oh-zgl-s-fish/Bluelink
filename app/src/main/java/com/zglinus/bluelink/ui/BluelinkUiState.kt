@@ -116,6 +116,9 @@ class BluelinkUiState {
     /** ③ L2 本地热点（13+）系统弹窗/通知展示的 SSID（登记框提示用；密码需用户按系统弹窗回填）。 */
     var localOnlySsid by mutableStateOf<String?>(null)
 
+    /** ② 系统预配热点（Binder 直呼成功）登记框模式（v0.3.4）：true=热点已自动开启、请登记本机系统热点 SSID+密码（ManualPwdDialog 按此渲染不同文案与确认回调）；false=④ 手动配网。复用 manualSsidInput/manualPwdInput 输入。 */
+    var systemHotspotPwdMode by mutableStateOf(false)
+
     /**
      * WifiJoiner 权限前置缺失的运行时权限（onNeedPermission 置位；BluelinkRoot 观察此字段发起
      * 系统授权弹窗，请求结果回来后 engine 经 [joinRetryNeeded] 自动重试 join；授权后复位）。

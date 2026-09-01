@@ -287,6 +287,29 @@ class BluelinkEngine(private val context: Context) {
             ui.manualPwdInput = "" // 新流程清空上次输入
             ui.netState = "本地热点已启动（SSID=$ssid）：请按系统弹窗密码回填登记"
         }
+
+        override fun onSystemHotspotPasswordRequest() {
+            // ② Binder 直呼系统热点（v0.3.4）：系统预配热点已自动开启，SSID/密码为系统配置、
+            // App 不可读——复用 ④ manualPwdDialog 登记框（systemHotspotPwdMode 模式）请用户
+            // 按本机热点信息登记 SSID+密码；确认经 confirmSystemHotspotPwd →
+            // HotspotManager.completeSystemHotspotPassword 完成成功结果。
+            // 防幽灵弹窗：状态机已不处于 HOTSPOT_STARTING（中止/超时）时跳过（stopBinderTetherPending
+            // 已清理待收敛结果，不再上抛）。
+            val machine = netStateMachine
+            if (machine == null || machine.currentState != NetState.HOTSPOT_STARTING) {
+                DiagLogger.log(
+                    TAG,
+                    "② Binder 直呼成功但状态机已不在 HOTSPOT_STARTING（machine=${machine != null} state=${machine?.currentState}），跳过登记框（结果已被清理）",
+                )
+                return
+            }
+            DiagLogger.log(TAG, "② Binder 直呼系统热点已自动开启：请求登记本机系统热点 SSID+密码（复用登记框）")
+            ui.systemHotspotPwdMode = true
+            ui.manualPwdDialog = true
+            ui.manualSsidInput = "我系统热点名" // 预填提示（用户改为本机系统热点实际名称）
+            ui.manualPwdInput = "" // 新流程清空上次输入
+            ui.netState = "系统热点已自动开启：请输入本机系统热点的名称与密码"
+        }
     })
 
     /** 组网状态机回调（A3c）：offer→WifiJoiner 接入；传输就绪；中止收敛（置空机器 + 停轮询）。 */
@@ -311,6 +334,13 @@ class BluelinkEngine(private val context: Context) {
             // ③ L2 本地热点收尾预留（B4 正式收尾前）：中止/结束时释放 LocalOnlyHotspotReservation
             // 并清理待收敛的 L2 pending（幂等；无 L2 时为 no-op，不影响 ①②④）
             hotspotManager.stopLocalOnly()
+            // ② Binder 直呼（v0.3.4）收尾：登记框打开期间被中止（如 15s 步骤超时）→ 释放待收敛的
+            // Binder 结果与异步闸（幂等），并关闭系统热点登记框（区别于 ④ manualPwdDialog 保留语义）
+            hotspotManager.stopBinderTetherPending()
+            if (ui.systemHotspotPwdMode) {
+                ui.systemHotspotPwdMode = false
+                ui.manualPwdDialog = false
+            }
             ui.localOnlyPwdDialog = false
             ui.netActive = false
             ui.netState = "组网已中止：$reason"
@@ -578,6 +608,7 @@ class BluelinkEngine(private val context: Context) {
         ui.joinFailDialog = false
         ui.writeSettingsDialog = false
         ui.manualPwdDialog = false
+        ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：新流程复位系统热点登记模式
 
         val mine = buildLocalCapability(
             isRoot = RootDetector.isRoot(),
@@ -617,6 +648,7 @@ class BluelinkEngine(private val context: Context) {
         ui.manualPwdDialog = false
         ui.joinFailDialog = false
         ui.writeSettingsDialog = false
+        ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：结束组网复位系统热点登记模式
         netStateMachine?.cancel()
     }
 
@@ -664,6 +696,25 @@ class BluelinkEngine(private val context: Context) {
         DiagLogger.log(TAG, "③ L2 本地热点密码回填：ssid=$ssid pwdLen=${pwd.length}（密码不回显）")
         hotspotManager.completeLocalOnlyPassword(pwd)
         ui.localOnlyPwdDialog = false
+    }
+
+    /**
+     * ② 系统预配热点（Binder 直呼成功）SSID+密码登记确认（登记框确认走此入口，区别于 ④ confirmManualPwd）：
+     * 校验非空 → HotspotManager.completeSystemHotspotPassword 完成 ② 成功结果（状态机
+     * onPrivateApiAsyncResult → offer）；登记框关闭并复位系统热点模式。
+     */
+    fun confirmSystemHotspotPwd() {
+        val ssid = ui.manualSsidInput.trim()
+        val pwd = ui.manualPwdInput.trim()
+        if (ssid.isBlank() || pwd.isBlank()) {
+            DiagLogger.log(TAG, "② 系统热点登记：SSID/密码为空，保持登记框等待回填")
+            ui.netState = "系统热点 SSID/密码不能为空，请按本机热点信息填写"
+            return
+        }
+        DiagLogger.log(TAG, "② 系统热点登记：ssid=$ssid pwdLen=${pwd.length}（密码不回显）")
+        hotspotManager.completeSystemHotspotPassword(ssid, pwd)
+        ui.manualPwdDialog = false
+        ui.systemHotspotPwdMode = false
     }
 
     /** 接入失败对话框「重试接入」：用用户手填密码重新 join 最近一次 offer 的 SSID。 */
@@ -775,6 +826,9 @@ class BluelinkEngine(private val context: Context) {
         netStateMachine?.cancel() // A5：收尾/关停时取消组网（发 abort → 置空机器）
         // ③ L2 本地热点收尾预留（B4 正式收尾前释放入口；幂等；stopAllBle 覆盖 release() 收尾路径）
         hotspotManager.stopLocalOnly()
+        // ② Binder 直呼（v0.3.4）收尾兜底：状态机为 null 但登记框仍悬挂时释放待收敛 Binder 结果（幂等）
+        hotspotManager.stopBinderTetherPending()
+        ui.systemHotspotPwdMode = false
         wifiJoiner.cancel() // 释放进行中的接入 / 残留 NetworkCallback
         advertiser.stop()
         scanner.stop()

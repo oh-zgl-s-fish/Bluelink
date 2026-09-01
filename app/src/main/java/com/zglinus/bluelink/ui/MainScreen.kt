@@ -495,9 +495,65 @@ fun DeviceDetailSheet(
     }
 }
 
-/** ④ 手动配网对话框：指引 + SSID/密码输入 + 确认 + 「打开系统热点设置」。 */
+/** ④ 手动配网对话框 / ② 系统预配热点登记框（v0.3.4）：按 systemHotspotPwdMode 分流——true 走
+ *  SystemHotspotPwdDialog（Binder 直呼成功、登记本机系统热点 SSID+密码）；false 走 ④ 手动配网（原样）。 */
 @Composable
 private fun ManualPwdDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    if (ui.systemHotspotPwdMode) {
+        SystemHotspotPwdDialog(engine)
+    } else {
+        ManualPwdDialogV4(engine)
+    }
+}
+
+/** ② 系统预配热点登记框（v0.3.4）：热点已自动开启（Binder 直呼成功，SSID/密码为系统配置、App 不可读），
+ *  复用登记框字段（manualSsidInput/manualPwdInput），请用户按本机热点信息登记；确认走 confirmSystemHotspotPwd。 */
+@Composable
+private fun SystemHotspotPwdDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { ui.manualPwdDialog = false },
+        title = { Text("系统热点登记（②）") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "热点已自动开启，请输入本机系统热点的名称与密码：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "请在手机顶部/系统设置中查看热点名称与密码（系统预配，App 无法读取）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = ui.manualSsidInput,
+                    onValueChange = { ui.manualSsidInput = it },
+                    label = { Text("系统热点名称 (SSID)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ui.manualPwdInput,
+                    onValueChange = { ui.manualPwdInput = it },
+                    label = { Text("系统热点密码") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmSystemHotspotPwd() }) { Text("确认") }
+        },
+        dismissButton = {
+            TextButton(onClick = { ui.manualPwdDialog = false }) { Text("取消") }
+        },
+    )
+}
+
+/** ④ 手动配网对话框：指引 + SSID/密码输入 + 确认 + 「打开系统热点设置」。 */
+@Composable
+private fun ManualPwdDialogV4(engine: BluelinkEngine) {
     val ui = engine.ui
     AlertDialog(
         onDismissRequest = { ui.manualPwdDialog = false },

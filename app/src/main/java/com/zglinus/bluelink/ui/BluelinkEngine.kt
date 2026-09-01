@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
@@ -166,6 +167,14 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "Android 8–10 路径需要 WRITE_SETTINGS 授权，引导系统设置")
             ui.writeSettingsDialog = true
         }
+
+        override fun onNeedPermission(permission: String) {
+            DiagLogger.log(TAG, "WifiJoiner 缺少运行时权限 $permission：置 requestedPermission 发起系统授权，授权后自动重试 join")
+            pendingJoinPermission = permission
+            ui.requestedPermission = permission
+            ui.joinRetryNeeded = true
+            ui.netState = "接入需要权限 $permission，请授权后自动重试"
+        }
     }
 
     /**
@@ -201,6 +210,14 @@ class BluelinkEngine(private val context: Context) {
             ui.writeSettingsDialog = true
             ui.netState = "接入需 WRITE_SETTINGS 授权（Android 8–10），请先授权后重试"
         }
+
+        override fun onNeedPermission(permission: String) {
+            DiagLogger.log(TAG, "接管路径 WifiJoiner 缺少运行时权限 $permission：发起系统授权，授权后自动重试 join")
+            pendingJoinPermission = permission
+            ui.requestedPermission = permission
+            ui.joinRetryNeeded = true
+            ui.netState = "接入需要权限 $permission，请授权后自动重试"
+        }
     }
 
     /** 热点管理器（A3b）：①②③ 本包降级，④ 手动路径触发 UI 密码登记。 */
@@ -226,6 +243,8 @@ class BluelinkEngine(private val context: Context) {
         override fun onOfferReceived(ssid: String, pwd: String?) {
             DiagLogger.log(TAG, "收到对端 offer：ssid=$ssid pwdLen=${pwd?.length ?: 0}，WifiJoiner 接入")
             pendingJoinSsid = ssid
+            pendingJoinPwd = pwd ?: ""
+            pendingJoinCallbacks = wifiJoinCallbacks
             wifiJoiner.join(ssid, pwd ?: "", wifiJoinCallbacks)
         }
 
@@ -248,6 +267,15 @@ class BluelinkEngine(private val context: Context) {
 
     /** 接入失败/重试的目标 SSID（最近一次 offer 携带）。 */
     private var pendingJoinSsid: String? = null
+
+    /** 待重试 join 的密码（与 [pendingJoinSsid] 同源，权限授权成功后自动重试用）。 */
+    private var pendingJoinPwd: String = ""
+
+    /** 待重试 join 的结果回调（状态机路径 [wifiJoinCallbacks] / 接管路径 [peerOfferJoinCallbacks]）。 */
+    private var pendingJoinCallbacks: WifiJoiner.Callbacks? = null
+
+    /** 待重试 join 缺失的运行时权限（onNeedPermission 记录，授权成功后自动重试 join）。 */
+    private var pendingJoinPermission: String? = null
 
     /** 引擎接管 offer 去重（Bluelink 组网补丁）：一次会话内最多接管一次；WifiJoiner.join 幂等兜底重复 offer。 */
     private var peerOfferHandled = false
@@ -362,6 +390,43 @@ class BluelinkEngine(private val context: Context) {
         } else {
             stopAllBle()
         }
+    }
+
+    /**
+     * WifiJoiner 权限前置授权结果回填（BluelinkRoot 权限请求回调里，仅当本次请求包含
+     * [BluelinkUiState.requestedPermission] 时调用）：
+     * [BluelinkUiState.joinRetryNeeded] 置位（onNeedPermission 挂起过 join）且目标权限已授予 →
+     * 自动重试挂起的 join（WifiJoiner.join 幂等，可安全重试）；未授予 → 保持挂起并提示。
+     */
+    fun onJoinPermissionResult() {
+        val p = pendingJoinPermission ?: return
+        if (!ui.joinRetryNeeded) return
+        val granted = try {
+            appContext.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "检查权限 $p 异常（按未授权处理）: $e")
+            false
+        }
+        if (!granted) {
+            // 用户拒绝：清 requestedPermission，下次 join（onNeedPermission）可再次触发系统授权弹窗；
+            // 挂起状态由 joinRetryNeeded 保留（期间 BLE「去授权」请求不含该权限，不会被误判为 join 结果）
+            ui.requestedPermission = null
+            DiagLogger.log(TAG, "权限 $p 未授权（用户拒绝），join 保持挂起，可再次触发 join 重试授权")
+            ui.netState = "接入需权限 $p（未授权），授权后会自动重试接入"
+            return
+        }
+        ui.joinRetryNeeded = false
+        ui.requestedPermission = null
+        val callbacks = pendingJoinCallbacks
+        val ssid = pendingJoinSsid
+        if (callbacks == null || ssid.isNullOrBlank()) {
+            DiagLogger.log(TAG, "权限 $p 已授权，但无挂起的 join（ssid=${ssid} callbacks=${callbacks != null}），忽略自动重试")
+            pendingJoinPermission = null
+            return
+        }
+        DiagLogger.log(TAG, "权限 $p 已授权，自动重试 join ssid=$ssid（join 幂等，安全重试）")
+        ui.netState = "权限已授权，正在重新接入热点…"
+        wifiJoiner.join(ssid, pendingJoinPwd, callbacks)
     }
 
     /** 顶部广播开关。 */
@@ -539,6 +604,9 @@ class BluelinkEngine(private val context: Context) {
             return
         }
         DiagLogger.log(TAG, "重试接入热点 ssid=$ssid pwdLen=${pwd.length}")
+        pendingJoinSsid = ssid
+        pendingJoinPwd = pwd
+        pendingJoinCallbacks = wifiJoinCallbacks
         wifiJoiner.join(ssid, pwd, wifiJoinCallbacks)
     }
 
@@ -570,6 +638,8 @@ class BluelinkEngine(private val context: Context) {
             "接管 offer：ssid=$s pwdLen=${pwd.length}（状态机未在等 offer，engine 直接驱动 WifiJoiner 接入）",
         )
         pendingJoinSsid = s
+        pendingJoinPwd = pwd
+        pendingJoinCallbacks = peerOfferJoinCallbacks
         ui.netState = "收到组网邀请，正在接入热点…"
         wifiJoiner.join(s, pwd, peerOfferJoinCallbacks)
     }

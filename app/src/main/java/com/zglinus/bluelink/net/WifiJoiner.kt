@@ -1,7 +1,9 @@
 package com.zglinus.bluelink.net
 
+import android.Manifest
 import androidx.annotation.RequiresApi
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -23,6 +25,7 @@ import java.util.Locale
  * 双路径分流（按任务约定）：
  * - **Android 11+（API 29+）**：[WifiNetworkSpecifier]（[WifiNetworkSpecifier.Builder.setSsid] +
  *   [WifiNetworkSpecifier.Builder.setWpa2Passphrase]，pwd 为空则仅 SSID 匹配开放网络）→
+ *   权限前置（13+ 需 NEARBY_WIFI_DEVICES / 29–32 需 ACCESS_FINE_LOCATION，缺失回调 onNeedPermission）→
  *   [ConnectivityManager.requestNetwork] —— **系统弹窗由用户确认**；
  *   [ConnectivityManager.NetworkCallback.onAvailable] → 接入成功（延迟取 IP），
  *   [ConnectivityManager.NetworkCallback.onUnavailable] → 失败；
@@ -71,6 +74,16 @@ class WifiJoiner(private val context: Context) {
          * 上层引导用户到 `Settings.ACTION_MANAGE_WRITE_SETTINGS`，授权后重新调用 [join]。
          */
         fun onNeedWriteSettingsPermission()
+
+        /**
+         * API 29+（Specifier）路径需要运行时权限（缺失时 requestNetwork 会抛 SecurityException，
+         * 真机实锤：Android 12 未授 ACCESS_FINE_LOCATION、Android 13+ 未授 NEARBY_WIFI_DEVICES）：
+         * 上层发起系统授权，授权成功后重新调用 [join]（join 幂等，可安全重试）。
+         *
+         * @param permission 缺失的权限：Android 13+ 为 `Manifest.permission.NEARBY_WIFI_DEVICES`，
+         *   Android 12 及以下（29–32）为 `Manifest.permission.ACCESS_FINE_LOCATION`。
+         */
+        fun onNeedPermission(permission: String)
     }
 
     private val tag = "WifiJoiner"
@@ -167,6 +180,23 @@ class WifiJoiner(private val context: Context) {
      */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun joinWithSpecifier(attempt: Attempt) {
+        // 权限前置（真机实锤）：API 29+ 路径缺失运行时权限时 requestNetwork 直接抛 SecurityException。
+        // Android 13+ 需 NEARBY_WIFI_DEVICES；Android 12 及以下（29–32）需 ACCESS_FINE_LOCATION。
+        // 缺失 → 回调 onNeedPermission（不调 requestNetwork），由上层发起系统授权，授权后重新 join。
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        if (appContext.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
+            DiagLogger.log(
+                tag,
+                "API 29+ 路径：缺少运行时权限 $permission，回调 onNeedPermission（不调 requestNetwork）",
+            )
+            complete(attempt) { attempt.callbacks.onNeedPermission(permission) }
+            return
+        }
+        DiagLogger.log(tag, "API 29+ 路径：运行时权限 $permission 已授权，继续 Specifier 流程")
         val cm = connectivityManager
         if (cm == null) {
             fail(attempt, "ConnectivityManager 不可用")

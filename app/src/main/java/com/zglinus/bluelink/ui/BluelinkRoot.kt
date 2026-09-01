@@ -44,7 +44,15 @@ fun BluelinkRoot(engine: BluelinkEngine) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        engine.onPermissionsResult(result.values.all { it })
+        // WifiJoiner 权限前置（onNeedPermission → ui.requestedPermission）：本次请求若正是该权限，
+        // 结果只回灌 join 自动重试（engine.onJoinPermissionResult）；不误入 onPermissionsResult——
+        // 其 startBleIfNeeded → stopAllBle 会取消组网/接入。BLE 权限请求（不含该权限）仍走既有 onPermissionsResult。
+        val joinPermission = engine.ui.requestedPermission
+        if (joinPermission != null && result.containsKey(joinPermission)) {
+            engine.onJoinPermissionResult()
+        } else {
+            engine.onPermissionsResult(result.values.all { it })
+        }
     }
 
     // 启动：初始化引擎（root 探测/网络采集/蓝牙监听），并按需弹运行时权限请求
@@ -59,6 +67,14 @@ fun BluelinkRoot(engine: BluelinkEngine) {
         } else {
             permissionLauncher.launch(needed)
         }
+    }
+
+    // WifiJoiner 权限前置：onNeedPermission 置 ui.requestedPermission → 发起该权限的系统授权弹窗；
+    // 授权结果经 permissionLauncher 回调 → engine.onJoinPermissionResult 自动重试 join
+    // （拒绝则 engine 清 requestedPermission 保持挂起，下次 join 再次触发弹窗）
+    LaunchedEffect(engine.ui.requestedPermission) {
+        val p = engine.ui.requestedPermission ?: return@LaunchedEffect
+        permissionLauncher.launch(arrayOf(p))
     }
 
     // 广播开关同步到引擎

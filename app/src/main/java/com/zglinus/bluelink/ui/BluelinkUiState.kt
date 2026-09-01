@@ -109,4 +109,13 @@ class BluelinkUiState {
 
     /** WRITE_SETTINGS 授权引导对话框（Android 8–10 接入路径，onNeedWriteSettingsPermission 触发）。 */
     var writeSettingsDialog by mutableStateOf(false)
+
+    /**
+     * WifiJoiner 权限前置缺失的运行时权限（onNeedPermission 置位；BluelinkRoot 观察此字段发起
+     * 系统授权弹窗，请求结果回来后 engine 经 [joinRetryNeeded] 自动重试 join；授权后复位）。
+     */
+    var requestedPermission by mutableStateOf<String?>(null)
+
+    /** WifiJoiner 权限前置挂起 join 是否待授权后自动重试（授权成功后 engine 自动重试 join 并复位）。 */
+    var joinRetryNeeded by mutableStateOf(false)
 }

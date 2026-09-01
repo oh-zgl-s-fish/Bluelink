@@ -4,38 +4,36 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import com.zglinus.bluelink.ui.BluelinkEngine
+import com.zglinus.bluelink.ui.BluelinkRoot
 
+/**
+ * 唯一 Activity。职责：
+ * - 持有 [BluelinkEngine]（BLE 广播/扫描/GATT 服务端/客户端 + 网络采集接线）；
+ * - 生命周期接线（权限请求、启动/停止广播扫描在 BluelinkRoot 中编排）；
+ * - 状态保存由 UI 侧 rememberSaveable 最小化（仅广播开关）。
+ */
 class MainActivity : ComponentActivity() {
+
+    private lateinit var engine: BluelinkEngine
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        engine = BluelinkEngine(applicationContext)
         setContent {
             BluelinkTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Bluelink",
-                            style = MaterialTheme.typography.headlineMedium
-                        )
-                    }
-                }
+                BluelinkRoot(engine)
             }
         }
+    }
+
+    override fun onDestroy() {
+        engine.release()
+        super.onDestroy()
     }
 }
 

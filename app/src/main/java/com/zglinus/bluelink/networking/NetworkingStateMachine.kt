@@ -21,7 +21,7 @@ import org.json.JSONObject
  *   含 ④ 手动配网等待回填）；
  * - [OFFER_SENT]：offer 已发送，120s 内等待对端 joined（热点方，与④ 手动配置/等 offer 对齐）；
  * - [WAIT_JOIN]：对端已收到 offer，等待 WifiJoiner 包完成加入（随后发 joined）；
- * - [JOINED]：热点方已收 joined（同网复核中）；对端已发 joined（等 ack）；
+ * - [JOINED]：热点方已收 joined（v0.4.1：热点方复核直接通过，仅异常 joinedIp 走原复核兜底失败）；对端已发 joined（等 ack）；
  * - [TRANSPORT]：传输就绪，[NetworkingStateMachine.Callbacks.onTransportReady] 已上抛；
  * - [TEARDOWN]：已中止（失败/取消），abort 已发出，等待上层降级/切角色决策。
  */
@@ -50,7 +50,8 @@ enum class NetState {
  *   ①②③ 均经异步桥 [HotspotManager.startAsync]（③ L2 为 startLocalOnlyHotspot 真异步，
  *   结果经 LocalOnlyHotspotCallback 主线程收敛），见 [tryStartLevel]）
  *   → 成功后 setPassword（④ 登记后）→ 构造 offer 发送 → OFFER_SENT（120s 等 joined，与④ 手动配置/对端等 offer 对齐）
- *   → 收到 joined → JOINED（同网复核：isSameLan 子网一致为通过条件，probeTcp 仅辅助不阻断）→ 发 ack → TRANSPORT
+ *   → 收到 joined → JOINED（v0.4.1：热点方复核直接通过——对端已接入本机热点；传统 isSameLan 子网
+ *   复核仅保留在「同网免热点」场景（本状态机暂无该分支）或非热点方/异常 joinedIp 兜底，probeTcp 仅辅助不阻断）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
  * - 对端（`who == PEER`）：NEGOTIATING（120s 等 offer，与④ 手动配置对齐）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
  *   → WAIT_JOIN（等 WifiJoiner）→ `onWifiJoined(ip)` 发 joined → JOINED（15s 等 ack）
@@ -76,7 +77,8 @@ enum class NetState {
  * @param handler 超时调度器（默认主 Looper）。
  * @param mineCapability 本机能力（切角色时 Arbiter 重算用；缺省时无法重算，仅按 HotspotManager 探测兜底）。
  * @param peerCapability 对端能力（切角色时按"无法开启"置零重算用）。
- * @param localNetwork 本机网络摘要（同网复核输入；复核以 SameLanChecker.isSameLan 子网一致为通过条件，
+ * @param localNetwork 本机网络摘要（同网复核输入；v0.4.1 起复核仅用于非热点方/异常 joinedIp 兜底场景——
+ *   热点方收到 joined 直接通过；兜底复核以 SameLanChecker.isSameLan 子网一致为通过条件，
  *   并优先使用热点方采集的本机热点 IP（[localHotspotIp]）作本机侧参考；缺省时按通过处理）。
  */
 class NetworkingStateMachine(
@@ -502,7 +504,10 @@ class NetworkingStateMachine(
         scheduleTimeout("WAIT_JOIN 等待 WifiJoiner 加入")
     }
 
-    /** 热点方流程：收到 joined → JOINED → 同网复核（占位）→ 发 ack → TRANSPORT → onTransportReady(peerIp)。 */
+    /**
+     * 热点方流程：收到 joined → JOINED → 复核（v0.4.1：热点方直接通过，见 [isHotspotSideForReview]；
+     * 异常 joinedIp 走原复核兜底失败）→ 发 ack → TRANSPORT → onTransportReady(peerIp)。
+     */
     private fun onJoined(msg: SignalMessage) {
         if (state != NetState.OFFER_SENT) {
             DiagLogger.log(tag, "收到 joined 但非 OFFER_SENT（state=$state），忽略")
@@ -511,10 +516,29 @@ class NetworkingStateMachine(
         cancelTimer()
         val peerIp = msg.payload?.optString("ip", "") ?: ""
         enter(NetState.JOINED)
-        DiagLogger.log(tag, "收到 joined：peerIp=$peerIp，同网复核")
-        if (!verifySameLan(peerIp)) {
-            fail("同网复核失败（peerIp=$peerIp）")
-            return
+        // v0.4.1 复核语义修复（②）：本机就是热点——对端 joined 携带的 IP（如 192.168.43.x）
+        // 经本机热点 DHCP 分配，对端发来 joined 即已接入本机热点 → **热点方收到 joined 直接判通过**；
+        // 传统子网复核（isSameLan 子网一致 + probe 辅助日志）仅保留在「同网免热点」场景
+        // （本状态机暂无该分支，注释保留）或本机非热点方/无热点成功的兜底场景；
+        // 安全边界：热点方但 joinedIp 明显异常（null/空）→ 仍走原复核兜底（失败 abort，不猜测通过）。
+        val hotspotSide = isHotspotSideForReview()
+        if (hotspotSide) {
+            if (peerIp.isBlank()) {
+                DiagLogger.log(tag, "热点方收到 joined 但 joinedIp 为空（异常）：仍走原复核兜底（复核不通过）")
+                fail("同网复核失败（热点方 joinedIp 为空，peerIp=$peerIp）")
+                return
+            }
+            DiagLogger.log(tag, "热点方：对端已接入本机热点（joinedIp=$peerIp），复核直接通过")
+            SameLanChecker.probeTcp(peerIp) // probe 仍辅助日志（不阻断 TRANSPORT）
+        } else {
+            DiagLogger.log(
+                tag,
+                "本机非热点方/无热点成功场景：走传统同网复核（isSameLan 子网一致为通过条件，probe 仅辅助）",
+            )
+            if (!verifySameLan(peerIp)) {
+                fail("同网复核失败（peerIp=$peerIp）")
+                return
+            }
         }
         val ack = SignalMessage(type = SignalProtocol.TYPE_ACK)
         val ok = session.sendSignal(ack)
@@ -593,7 +617,24 @@ class NetworkingStateMachine(
     }
 
     /**
-     * 同网复核（v0.4.0 修复）：**以 [SameLanChecker.isSameLan]（子网一致）为通过条件**；
+     * v0.4.1 复核语义判定：本机是否为「热点方」（收到 joined 应直接通过）。
+     * - who=ME（自动 ①②③④ 降级链）或仲裁 MANUAL（who=null，④ 手动成功后本机同为热点方）；
+     * - 且本机确实开了热点：localHotspotIp 非空（已采集热点 IP）或处于 L2/②/④ 热点成功路径
+     *   （OFFER_SENT/JOINED——offer 仅在热点启动成功后发出，收到 joined 时必满足）。
+     * 注：onJoined 仅在 OFFER_SENT 触发（即本机必为已开热点的热点方），故复核时刻恒为 true；
+     * false 分支仅为防御保留（未来若加「同网免热点」分支，isSameLan 复核复用）。
+     */
+    private fun isHotspotSideForReview(): Boolean {
+        val hotspotSuccessPath = state == NetState.OFFER_SENT || state == NetState.JOINED
+        val hotspotIpCollected = localHotspotIp.isNotBlank()
+        val decidedHotspotSide = arbiterResult.who == Who.ME || arbiterResult.who == null // who=null=仲裁 MANUAL，手动成功后同为热点方
+        return decidedHotspotSide && (hotspotIpCollected || hotspotSuccessPath)
+    }
+
+    /**
+     * 同网复核（v0.4.0 修复；v0.4.1 起**仅作兜底**——热点方收到 joined 直接通过（见 [onJoined]/
+     * [isHotspotSideForReview]），本方法只在「同网免热点」场景（本状态机暂无该分支）或本机非热点方/
+     * 无热点成功、以及热点方 joinedIp 异常兜底时调用）：**以 [SameLanChecker.isSameLan]（子网一致）为通过条件**；
      * [SameLanChecker.probeTcp] 仅辅助、结果只记日志，**不阻断 TRANSPORT**。
      * - 本机侧参考：优先用热点方采集的本机热点 IPv4（[localHotspotIp]，与对端 joined IP 同子网，
      *   见 HotspotManager.collectHotspotIp；掩码按热点 DHCP /24）；未采到（手动④ 等）回退注入的 [localNetwork]；

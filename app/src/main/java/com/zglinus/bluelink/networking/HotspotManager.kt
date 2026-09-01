@@ -1438,12 +1438,17 @@ class HotspotManager(
         // reservation.wifiConfiguration?.preSharedKey 一致，仅多一层异常防护。
         val pwd = cfg?.preSharedKey?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotBlank() }
         if (pwd != null) {
-            val ip = collectHotspotIp()
+            // v0.4.1（①③ 修复）：onStarted 时机热点接口未起，立即 collectHotspotIp 枚举拿不到
+            // 热点接口 IP（返回空串，offer 携带空 IP）——onStarted 自动完成路径改**延迟采集**：
+            // 主线程 postDelayed 1500ms 后再枚举（热点接口应已 up）；仍为空则每 500ms 重试
+            // （postDelayed 链，不阻塞主线程），≤3s 收敛、首次成功即收；收敛后以最终 IP 组装
+            // 成功结果 dispatchLocalOnlyResult（日志注明「延迟枚举等待热点接口 IP
+            // （LocalOnly onStarted 时机接口未起）」）。
             DiagLogger.log(
                 tag,
-                "L2_LOCAL_ONLY 密码自动读取成功（统一先试读）：sdk=$sdk ssid=$ssid pwdLen=${pwd.length} ip=${ip.ifEmpty { "<空>" }}（密码不回显）",
+                "L2_LOCAL_ONLY 密码自动读取成功（统一先试读）：sdk=$sdk ssid=$ssid pwdLen=${pwd.length}（密码不回显）——延迟枚举等待热点接口 IP（LocalOnly onStarted 时机接口未起）",
             )
-            dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
+            collectHotspotIpDelayedThenDispatch(ssid, pwd)
             return
         }
         if (sdk in 26..32) {
@@ -1467,6 +1472,38 @@ class HotspotManager(
         )
         listener.onLocalOnlyPasswordRequest(ssid)
         // 等待 completeLocalOnlyPassword(pwd) 收敛（pendingLocalOnlyCb 保留；状态机步骤超时已放宽 120s）
+    }
+
+    /**
+     * v0.4.1（①③ 修复）：③ L2 onStarted 自动完成路径的**延迟采集**——onStarted 时机热点接口未起，
+     * 立即 [collectHotspotIp] 枚举拿不到热点接口 IP（返回空串，offer 携带空 IP）；本方法主线程
+     * postDelayed 延迟 [HOTSPOT_IP_DELAY_MS]（1500ms）后再枚举（热点接口应已 up），仍为空则每
+     * [HOTSPOT_IP_RETRY_INTERVAL_MS]（500ms）重试（postDelayed 链，不阻塞主线程），总等待
+     * ≤ [HOTSPOT_IP_MAX_WAIT_MS]（3s）、首次成功即收；收敛后以最终 IP 组装成功结果
+     * dispatchLocalOnlyResult（IP 仍未取到则空串，一期允许占位，与 HotspotResult 语义一致）。
+     */
+    private fun collectHotspotIpDelayedThenDispatch(ssid: String, pwd: String) {
+        collectHotspotIpDelayedAttempt(ssid, pwd, attempt = 0, startedAt = System.currentTimeMillis())
+    }
+
+    /** ③ 延迟采集单次尝试（postDelayed 链，主线程）：attempt=0 延迟 1500ms，之后每 500ms 重试；≤3s 收敛。 */
+    private fun collectHotspotIpDelayedAttempt(ssid: String, pwd: String, attempt: Int, startedAt: Long) {
+        val delay = if (attempt == 0) HOTSPOT_IP_DELAY_MS else HOTSPOT_IP_RETRY_INTERVAL_MS
+        mainHandler.postDelayed({
+            val ip = collectHotspotIp()
+            val elapsed = System.currentTimeMillis() - startedAt
+            val done = ip.isNotBlank() || elapsed >= HOTSPOT_IP_MAX_WAIT_MS
+            DiagLogger.log(
+                tag,
+                "延迟枚举等待热点接口 IP（LocalOnly onStarted 时机接口未起）：attempt=$attempt 延迟=${delay}ms " +
+                    "elapsed=${elapsed}ms ip=${ip.ifEmpty { "<空>" }}（${if (ip.isNotBlank()) "首次成功即收" else "未取到（≤3s 超时收敛，空串占位）"}）",
+            )
+            if (done) {
+                dispatchLocalOnlyResult(HotspotResult(success = true, ssid = ssid, pwd = pwd, ip = ip))
+            } else {
+                collectHotspotIpDelayedAttempt(ssid, pwd, attempt + 1, startedAt)
+            }
+        }, delay)
     }
 
     /** ③ onFailed 收敛（主线程）：系统 reason 映射为可读文案，失败透传交状态机降级 ④。 */
@@ -1804,6 +1841,15 @@ class HotspotManager(
 
         /** ③ L2 真异步 pending 标记（startSyncInternal 同步返回；最终结果由 LocalOnlyHotspotCallback 收敛）。 */
         private const val LOCAL_ONLY_PENDING = "LocalOnlyPending"
+
+        /** ③ L2 onStarted 延迟枚举等待热点接口 IP 的初始延迟（v0.4.1：LocalOnly onStarted 时机接口未起，主线程 postDelayed 1500ms 后再枚举）。 */
+        private const val HOTSPOT_IP_DELAY_MS: Long = 1_500L
+
+        /** ③ L2 onStarted 延迟枚举重试间隔（首次枚举为空时每 500ms 重试，postDelayed 链不阻塞主线程）。 */
+        private const val HOTSPOT_IP_RETRY_INTERVAL_MS: Long = 500L
+
+        /** ③ L2 onStarted 延迟枚举总等待上限（≤3s：1500+500*3 共 4 次尝试，首次成功即收）。 */
+        private const val HOTSPOT_IP_MAX_WAIT_MS: Long = 3_000L
 
         /** ② 反射 setWifiApEnabled 后轮询 isWifiApEnabled 的最长等待（任务约定 ≤5s）。 */
         private const val PRIVATE_AP_POLL_TIMEOUT_MS: Long = 5_000L

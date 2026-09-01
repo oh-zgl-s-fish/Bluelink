@@ -70,4 +70,11 @@
 - **App 内置诊断**（推荐）：主页面状态卡 →「诊断」→ 查看/复制全部/导出文件（`Android/data/com.zglinus.bluelink/files/diag_*.txt`）——不依赖 adb
 - **logcat**：`adb logcat -d -s BleAdvertiser:* BleScanner:* GattClient:* GattServer:* BluelinkEngine:*`
 - 标签速查：`GattClient`（连接/MTU/发现/写入/确认/失败）、`GattServer`（收到 JSON/订阅/通知）、`BleScanner`（v0.1.4+ 同设备 1s 去抖）、`BluelinkEngine`（状态机）
-- 注意：扫描日志 1s 去抖后约每秒 1 条，512 条缓冲可覆盖约 8 分钟完整链路
+- 注意：扫描日志 1s 去抖后约每秒 1 条，512 条缓冲可覆盖约 8 分钟完整链路### 4.7 对端「加入热点无反应」——先查 Wi-Fi 总开关
+- 现象：B 端收 offer 后无系统弹窗/无动作。
+- 根因（实测）：B 端 Wi-Fi 关闭——Specifier「连接此网络？」弹窗与加入热点都以 Wi-Fi 开启为前提。
+- 处理：保持 B 端 Wi-Fi 总开关开启（可断开当前网络）。
+
+### 4.8 13+ 「没有弹窗、以为没开热点」+ OFFER_SENT 提前 abort
+- 现象：A15 上 ③ LocalOnly 开启后**无系统密码展示弹窗**（国产 ROM 移除/折叠），用户误以为没开；对端点系统接入弹窗期间，A 端 OFFER_SENT 15s 超时 abort 关热点。
+- 修复（v0.3.9.1/0.3.9.2）：onStarted **统一先试读 preSharedKey（33+ 也读）**——A15 实测**自动读密码成功**（网页版 NEARBY 主张成立）；OFFER_SENT 等 joined **对齐 120s**。

@@ -1,6 +1,6 @@
 # Bluelink · 待办清单
 
-> 2026-09-01 快照（v0.3.8 时点，热点三级链成型：②'系统热点自动开(sdk31实测成功,k1式) / ③LocalOnly / ④手动）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
+> 2026-09-01 快照（v0.3.9.2 时点：③ LocalOnly 全版本先试读——A15 自动读密码 ✅；OFFER_SENT 120s；同网复核放宽进行中）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
 > 代码约定：编码/编译修复一律 pi 子 agent，主管负责构建/验收/文档/归档；**每次出包/修复同步更新文档**。
 
 ## A. 组网链路（修复批次）
@@ -11,7 +11,7 @@
 | A2 | PEER 等 offer 超时对齐 120s | ✅ 已完成（与④手动配置同常量） |
 | A3 | 信令发送串行队列（FIFO + inFlight） | ✅ 已完成（v0.2.4，消 ping/pong/offer 并发互踩） |
 | A4 | 对端 offer 自动接管（收到 offer→join→回 joined） | ✅ 已完成（v0.2.4） |
-| A5 | **双机联测全链路**：热点自动开 → offer → 对端接入 → joined → TRANSPORT | 🟡 **部分通**：v0.3.8 sdk31 自动开热点 ✅；剩余对端接入闭环待测 |
+| A5 | **双机联测全链路**：热点自动开 → offer → 对端接入 → joined → TRANSPORT | 🟡 **近通**：A15 ③ 自动读密码+接入 ✅；A12 放行测试 ✅；**卡同网复核（probe 53317 必败）→ v0.4.0 放宽修复中** |
 | A6 | Wi-Fi 变化监听：手动连上热点（SSID 匹配 offer）→ 自动回 joined | 📝 已确认，后续做 |
 | A7 | 「root 失败不静默落④」（①②失败给原因提示而非直接手动） | 📝 讨论中，并入 B 包规格 |
 | A8 | **同网判定优先**（无感）：握手后先探同网，同网直接直连、异网才进热点流程 | 📝 无感核心方案（待办） |

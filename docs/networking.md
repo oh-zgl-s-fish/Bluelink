@@ -102,3 +102,6 @@ IDLE ──用户确认──▶ NEGOTIATING(角色裁定/可切换)
 - **root 路线废弃**（A15/KernelSU 上 cmd wifi 残缺+反射方法移除，已删 B1）
 - **Shizuku / Binder 直呼 connectivity.startTethering：暂不引入**（MacroDroid 逆向作为技术档案；结论存档于 docs/macrodroid-notes.md）
 - targetSdk=27 保留（② 8-9 路径需要 legacy 豁免；对 ③ ④ 无副作用）
+- **③ 实测定案（v0.3.9.1/0.3.9.2）**：onStarted 统一先试读 preSharedKey（不按 sdk 分开）——**A15 自动读密码成功**（NEARBY 33+ 授权前置做过即读得到）；29-32 由「盲区禁用」改为**放行调用+先试读**（A12 实测定案）；读空才回填（33+）/降 ④（26-32）。
+- **OFFER_SENT 等 joined 120s**（v0.3.9.2，PEER_JOIN_TIMEOUT_MS）：对端接入含系统 Specifier 确认弹窗，15s 必不够。
+- **同网复核放宽（v0.4.0）**：子网一致即通过；probeTcp(53317) 降辅助（服务监听前不阻塞）。

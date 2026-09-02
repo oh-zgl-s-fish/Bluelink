@@ -37,6 +37,14 @@ import kotlinx.coroutines.withContext
  * - [tick]（BluelinkUiState.wallpaperTick）为刷新信号：槽/遮罩改动后 +1 触发重读 store 并重绘。
  *   解码以 slot（type+uri）为 produceState key——槽未变（仅遮罩/强调色变化）时不重复解码；
  * - 预览（个性化页预览块/槽缩略）与本文件同套解码/效果函数，保证预览 = 真实背景效果。
+ *
+ * v0.5.8b 自选图来源形态：[PersonalizePage] 选图后立即复制到 App 私有目录
+ * （filesDir/wallpapers/）并**存文件绝对路径**（无 scheme 直存）——重启必在、BitmapFactory.decodeFile
+ * 直读无需 provider 授权（修 v0.5.8「content:// grant 重启失效 / 双次 openInputStream 不稳 → 自选图
+ * 不显示」）；[decodeUriWallpaper] 兼容三种 uri 字符串：绝对路径 / `file://`（Uri.parse(...).path 取
+ * 路径）/ 老存量 `content://`（保留 openInputStream 双次读路径与既有 takePersistable 授权尝试，不删）。
+ * 另：解码结果三态化（[rememberSlotDecode] 带 failed）——预览区失败给可见文案而非无限「加载中」
+ * （见 PersonalizePage.PreviewSection）；主页面根背景仍按失败 = null 回纯色，无需改。
  */
 
 /** 主页面背景根层可解码目标尺寸上限（最长边；继续 downsample 防 OOM）。 */
@@ -73,7 +81,8 @@ fun WallpaperBackdrop(
 /**
  * 「壁纸 + 遮罩」渲染单元（主页面根背景 / 个性化页预览块共用，保证预览一致）：
  * 壁纸图 ContentScale.Crop 铺满；其上叠加半透明遮罩 Box —— 遮罩色 = 当前主题 surfaceVariant，
- * 透明度 = maskAlpha%（0–80，滑块上限）。
+ * 透明度 = maskAlpha%（0–80，滑块上限）。**遮罩色 = surfaceVariant，随系统深浅模式自动切换
+ * （v0.5.8b 确认：M3 语义 token 浅深各派生，无需按深浅分支改代码）**。
  */
 @Composable
 internal fun WallpaperEffect(
@@ -102,37 +111,58 @@ internal fun WallpaperEffect(
     }
 }
 
+/** 槽解码结果（v0.5.8b）：区分解码中（bitmap/failed 皆否）/ 成功 / 失败（解码完成但不可用）——
+ *  预览区据此给可见失败文案，不再把失败当「加载中」无限提示；主页面背景仍按 bitmap==null 回纯色。 */
+internal data class SlotDecode(
+    val bitmap: ImageBitmap?,
+    val failed: Boolean,
+)
+
 /**
- * 槽壁纸异步解码（produceState + IO 线程 decode；换槽/清槽自动重启）。
- * key = slot（type+uri data class equals）→ 槽未变不重复解码；旧位图值先置空，
- * 再经 mainHandler 延后回收（待当前帧绘完，避免回收仍被引用/绘制的位图）。
+ * 槽壁纸三态异步解码（produceState + IO 线程 decode；换槽/清槽自动重启）。
+ * key = slot（type+uri data class equals）→ 槽未变不重复解码；旧位图值先经 mainHandler 延后回收
+ * （待当前帧绘完，避免回收仍被引用/绘制的位图）。
+ * v0.5.8b：解码完成但不可用（null）→ failed=true（预览区显示失败文案）；主页面根背景仍走
+ * [rememberSlotBitmap]（失败 = null → 回纯色）。
  */
 @Composable
-internal fun rememberSlotBitmap(
+internal fun rememberSlotDecode(
     context: Context,
     slot: WallpaperSlot,
     maxDim: Int,
-): ImageBitmap? {
-    return produceState<ImageBitmap?>(initialValue = null, key1 = slot) {
+): SlotDecode {
+    return produceState<SlotDecode>(initialValue = SlotDecode(bitmap = null, failed = false), key1 = slot) {
         val old = value
         if (!slot.isSet) {
-            value = null
-            recycleLater(old)
+            value = SlotDecode(bitmap = null, failed = false)
+            recycleLater(old.bitmap)
             return@produceState
         }
         val decoded = withContext(Dispatchers.IO) {
             decodeSlotWallpaper(context.applicationContext, slot, maxDim)
         }
-        value = decoded?.asImageBitmap()
-        recycleLater(old)
+        value = if (decoded != null) {
+            SlotDecode(bitmap = decoded.asImageBitmap(), failed = false)
+        } else {
+            SlotDecode(bitmap = null, failed = true)
+        }
+        recycleLater(old.bitmap)
     }.value
 }
+
+/** 槽壁纸异步解码（主页面根背景用；未设/失败 → null —— 主页面回纯色）。解码逻辑同 [rememberSlotDecode]。 */
+@Composable
+internal fun rememberSlotBitmap(
+    context: Context,
+    slot: WallpaperSlot,
+    maxDim: Int,
+): ImageBitmap? = rememberSlotDecode(context = context, slot = slot, maxDim = maxDim).bitmap
 
 /** 按槽来源解码（自选 uri → [decodeUriWallpaper]；跟系统壁纸 → [decodeSystemWallpaper]；异常 → null）。 */
 private fun decodeSlotWallpaper(context: Context, slot: WallpaperSlot, maxDim: Int): Bitmap? = try {
     when (slot.type) {
         WallpaperSlot.TYPE_SYSTEM -> decodeSystemWallpaper(context, maxDim)
-        WallpaperSlot.TYPE_URI -> slot.uri?.let { decodeUriWallpaper(context, Uri.parse(it), maxDim) }
+        WallpaperSlot.TYPE_URI -> slot.uri?.let { decodeUriWallpaper(context, it, maxDim) }
         else -> null
     }
 } catch (t: Throwable) {
@@ -140,23 +170,62 @@ private fun decodeSlotWallpaper(context: Context, slot: WallpaperSlot, maxDim: I
 }
 
 /**
- * 自选 uri（SAF content://）解码：先 inJustDecodeBounds 读宽高 → inSampleSize（2 幂 downsample，
+ * 自选图解码入口：uri 字符串三种形态——
+ * - 绝对路径（v0.5.8b 起私有目录副本，无 scheme 直存）/ `file://` scheme（Uri.parse(...).path 取路径）
+ *   → [decodeFile] 直读（重启必在、无需 provider 授权、最稳）；
+ * - 老存量 `content://` → [decodeContentUri]（保留 openInputStream bounds 预读 + 实解双次读路径，
+ *   与既有 takePersistableUriPermission 授权尝试不变，兼容不删）。
+ * decode 行均在 Dispatchers.IO（调用方保证）。
+ */
+private fun decodeUriWallpaper(context: Context, uriString: String, maxDim: Int): Bitmap? {
+    val filePath = when {
+        uriString.startsWith("file://") -> Uri.parse(uriString).path
+        uriString.startsWith("/") -> uriString
+        else -> null
+    }
+    if (filePath != null) {
+        return decodeFile(filePath, maxDim)
+    }
+    return decodeContentUri(context, Uri.parse(uriString), maxDim)
+}
+
+/** 文件路径直读解码（v0.5.8b 私有副本 / file:// 兼容）：bounds 预读 → inSampleSize → 实解 → 长边收边。 */
+private fun decodeFile(path: String, maxDim: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    val w = bounds.outWidth
+    val h = bounds.outHeight
+    if (w <= 0 || h <= 0) return null
+    val opts = BitmapFactory.Options().apply { inSampleSize = sampleOf(w, h, maxDim) }
+    val raw = BitmapFactory.decodeFile(path, opts) ?: return null
+    val scaled = scaleToMax(raw, maxDim)
+    if (scaled !== raw) raw.recycle()
+    return scaled
+}
+
+/**
+ * content://（老存量 v0.5.8 及更早）解码：先 inJustDecodeBounds 读宽高 → inSampleSize（2 幂 downsample，
  * 防 OOM）解码 → 长边超过 maxDim 再精确收边。decode 行均在 Dispatchers.IO（调用方保证）。
  */
-private fun decodeUriWallpaper(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+private fun decodeContentUri(context: Context, uri: Uri, maxDim: Int): Bitmap? {
     val resolver = context.contentResolver
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
     val w = bounds.outWidth
     val h = bounds.outHeight
     if (w <= 0 || h <= 0) return null
-    var sample = 1
-    while (maxOf(w, h) / (sample * 2) >= maxDim) sample *= 2
-    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+    val opts = BitmapFactory.Options().apply { inSampleSize = sampleOf(w, h, maxDim) }
     val raw = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
     val scaled = scaleToMax(raw, maxDim)
     if (scaled !== raw) raw.recycle()
     return scaled
+}
+
+/** 2 幂 downsample（长边 ≤ maxDim → 1；防 OOM；bounds 已读宽高）。 */
+private fun sampleOf(w: Int, h: Int, maxDim: Int): Int {
+    var sample = 1
+    while (maxOf(w, h) / (sample * 2) >= maxDim) sample *= 2
+    return sample
 }
 
 /** 跟系统壁纸：WallpaperManager.drawable → 缩到 maxDim 内的位图（不在本进程缓存原图）。 */

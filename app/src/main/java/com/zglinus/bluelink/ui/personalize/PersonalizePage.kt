@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,34 +56,54 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ui.BluelinkUiState
 import com.zglinus.bluelink.ui.theme.SpacingTokens
+import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 import android.graphics.Color as AndroidColor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.8 UI1b-B2 整页重做，覆盖 v0.5.7 UI1b-B
  * 三槽长表单版——真机反馈 v0.5.7「主页面背景不变」由 MainScreen HOME 浮层化修复（另见
  * ui/MainScreen.kt RootWallpaperLayer/HOME_FLOAT_ALPHA），本页只管草稿编辑与保存）。
  *
- * 布局（docs/ui-design.md §4.1b v0.5.8 定稿；竖屏无上下滚动、一屏放完）：
+ * v0.5.8b 本版改动（壁纸来源修复 + 视觉收尾，真机反馈「壁纸两个来源都不显示/重启后丢失」）：
+ * - 自选图：SAF 收到 content:// 后**立即复制到 App 私有目录**（filesDir/wallpapers/，存文件绝对路径
+ *   [copyPickedToPrivateDir]）——重启必在、BitmapFactory.decodeFile 直读无需 provider 授权
+ *   （修 v0.5.8「SAF grant 重启失效（takePersistable 不一定成功）+ content:// 双次 openInputStream
+ *   部分 ROM 不稳 → 自选图不显示/重启丢」）；takePersistableUriPermission 保留尝试（忽略失败，兼容
+ *   老存量 content:// 数据链路）；清除槽时私有副本文件随槽 IO 删除；
+ * - 解码失败可见：预览区解码失败不再无限「加载壁纸预览…」→ 显示失败文案 + 来源小字提示
+ *   （预览走 WallpaperBackdrop [rememberSlotDecode] 三态，见 [PreviewSection]）；
+ * - 视觉收尾：右 5/6 具体颜色方块小格 → **40dp 大圆形色点**（选中 = primary 2dp 圆环）；「从壁纸取色」
+ *   入口 → **彩虹 sweepGradient 圆钮**（无文字）；场景三按钮 → **无字圆形按钮**（统一=半灰分半 /
+ *   深=深灰 / 浅=浅灰，选中 = primary 外环），按钮行与预览区之间加当前场景说明句 [sceneHint]。
+ *
+ * 布局（docs/ui-design.md §4.1b v0.5.8 定稿 + v0.5.8b 收尾；竖屏无上下滚动、一屏放完）：
  * - 顶部条：左「个性化」标题 / 右上「保存」（保存为最右角按钮；返回主页面入口与同级子页一致
  *   放标题右侧、保存左侧——规格图仅画 [保存]，本页为抽屉子页（主页面不列抽屉项、无 BackHandler），
  *   无返回即死胡同，故补 [返回]，保存仍保持右上角）；
  * - 颜色区（约占标题下内容区高 1/8，BoxWithConstraints 取 12.5% 收 80–128dp）：
  *   左 1/6「色系入口」窄条（当前色系色块 + 名称；点按展开/收拢色系列表）+ 中间竖分割线 +
- *   右 5/6「具体颜色」（当前色系 HSV 明暗连续 10 格，LazyRow 可左右滑动，点选即选中——
- *   选中格即时描边/色块预览）；色系展开态右区切换为横向色系 chips（红橙黄绿青蓝紫品粉棕灰白黑，
- *   选中后收拢并切换该色系取色）；API27+（O_MR1 门，26 隐藏）「从壁纸取色」入口固定在右区末端，
- *   取到的壁纸主色同样先入选中态（保存才生效）；
- * - 壁纸区：场景三按钮（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸，对应 [WallpaperStore]
- *   SLOT_UNIFIED/SLOT_DARK/SLOT_LIGHT，当前场景高亮）+ 弹性复用预览区：渲染当前场景槽草稿 =
+ *   右 5/6「具体颜色」：当前色系 HSV 明暗连续 10 个**大圆色点**（直径 40dp，LazyRow 可左右滑动，
+ *   点选即选中——选中态 = 2dp primary 圆环，色点纯色无文字）；色系展开态右区切换为横向色系 chips
+ *   （红橙黄绿青蓝紫品粉棕灰白黑，选中后收拢并切换该色系取色，交互保持 v0.5.8 不变）；API27+
+ *   （O_MR1 门，26 隐藏）「从壁纸取色」**彩虹 sweepGradient 圆钮**固定在右区末端，取到的壁纸主色
+ *   同样先入选中态（保存才生效）；
+ * - 壁纸区：场景三**无字圆钮**（统一壁纸（兜底）= 半深灰半浅灰圆、深色模式壁纸 = 深灰圆、
+ *   浅色模式壁纸 = 浅灰圆，对应 [WallpaperStore] SLOT_UNIFIED/SLOT_DARK/SLOT_LIGHT，当前场景 =
+ *   primary 2dp 外环高亮）+ 其下一行当前场景说明句 [sceneHint] + 弹性复用预览区：渲染当前场景槽草稿 =
  *   壁纸图 + 当前遮罩草稿叠加（复用 ui/personalize/WallpaperBackdrop.kt 同套渲染/解码函数
- *   [rememberSlotBitmap]/[WallpaperEffect]，预览即真实背景效果）；槽未设 → 占位（图标 +
- *   「点击选择壁纸」）；点预览区 → [WallpaperSourceSheet] 三选项：跟随系统壁纸 / 自选图片（SAF）/
- *   清除（清除仅已设时显示）；
- * - SAF 选图后必须 contentResolver.takePersistableUriPermission(uri, READ)（try/catch 包住不崩溃，
- *   修 v0.5.7 未持久授权导致重启失效问题；见 [persistUriReadPermission]）；
+ *   [rememberSlotDecode]/[WallpaperEffect]，预览即真实背景效果）；槽未设 → 占位（图标 +
+ *   「点击选择壁纸」）；解码失败 → 可见失败文案（v0.5.8b）；点预览区 → [WallpaperSourceSheet]
+ *   三选项：跟随系统壁纸 / 自选图片（SAF）/ 清除（清除仅已设时显示）；
+ * - SAF 选图后**立即复制到私有目录**（见 [copyPickedToPrivateDir]，IO 线程；成功才写槽）；
  * - 遮罩区（底部固定 · 全局共用）：「遮罩」+ Slider 0–80%（显示百分比），拖动即页内预览
- *   （预览区遮罩同步变）。
+ *   （预览区遮罩同步变）。遮罩色 = 主题 surfaceVariant（随系统深浅自动切换，v0.5.8b 确认，见
+ *   WallpaperBackdrop.WallpaperEffect 注释）。
  *
  * 保存语义（v0.5.8 新交互）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 / accent 草稿 / 当前场景 /
  * 色系展开与选中态），进入页面从 [WallpaperStore] 读初值；任何改动只改本地态并即时页内预览
@@ -100,6 +121,8 @@ fun PersonalizePage(
 ) {
     val context = LocalContext.current
     val store = remember { WallpaperStore(context.applicationContext) }
+    // v0.5.8b：自选图复制 / 清除槽删私有副本在 Dispatchers.IO 执行（文件操作不入主线程）
+    val scope = rememberCoroutineScope()
 
     // ==================== v0.5.8 本地编辑态（草稿；保存才写 prefs） ====================
     var unifiedDraft by remember { mutableStateOf(store.slot(WallpaperStore.SLOT_UNIFIED)) }
@@ -134,7 +157,10 @@ fun PersonalizePage(
         }
     }
 
-    // 自选图片（SAF GetContent，image/*）：持久读授权（try/catch 不崩溃）→ 写目标场景槽草稿
+    // 自选图片（SAF GetContent，image/*）：收到 content:// uri 后**立即在 Dispatchers.IO 复制到私有目录**
+    // （v0.5.8b：存文件绝对路径——重启必在、读取最稳；修 v0.5.8 content:// grant 重启失效 / 双次
+    // openInputStream 部分 ROM 不稳 → 自选图不显示）。复制成功才写目标场景槽草稿，失败 Snackbar 不写槽。
+    // persistUriReadPermission 保留尝试（老存量 content:// 兼容链路不变；provider 不支持时忽略）。
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -142,7 +168,17 @@ fun PersonalizePage(
         pickingSlot = null
         if (uri != null) {
             persistUriReadPermission(context, uri)
-            setSlotDraft(slotId, WallpaperSlot(type = WallpaperSlot.TYPE_URI, uri = uri.toString()))
+            scope.launch {
+                val path = withContext(Dispatchers.IO) {
+                    copyPickedToPrivateDir(context, uri)
+                }
+                if (path != null) {
+                    // 复制成功 → 槽写私有副本文件绝对路径（uri 字段语义不变，见 WallpaperStore：字符串字段可存文件路径）
+                    setSlotDraft(slotId, WallpaperSlot(type = WallpaperSlot.TYPE_URI, uri = path))
+                } else {
+                    ui.showSnack("自选图片复制失败，未更改壁纸来源")
+                }
+            }
         }
     }
 
@@ -201,7 +237,7 @@ fun PersonalizePage(
             TextButton(onClick = { save() }) { Text("保存") }
         }
         Spacer(Modifier.height(SpacingTokens.SpaceSm))
-        // ---- 内容区（标题下剩余空间）：颜色区 ~1/8 + 场景行 + 预览弹性大部 + 遮罩底部固定 ----
+        // ---- 内容区（标题下剩余空间）：颜色区 ~1/8 + 场景行 + 说明句 + 预览弹性大部 + 遮罩底部固定 ----
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
@@ -231,7 +267,17 @@ fun PersonalizePage(
                     onSceneSelected = { sceneSlot = it },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(SpacingTokens.SpaceSm))
+                Spacer(Modifier.height(SpacingTokens.SpaceXs))
+                // v0.5.8b：场景说明句（无字圆钮行与预览区之间；当前场景切换文案，正文按规格原文）
+                Text(
+                    text = sceneHint(sceneSlot),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(SpacingTokens.SpaceXs))
                 PreviewSection(
                     slot = slotDraft(sceneSlot),
                     sceneSlot = sceneSlot,
@@ -267,6 +313,12 @@ fun PersonalizePage(
                 imagePicker.launch("image/*")
             },
             onClear = {
+                // v0.5.8b：槽 uri 指向私有副本（filesDir/wallpapers 下）→ Dispatchers.IO 删除本地文件
+                // （忽略失败）后再清槽——避免复制进私有目录的文件残留成孤儿
+                val clearing = slotDraft(sceneSlot)
+                if (isPrivateWallpaperFile(context, clearing.uri)) {
+                    scope.launch(Dispatchers.IO) { File(clearing.uri!!).delete() }
+                }
                 setSlotDraft(sceneSlot, WallpaperSlot.NONE)
                 sourceSheet = false
             },
@@ -313,7 +365,8 @@ private fun ColorSectionRow(
                 .background(MaterialTheme.colorScheme.outlineVariant),
         )
         Spacer(Modifier.width(SpacingTokens.SpaceXs))
-        // 右 5/6：展开态 = 色系列表 chips（覆盖在右侧区域上层）；收拢态 = 具体颜色滑动条；最右固定「从壁纸取色」
+        // 右 5/6：展开态 = 色系列表 chips（覆盖在右侧区域上层）；收拢态 = 具体颜色大圆色点横滑条；
+        // 最右固定「从壁纸取色」彩虹圆钮（API27+）
         Row(
             modifier = Modifier
                 .weight(5f)
@@ -338,13 +391,11 @@ private fun ColorSectionRow(
                         .fillMaxHeight(),
                 )
             }
-            // API27+（O_MR1 门；26 隐藏）「从壁纸取色」固定在右区末端（两态均保留）
+            // API27+（O_MR1 门；26 隐藏）「从壁纸取色」彩虹圆钮固定在右区末端（两态均保留）
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 WallpaperPickEntry(
                     onClick = onPickFromWallpaper,
-                    modifier = Modifier
-                        .width(46.dp)
-                        .fillMaxHeight(),
+                    modifier = Modifier.padding(start = SpacingTokens.SpaceXs),
                 )
             }
         }
@@ -445,7 +496,8 @@ private fun FamilyChipsOverlay(
     }
 }
 
-/** 右 5/6 具体颜色（收拢态）：当前色系 HSV 同 hue 明暗连续格（10 格，可左右滑动）；点选即选中（描边即时预览）。 */
+/** 右 5/6 具体颜色（收拢态）：当前色系 HSV 同 hue 明暗连续**大圆色点**（10 点，LazyRow 可左右滑动）；
+ *  点选即选中（选中态 = primary 2dp 圆环即时预览）。v0.5.8b：方块/小格 → 40dp 大圆形色点视觉收尾。 */
 @Composable
 private fun ConcreteColorRow(
     family: ColorFamily,
@@ -468,7 +520,11 @@ private fun ConcreteColorRow(
     }
 }
 
-/** 具体颜色格（46dp 触达 / 视觉 34dp 圆角块）：选中 = primary 描边环 + 内容描述「已选 …」；未选细 outlineVariant 描边。 */
+/**
+ * 具体颜色**大圆色点**（v0.5.8b：视觉 40dp / 触达 48dp，纯色无文字）：选中态 = 2dp primary 圆环描边；
+ * 未选 = 1dp outlineVariant 细环（浅/白系色点在浅表面上的可见描边）。环以「大圆底衬 + 色点覆盖中心」
+ * 实现——色点外缘正好露环宽，无需描边半宽换算。
+ */
 @Composable
 private fun AccentSwatch(
     argb: Long,
@@ -477,7 +533,8 @@ private fun AccentSwatch(
 ) {
     Box(
         modifier = Modifier
-            .size(46.dp)
+            .size(48.dp)
+            .clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
                 contentDescription = if (isSelected) "已选强调色 ${accentHex(argb)}" else "强调色 ${accentHex(argb)}"
@@ -485,65 +542,67 @@ private fun AccentSwatch(
             },
         contentAlignment = Alignment.Center,
     ) {
-        if (isSelected) {
-            // 选中描边环（primary）：即时页内预览「已选中此色」
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .border(2.dp, MaterialTheme.colorScheme.primary, MaterialTheme.shapes.small),
-            )
-        }
+        // 外环底衬（先画，被色点盖住中心、露外圈环）：选中 primary 2dp / 未选 outlineVariant 1dp
         Box(
             modifier = Modifier
-                .size(if (isSelected) 34.dp else 36.dp)
-                .clip(MaterialTheme.shapes.small)
-                .background(Color(argb))
-                .border(
-                    width = if (isSelected) 0.dp else 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                    shape = MaterialTheme.shapes.small,
+                .size(if (isSelected) 44.dp else 42.dp)
+                .background(
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outlineVariant
+                    },
+                    shape = CircleShape,
                 ),
+        )
+        // 40dp 大圆色点（纯色填充，无文字）
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Color(argb)),
         )
     }
 }
 
-/** 「从壁纸取色」入口（API27+ 固定在右区末端）：彩虹渐变取色图标 + 「取色」字样；读壁纸主色入选中态。 */
+/**
+ * 「从壁纸取色」入口（API27+ / O_MR1 门，26 无此入口；固定在右区末端，两态均保留）：v0.5.8b 由
+ * 「渐变图标 + 取色字样」改为**彩虹 sweepGradient 圆形按钮**（44–48dp，圆内 8 色 sweep，仿 HTML
+ * conic-gradient 同序：#ff0000→#ff8800→#ffff00→#00cc44→#0088ff→#6633ff→#ff00cc→#ff0000，首尾同红
+ * 环向无缝），**无文字**（读屏 contentDescription =「从壁纸取色」）；点击行为不变（取系统壁纸主色
+ * 入 accentDraft + Snackbar「已取壁纸主色（保存后生效）」）。
+ */
 @Composable
 private fun WallpaperPickEntry(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Box(
         modifier = modifier
-            .clip(MaterialTheme.shapes.small)
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(rainbowSweepBrush())
             .clickable(onClick = onClick)
             .semantics { contentDescription = "从壁纸取色" },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        // 装饰取色图标：纵向彩虹渐变块（色值取色板代表色，非语义 token）
-        Box(
-            modifier = Modifier
-                .size(18.dp)
-                .clip(MaterialTheme.shapes.small)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(FAMILY_RED, FAMILY_ORANGE, FAMILY_YELLOW, FAMILY_BLUE, FAMILY_PURPLE)
-                            .map { Color(familySwatch(it)) },
-                    ),
-                ),
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = "取色",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
-            maxLines = 1,
-        )
-    }
+    )
 }
 
-/** 场景三按钮（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸；对应 WallpaperStore 三槽，当前场景高亮）。 */
+/** 取色圆钮彩虹 brush：8 色均匀环布（同 conic-gradient 默认等分布），首尾同红（#ff0000）环向无缝。 */
+private fun rainbowSweepBrush(): Brush = Brush.sweepGradient(
+    colors = listOf(
+        Color(0xFFFF0000),
+        Color(0xFFFF8800),
+        Color(0xFFFFFF00),
+        Color(0xFF00CC44),
+        Color(0xFF0088FF),
+        Color(0xFF6633FF),
+        Color(0xFFFF00CC),
+        Color(0xFFFF0000),
+    ),
+)
+
+/** 场景三按钮（v0.5.8b 无字圆形按钮，居中横排）：统一壁纸（兜底）= 左半深灰/右半浅灰圆（竖向中线分半）、
+ *  深色模式壁纸 = 深灰圆、浅色模式壁纸 = 浅灰圆；当前场景 = primary 2dp 外环高亮；点击切 sceneSlot 不变。 */
 @Composable
 private fun SceneSwitchRow(
     sceneSlot: Int,
@@ -552,81 +611,96 @@ private fun SceneSwitchRow(
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceLg, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        SceneChip(
-            label = "统一壁纸",
+        SceneDotButton(
+            slotId = WallpaperStore.SLOT_UNIFIED,
             isSelected = sceneSlot == WallpaperStore.SLOT_UNIFIED,
             onClick = { onSceneSelected(WallpaperStore.SLOT_UNIFIED) },
-            modifier = Modifier.weight(1f),
         )
-        SceneChip(
-            label = "深色模式壁纸",
+        SceneDotButton(
+            slotId = WallpaperStore.SLOT_DARK,
             isSelected = sceneSlot == WallpaperStore.SLOT_DARK,
             onClick = { onSceneSelected(WallpaperStore.SLOT_DARK) },
-            modifier = Modifier.weight(1f),
         )
-        SceneChip(
-            label = "浅色模式壁纸",
+        SceneDotButton(
+            slotId = WallpaperStore.SLOT_LIGHT,
             isSelected = sceneSlot == WallpaperStore.SLOT_LIGHT,
             onClick = { onSceneSelected(WallpaperStore.SLOT_LIGHT) },
-            modifier = Modifier.weight(1f),
         )
     }
 }
 
-/** 场景切换小按钮（小件档 8dp 圆角；选中 = primaryContainer 对，未选 = surfaceContainerLow + outlineVariant 描边）。 */
+/** 场景无字圆钮（视觉 52dp 圆 + 外环，触达 56dp）：选中 = primary 2dp 外环高亮；未选 = outlineVariant
+ *  1dp 细环（深灰圆在深表面 / 浅灰圆在浅表面上的可见描边）。无文字，读屏 contentDescription =「场景：…」。 */
 @Composable
-private fun SceneChip(
-    label: String,
+private fun SceneDotButton(
+    slotId: Int,
     isSelected: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = modifier
-            .height(40.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(
-                if (isSelected) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceContainerLow
-                },
-            )
-            .border(
-                width = if (isSelected) 0.dp else 1.dp,
-                color = if (isSelected) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant
-                },
-                shape = MaterialTheme.shapes.small,
-            )
+        modifier = Modifier
+            .size(56.dp)
+            .clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
                 selected = isSelected
-                contentDescription = "场景：$label"
+                contentDescription = "场景：${sceneName(slotId)}"
             },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (isSelected) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        // 外环底衬（先画，被填充圆盖住中心、露外圈环）：选中 primary 2dp / 未选 outlineVariant 1dp
+        Box(
+            modifier = Modifier
+                .size(if (isSelected) 56.dp else 54.dp)
+                .background(
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outlineVariant
+                    },
+                    shape = CircleShape,
+                ),
         )
+        // 52dp 填充圆（统一 = 左右半灰分半）
+        SceneDotFill(slotId = slotId, modifier = Modifier.size(52.dp))
     }
 }
 
+/** 圆钮填充（统一槽 = 左半深灰/右半浅灰，竖向中线分半；深槽 = 深灰；浅槽 = 浅灰）。 */
+@Composable
+private fun SceneDotFill(slotId: Int, modifier: Modifier = Modifier) {
+    Box(modifier = modifier.clip(CircleShape)) {
+        when (slotId) {
+            WallpaperStore.SLOT_DARK -> Box(Modifier.fillMaxSize().background(SCENE_DARK_GRAY))
+            WallpaperStore.SLOT_LIGHT -> Box(Modifier.fillMaxSize().background(SCENE_LIGHT_GRAY))
+            else -> Row(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxHeight().background(SCENE_DARK_GRAY))
+                Box(Modifier.weight(1f).fillMaxHeight().background(SCENE_LIGHT_GRAY))
+            }
+        }
+    }
+}
+
+/** 场景圆钮图形灰阶（v0.5.8b 无字圆钮数据色，非语义 token；规格：#3A3A3A 深灰 / #E8E8E8 浅灰）。 */
+private val SCENE_DARK_GRAY = Color(0xFF3A3A3A)
+
+private val SCENE_LIGHT_GRAY = Color(0xFFE8E8E8)
+
+/** 当前场景说明句（v0.5.8b：无字圆钮行与预览区之间的一行；正文按规格原文，勿自改文案）。 */
+private fun sceneHint(slotId: Int): String = when (slotId) {
+    WallpaperStore.SLOT_DARK -> "深色模式：深色模式壁纸，可覆盖通用壁纸"
+    WallpaperStore.SLOT_LIGHT -> "浅色模式：浅色模式壁纸，可覆盖通用壁纸"
+    else -> "通用模式：可以通过上方按钮切换深浅模式壁纸"
+}
+
 /** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩（复用 WallpaperBackdrop 同套
- *  rememberSlotBitmap/WallpaperEffect，预览即真实背景效果）；槽未设 → 占位「点击选择壁纸」；
- * 点预览区 → 打开 [WallpaperSourceSheet]。 */
+ *  rememberSlotDecode/WallpaperEffect，预览即真实背景效果）；槽未设 → 占位「点击选择壁纸」；
+ * 点预览区 → 打开 [WallpaperSourceSheet]。
+ * v0.5.8b：解码失败不再无限「加载壁纸预览…」——failed 时显示可见失败文案 + 来源小字提示
+ * （解码中的短暂空白可忽略：复制后才入槽，file 路径直读极快 <300ms）。 */
 @Composable
 private fun PreviewSection(
     slot: WallpaperSlot,
@@ -637,7 +711,7 @@ private fun PreviewSection(
 ) {
     val context = LocalContext.current
     // 同套解码（预览上限 PREVIEW_MAX_DIM=720px）：槽 type+uri 为 key——仅遮罩/场景外改动不重复解码
-    val wallpaper = rememberSlotBitmap(context = context, slot = slot, maxDim = PREVIEW_MAX_DIM)
+    val decode = rememberSlotDecode(context = context, slot = slot, maxDim = PREVIEW_MAX_DIM)
     Surface(
         modifier = modifier,
         shape = MaterialTheme.shapes.large,
@@ -655,15 +729,32 @@ private fun PreviewSection(
             if (slot.isSet) {
                 // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色）
                 WallpaperEffect(
-                    wallpaper = wallpaper,
+                    wallpaper = decode.bitmap,
                     maskAlpha = maskAlpha,
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (wallpaper == null) {
-                    // 解码中（异步 IO）兜底提示
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (decode.failed) {
+                    // v0.5.8b：解码失败可见——失败被静默吞掉是 v0.5.8「两个来源都不显示」观感根因之一，
+                    // 现显示主文案 + 来源小字提示（点按整区可更换来源）；解码中的短暂空白不提示
+                    val hint = when (slot.type) {
+                        WallpaperSlot.TYPE_SYSTEM ->
+                            "跟随系统壁纸可能被系统限制，可改用自选图片"
+                        else ->
+                            "图片文件不可读或已移动，可重新自选一张"
+                    }
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
                         Text(
-                            text = "加载壁纸预览…",
+                            text = "壁纸加载失败/不可用，点按更换来源",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(SpacingTokens.SpaceXs))
+                        Text(
+                            text = hint,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -777,7 +868,7 @@ private fun WallpaperSourceSheet(
             )
             SourceSheetOption(
                 title = "自选图片",
-                subtitle = "从相册/文件选择（SAF，自动保存授权）",
+                subtitle = "从相册/文件选择（自动复制到应用目录）",
                 onClick = onPickImage,
             )
             if (current.isSet) {
@@ -832,7 +923,9 @@ private fun sceneName(slotId: Int): String = when (slotId) {
     else -> "统一壁纸"
 }
 
-/** SAF 选图后持久读授权（修 v0.5.7 未持久授权、重启后 uri 失效问题；provider 不支持时忽略不崩溃）。 */
+/** SAF 选图后持久读授权（v0.5.7 起：修未持久授权、重启后 uri 失效问题；provider 不支持时忽略不崩溃。
+ *  v0.5.8b 起选图即复制进私有目录、槽存文件路径，持久授权不再是新数据必需——保留尝试仅为兼容
+ *  老存量 content:// 数据链路，失败无影响）。 */
 private fun persistUriReadPermission(context: Context, uri: Uri) {
     try {
         context.contentResolver.takePersistableUriPermission(
@@ -842,6 +935,70 @@ private fun persistUriReadPermission(context: Context, uri: Uri) {
     } catch (t: Throwable) {
         // 部分 provider（相册/DocumentsProvider 等）不支持持久授权：忽略（本次会话仍可读，重启后需重选图）
     }
+}
+
+// ==================== v0.5.8b 自选图 → 私有目录副本（修「自选图不显示 / 重启后丢失」） ====================
+
+/** 私有壁纸副本子目录名（App filesDir 下；自选图选后立即复制至此，重启必在、读取无需 provider 授权）。 */
+private const val WALLPAPERS_DIR = "wallpapers"
+
+/** 复制缓冲 8KB（java.io 循环拷贝，无新依赖）。 */
+private const val DEFAULT_COPY_BUFFER = 8 * 1024
+
+/**
+ * SAF content:// 自选图 → App 私有目录（filesDir/wallpapers/，不存在则 mkdirs）**立即复制**，
+ * 文件名 `w_<System.currentTimeMillis()>.<ext>`（ext 按 mime 推断，见 [imageExtensionOf]），
+ * 返回**文件绝对路径**。修 v0.5.8「SAF grant 重启失效（takePersistable 不一定成功）+ content:// 双次
+ * openInputStream 部分 ROM 不稳 → 自选图不显示/重启丢」：存绝对路径后 BitmapFactory.decodeFile 直读
+ * （无需授权、重启必在、读取最稳）。
+ * 复制失败/文件不可读 → null（调用方 Snackbar 提示、不写槽；半成品文件尽力清理）。调用方保证 IO 线程。
+ */
+private fun copyPickedToPrivateDir(context: Context, uri: Uri): String? {
+    val dir = File(context.filesDir, WALLPAPERS_DIR)
+    var target: File? = null
+    return try {
+        if (!dir.exists() && !dir.mkdirs()) return null
+        val dest = File(dir, "w_${System.currentTimeMillis()}.${imageExtensionOf(context, uri)}")
+        target = dest
+        val input = context.contentResolver.openInputStream(uri) ?: return null
+        input.use { src ->
+            FileOutputStream(dest).use { dst ->
+                val buffer = ByteArray(DEFAULT_COPY_BUFFER)
+                while (true) {
+                    val read = src.read(buffer)
+                    if (read < 0) break
+                    dst.write(buffer, 0, read)
+                }
+            }
+        }
+        dest.absolutePath
+    } catch (t: Throwable) {
+        target?.delete() // 尽力清理半成品（忽略失败）
+        if (t is CancellationException) throw t // 页面离开取消复制：向上传播（不写槽、不误报 Snackbar）
+        null
+    }
+}
+
+/** content:// mime → 副本扩展名（image/jpeg→jpg / image/png→png / image/webp→webp / 其它或取不到→img）。 */
+private fun imageExtensionOf(context: Context, uri: Uri): String {
+    val mime = try {
+        context.contentResolver.getType(uri)
+    } catch (t: Throwable) {
+        null
+    }
+    return when (mime?.lowercase(Locale.US)) {
+        "image/jpeg" -> "jpg"
+        "image/png" -> "png"
+        "image/webp" -> "webp"
+        else -> "img"
+    }
+}
+
+/** 槽 uri 是否指向私有壁纸副本（filesDir/wallpapers 下的绝对路径；清除槽时随槽 IO 删除本地文件用）。 */
+private fun isPrivateWallpaperFile(context: Context, uri: String?): Boolean {
+    if (uri == null || !uri.startsWith("/")) return false
+    val dirPrefix = File(context.filesDir, WALLPAPERS_DIR).absolutePath
+    return uri.startsWith("$dirPrefix/")
 }
 
 // ==================== 色系 / HSV 色板（用户可选数据值，非语义 token） ====================

@@ -626,6 +626,7 @@ class BluelinkEngine(private val context: Context) {
             localsendServer.stop()
             if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
             transportPeerIp = ""
+            sameLanDirectActive = false // A8：同网直连标记复位（防御；状态机中止路径不产生直连，幂等）
             ui.netActive = false
             ui.netState = "组网已中止：$reason"
         }
@@ -1196,8 +1197,21 @@ class BluelinkEngine(private val context: Context) {
 
     /** 「组建临时局域网」：按选中对端握手能力 + 本机能力仲裁，创建状态机并 start。 */
     fun startNetworking() {
-        if (netStateMachine != null || sameLanDirectActive) {
-            DiagLogger.log(TAG, "startNetworking 忽略：组网/同网直连已在进程中（machine=${netStateMachine != null} sameLanDirect=$sameLanDirectActive）")
+        if (netStateMachine != null) {
+            DiagLogger.log(TAG, "startNetworking 忽略：组网已在进程中（machine=true）")
+            return
+        }
+        // v0.5.5b：同网直连会话空闲态自动复位重发——第一次直连后未点「结束直连」，sameLanDirectActive=true
+        // 会让后续每次 startNetworking 都被整体忽略（真机卡死：machine=false sameLanDirect=true）：
+        // - 非空闲（传输/接收/收尾活动中，[isSameLanDirectBusy]）→ 维持忽略（防拆断进行中传输）；
+        // - 空闲（无进行中传输活动）→ 通过下方各项前置校验后先 endSameLanDirect()（幂等温和收尾：
+        //   停服务/停轮询/清 IP/复位 sameLanDirectActive 等），记事件后继续正常走主流程（refreshNetwork
+        //   重新判定同网/异网——同网再次直连、异网回仲裁+热点逐级，链路自此可恢复）。
+        if (sameLanDirectActive && isSameLanDirectBusy()) {
+            DiagLogger.log(
+                TAG,
+                "startNetworking 忽略（machine=false sameLanDirect=true）：同网直连传输/收尾进行中，维持会话",
+            )
             return
         }
         val entry = ui.detailDevice ?: run {
@@ -1216,6 +1230,16 @@ class BluelinkEngine(private val context: Context) {
             )
             ui.netState = "请先完成 PIN 配对验证（对端输入展示的配对码）后再组建局域网"
             return
+        }
+        if (sameLanDirectActive) {
+            // v0.5.5b：到达此处 = sameLanDirectActive=true 且空闲（无进行中传输）且前置校验全过——
+            // 复位旧直连会话后继续走下方主流程重新发起（不再整体忽略）。
+            DiagLogger.log(
+                TAG,
+                "startNetworking：同网直连空闲自动复位（machine=false sameLanDirect=true 无进行中传输）→ endSameLanDirect 后重新发起",
+            )
+            logUiEvent(EVT_INFO, "同网直连会话已结束，重新发起组网")
+            endSameLanDirect()
         }
         ui.joinFailDialog = false
         ui.writeSettingsDialog = false
@@ -1372,6 +1396,22 @@ class BluelinkEngine(private val context: Context) {
             }
         }, "samelan-direct-probe").apply { isDaemon = true }.start()
     }
+
+    /**
+     * A8 同网直连「非空闲」判定（v0.5.5b）：sameLanDirectActive=true 时 startNetworking 是否维持忽略——
+     * 仅当**无进行中传输/收尾活动**（空闲）才允许自动复位重发。取现有可判字段的最小可靠组合：
+     * - 组网中：netStateMachine != null（startNetworking 前置守卫已挡，此处防御冗余）；
+     * - 发送中：activeSendClient != null（confirmSend 置位 → onAllDone/onError/onCancelled 复位）；
+     * - 接收中：localsendServer.getActiveSessions() 非空（服务端会话注册起 → 全文件收完/取消移除）；
+     * - 接收收尾：persistInFlight > 0（文件已收完仍后台转存用户目录，属收尾活动——避免其完成回调
+     *   写 ui.transferState 与新会话文案竞态）。
+     * 四者皆无 → 空闲（LocalSendServer 在听但无收发），可 endSameLanDirect 后重新发起组网。
+     */
+    private fun isSameLanDirectBusy(): Boolean =
+        netStateMachine != null ||
+            activeSendClient != null ||
+            localsendServer.getActiveSessions().isNotEmpty() ||
+            persistInFlight.get() > 0
 
     /**
      * A8 同网直连温和收尾（对齐 v0.4.6 B4 温和收尾语义）：只停 LocalSend 服务与接收轮询、

@@ -100,7 +100,7 @@ import java.util.Locale
 
 /**
  * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿；
- * v0.5.4b 去阴影 + surfaceContainer 容器分层）：
+ * v0.5.4b 去阴影 + surfaceContainer 容器分层；v0.5.5c edge-to-edge 沉浸（Scaffold 背景铺满 + insets 归 Scaffold，见下方 Scaffold 注释））：
  * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
  * v0.5.4b 保持「无 elevation（不设阴影）/无边框」的扁平观感，改以 surfaceContainer 系列容器分层表达各内容区：
  * - surfaceContainerLowest（最贴近背景、弱层次）：设置分组容器、设备详情弹层正文、底部动作行/流程信息行（页内常规内容块）；
@@ -184,8 +184,20 @@ fun MainScreen(
             )
         },
     ) {
+        // v0.5.5c edge-to-edge 沉浸（配合 MainActivity.onCreate 的 enableEdgeToEdge；背景铺满说明）：
+        // Scaffold 根 Surface 默认 fillMaxSize + containerColor，铺满整窗（含状态栏/导航条下区域）——
+        // enableEdgeToEdge 后系统栏区域即透出此背景色（浅 #FDFBFF / 深 #111318，随 BluelinkTheme 主题）。
+        // 内容 insets 全部由 Scaffold 承担，页面内不重复加 statusBarsPadding/navigationBarsPadding（会双重留白）：
+        // - 顶部：M3 TopAppBar（MainTopBar）自带 windowInsets = TopAppBarDefaults.windowInsets（含 statusBars），
+        //   顶栏背景吃满状态栏、内容自动避开（无需再包 statusBarsPadding）；
+        // - 底部：无 bottomBar 时 Scaffold contentWindowInsets（systemBarsForVisualComponents）的 bottom
+        //   （= navigationBars 导航条 inset，与 navigationBarsPadding 同值）并入 innerPadding →
+        //   底部动作行/时间流等自动不贴小白条，底部按钮不贴条；
+        // - SnackbarHost 亦由 Scaffold 抬升至导航条之上；抽屉/底部弹层/AlertDialog 系统自带 insets 处理。
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
+            // containerColor 显式接线 = 默认值 MaterialTheme.colorScheme.background（整窗背景铺满，见上注释）
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 MainTopBar(
                     ui = ui,

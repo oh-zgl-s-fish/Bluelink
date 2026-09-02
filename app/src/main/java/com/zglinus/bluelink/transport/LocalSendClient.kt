@@ -7,7 +7,9 @@ import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
 import java.io.InterruptedIOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
@@ -134,7 +136,10 @@ class LocalSendClient(
             DiagLogger.log(TAG, "send 全部完成：files=${files.size} total=${total}B")
             onAllDone?.invoke(total)
         } catch (e: InterruptedIOException) {
-            handleAbort(localSessionId, isCancel = true, e)
+            // v0.4.4：仅用户主动取消（cancelled 标志置位）才走 onCancelled——SocketTimeoutException 同为
+            // InterruptedIOException 子类（连接/响应超时，非用户取消），此前被误判为「发送已取消」；
+            // 改为按 cancelled 标志分流，连接超时按失败走 onError（引擎映射为「对端服务未就绪」）
+            handleAbort(localSessionId, isCancel = cancelled, e)
         } catch (e: Exception) {
             handleAbort(localSessionId, isCancel = cancelled, e)
         }
@@ -181,13 +186,21 @@ class LocalSendClient(
             conn.setFixedLengthStreamingMode(bytes.size.toLong())
             conn.outputStream.use { it.write(bytes) }
             val code = conn.responseCode
-            val resp = readResponseBody(conn, code)
             if (code !in 200..299) {
+                val resp = readResponseBody(conn, code)
                 throw IOException("prepare-upload 服务端错误 HTTP $code：${resp.take(200)}")
             }
+            val resp = readResponseBody(conn, code)
             val returned = JSONObject(resp).optString("sessionId", "").ifBlank { localSessionId }
             DiagLogger.log(TAG, "prepare-upload 成功 HTTP $code：sessionId=$returned")
             return returned
+        } catch (e: ConnectException) {
+            // v0.4.4：连接被拒（对端 53317 未监听 → 对端 LocalSend 服务未启动/未收到 TRANSPORT）：
+            // 明确文案上抛（引擎 transferState 原样展示），不再只看到裸 ConnectException
+            throw IOException("对端服务未就绪（未收到 TRANSPORT/服务未启动）：连接被拒绝（${e.message}）", e)
+        } catch (e: SocketTimeoutException) {
+            // v0.4.4：连接/响应超时（对端服务未就绪或通道异常）：同样给明确文案
+            throw IOException("对端服务未就绪（未收到 TRANSPORT/服务未启动）：连接/响应超时（${e.message}）", e)
         } finally {
             activeConnection = null
             conn.disconnect()

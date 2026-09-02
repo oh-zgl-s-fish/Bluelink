@@ -80,6 +80,11 @@ import java.util.UUID
  * offer 会被状态机分发忽略 → 无人 join、无人回 joined、热点方等 joined 超时。
  * 补丁在 onRemoteSignal 分发点拦截：状态机不在等 offer → [handlePeerOffer] 直接接管
  * （WifiJoiner.join 接入 + 回 joined{ip}），复用 [SignalProtocol.TYPE_JOINED] 协议载荷。
+ * v0.4.4：接管路径同步捕获 offer 载荷 ip（A 端热点 IP，[takeoverPeerIp]）并消费热点方 ack
+ * （[handlePeerAck]）——offer 被引擎接管后状态机为 null / 未进入 JOINED（onAck 无法触发，真机实锤：
+ * B 收 ack 后仅 ping/pong、无状态转移）→ engine 直接完成 ack→TRANSPORT（启动 LocalSend 服务），
+ * 与状态机路径 JOINED→TRANSPORT→onTransportReady 对齐；发 joined 后 120s ack 超时（对齐
+ * NetworkingStateMachine 的 JOINED 等 ack，同 MANUAL_TIMEOUT_MS 语义）。
  *
  * T3 LocalSend 传输接线：TRANSPORT 后自动启动 [LocalSendServer]（alias=Build.MODEL）并扫描收件目录
  * 初始化接收列表；「发送文件」SAF 选文件 → [confirmSend] 后台线程 [LocalSendClient.send]，进度/结果写
@@ -278,6 +283,10 @@ class BluelinkEngine(private val context: Context) {
             }
             DiagLogger.log(TAG, "joined 回报已发送 ip=${ip.ifEmpty { "<空>" }}")
             ui.netState = "已接入热点，等待对方确认（IP：${ip.ifEmpty { "<未知>" }}）"
+            // v0.4.4：从机 ack 超时对齐状态机 JOINED 等 ack（120s，MANUAL_TIMEOUT_MS 同一值）——
+            // 热点方 ack 未到（已中止/通道异常）给出明确提示，不无限挂起
+            mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
+            mainHandler.postDelayed(takeoverAckTimeoutRunnable, TAKEOVER_ACK_TIMEOUT_MS)
         }
 
         override fun onFailed(reason: String) {
@@ -421,14 +430,7 @@ class BluelinkEngine(private val context: Context) {
             // T3：传输就绪（peerIp 可为占位 ""）→ 记录对端 IP + 自动启动 LocalSend 服务（alias=Build.MODEL），
             // 对端即可经 53317 发送文件到本机；同时扫描 filesDir/localsend 初始化接收列表
             DiagLogger.log(TAG, "组网传输就绪 peerIp=${peerIp.ifEmpty { "<空>" }}")
-            transportPeerIp = peerIp
-            if (!localsendServer.isRunning) {
-                val ok = localsendServer.start()
-                DiagLogger.log(TAG, "T3 LocalSend 服务自动启动：ok=$ok alias=${Build.MODEL}")
-            }
-            refreshReceivedFiles()
-            mainHandler.removeCallbacks(receivePoller)
-            mainHandler.post(receivePoller)
+            onTransportReadyInternal(peerIp)
         }
 
         override fun onAbort(reason: String) {
@@ -457,6 +459,23 @@ class BluelinkEngine(private val context: Context) {
         }
     }
 
+    /**
+     * TRANSPORT 就绪收敛（v0.4.4）：状态机回调 [netCallbacks.onTransportReady] 与接管路径
+     * [handlePeerAck] 共用——记录对端 IPv4（transportPeerIp，发送目标）→ 自动启动
+     * [LocalSendServer]（alias=Build.MODEL，对端即可经 53317 发送文件到本机）→ 扫描收件目录
+     * 初始化接收列表 → 启动接收进度轮询。幂等：服务已运行时不再重复 start。
+     */
+    private fun onTransportReadyInternal(peerIp: String) {
+        transportPeerIp = peerIp
+        if (!localsendServer.isRunning) {
+            val ok = localsendServer.start()
+            DiagLogger.log(TAG, "T3 LocalSend 服务自动启动：ok=$ok alias=${Build.MODEL}")
+        }
+        refreshReceivedFiles()
+        mainHandler.removeCallbacks(receivePoller)
+        mainHandler.post(receivePoller)
+    }
+
     /** 组网状态机（按选中对端握手能力 + 本机能力仲裁后创建；结束后置 null）。 */
     private var netStateMachine: NetworkingStateMachine? = null
 
@@ -477,6 +496,15 @@ class BluelinkEngine(private val context: Context) {
 
     /** 引擎接管 offer 去重（Bluelink 组网补丁）：一次会话内最多接管一次；WifiJoiner.join 幂等兜底重复 offer。 */
     private var peerOfferHandled = false
+
+    /** 接管路径：offer 携带的对端（A 端）热点 IPv4（v0.4.4；从机 ack 后作为 transportPeerIp，
+     *  与状态机 offerPeerIp 对齐；offer 未带 ip 字段则为空串，由上层按占位处理）。 */
+    @Volatile
+    private var takeoverPeerIp: String = ""
+
+    /** 接管路径 ack 超时（v0.4.4，120s 对齐状态机 JOINED 等 ack 的 MANUAL_TIMEOUT_MS）：发 joined 后
+     *  热点方 ack 未到（已中止/通道异常）→ 明确提示，不无限挂起。 */
+    private val takeoverAckTimeoutRunnable = Runnable { onTakeoverAckTimeout() }
 
     /**
      * 组网阶段轮询：状态机不暴露状态变化回调（仅 currentState getter），
@@ -540,10 +568,18 @@ class BluelinkEngine(private val context: Context) {
                 val machineWaitingOffer = m != null && m.currentState == NetState.NEGOTIATING
                 if (msg.type == SignalProtocol.TYPE_OFFER && !machineWaitingOffer) {
                     val payload = msg.payload
+                    // v0.4.4：接管路径同步捕获 offer 载荷 ip（A 端热点 IP，从机 ack 后作为
+                    // transportPeerIp；与状态机 onOffer 记录 offerPeerIp 对齐）
                     handlePeerOffer(
                         ssid = payload?.optString("ssid", "") ?: "",
                         pwd = payload?.optString("pwd", "") ?: "",
+                        ip = payload?.optString("ip", "") ?: "",
                     )
+                } else if (msg.type == SignalProtocol.TYPE_ACK && peerOfferHandled) {
+                    // v0.4.4：接管路径从机 ack 消费——offer 被 engine 接管（状态机 null / 非等 offer 态）时
+                    // 状态机不会进入 JOINED，onAck 无法触发（真机实锤：B 收 ack 仅 ping/pong、无状态转移）
+                    // → engine 直接完成 ack→TRANSPORT（启动 LocalSend 服务），与状态机 JOINED→TRANSPORT 对齐
+                    handlePeerAck()
                 } else {
                     netStateMachine?.onRemoteSignal(msg)
                 }
@@ -1286,7 +1322,7 @@ class BluelinkEngine(private val context: Context) {
      * 去重：一次会话内 [peerOfferHandled] 置位后忽略后续 offer（避免重复 join / 重复弹窗），
      * 新会话（重新握手 attach）时重置。
      */
-    private fun handlePeerOffer(ssid: String, pwd: String) {
+    private fun handlePeerOffer(ssid: String, pwd: String, ip: String = "") {
         val s = ssid.trim()
         if (s.isBlank()) {
             DiagLogger.log(TAG, "接管 offer：SSID 为空，忽略")
@@ -1297,15 +1333,41 @@ class BluelinkEngine(private val context: Context) {
             return
         }
         peerOfferHandled = true
+        takeoverPeerIp = ip.trim() // v0.4.4：记录 offer 携带的 A 端热点 IP（ack 后作 transportPeerIp；未携带为空串）
         DiagLogger.log(
             TAG,
-            "接管 offer：ssid=$s pwdLen=${pwd.length}（状态机未在等 offer，engine 直接驱动 WifiJoiner 接入）",
+            "接管 offer：ssid=$s pwdLen=${pwd.length} ip=${takeoverPeerIp.ifEmpty { "<空>" }}（状态机未在等 offer，engine 直接驱动 WifiJoiner 接入）",
         )
         pendingJoinSsid = s
         pendingJoinPwd = pwd
         pendingJoinCallbacks = peerOfferJoinCallbacks
         ui.netState = "收到组网邀请，正在接入热点…"
         wifiJoiner.join(s, pwd, peerOfferJoinCallbacks)
+    }
+
+    /**
+     * v0.4.4：接管路径从机收到 ack（热点方已确认传输就绪）→ 对齐状态机 onAck 的
+     * JOINED→TRANSPORT→onTransportReady 语义，由 engine 直接完成 TRANSPORT 就绪：
+     * 记录对端 IP（offer 携带的 A 端热点 IP [takeoverPeerIp]）→ [onTransportReadyInternal]
+     * （启动 LocalSend 服务 + 初始化接收列表 + 启动接收轮询）→ 取消 ack 超时定时。
+     */
+    private fun handlePeerAck() {
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
+        DiagLogger.log(
+            TAG,
+            "接管路径收到 ack：传输就绪 peerIp=${takeoverPeerIp.ifEmpty { "<空>" }}（对齐状态机 JOINED→TRANSPORT→onTransportReady）",
+        )
+        onTransportReadyInternal(takeoverPeerIp)
+        ui.netState = "✅ 组网完成，传输就绪"
+    }
+
+    /** 接管路径 ack 超时（v0.4.4，120s）：热点方未确认传输就绪 → 明确提示（不中止已接入的热点 Wi-Fi）。 */
+    private fun onTakeoverAckTimeout() {
+        DiagLogger.log(
+            TAG,
+            "接管路径等 ack 超时（${TAKEOVER_ACK_TIMEOUT_MS / 1000}s）：热点方未确认传输就绪（可能已中止）",
+        )
+        ui.netState = "等待对方确认超时（${TAKEOVER_ACK_TIMEOUT_MS / 1000}s）：热点方未确认（可能已中止），传输未就绪"
     }
 
     /** 打开系统热点设置（④ 指引；ACTION_WIFI_SETTINGS 兜底，热点入口在 Wi-Fi 设置内）。 */
@@ -1365,6 +1427,9 @@ class BluelinkEngine(private val context: Context) {
     private fun stopAllBle() {
         DiagLogger.log(TAG, "停止 BLE：广播/扫描/GATT Server/客户端")
         netStateMachine?.cancel() // A5：收尾/关停时取消组网（发 abort → 置空机器）
+        // v0.4.4：接管路径收尾（幂等）——清 offer 热点 IP + 取消 ack 超时定时（无状态机可 cancel）
+        takeoverPeerIp = ""
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         // T3：停止/关停时停止 LocalSend 服务（服务端停止；已收文件保留）并停接收轮询、清接收态
         mainHandler.removeCallbacks(receivePoller)
         localsendServer.stop()
@@ -1422,6 +1487,9 @@ class BluelinkEngine(private val context: Context) {
         sessionManager.attach(deviceAddress)
         // Bluelink 组网补丁：新会话重置 offer 接管去重（一次会话一次接管）
         peerOfferHandled = false
+        // v0.4.4：接管路径状态复位（offer 热点 IP 清空 + ack 超时定时取消，幂等）
+        takeoverPeerIp = ""
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         // 信令自测（验证包）：attach 成功后自动开始 120s 心跳收发（每 5s 一条 ping，对端回 pong）
         signalTest.start()
     }
@@ -1494,6 +1562,9 @@ class BluelinkEngine(private val context: Context) {
 
         /** T3 接收进度轮询间隔。 */
         private const val RECEIVE_POLL_INTERVAL_MS = 1000L
+
+        /** 接管路径从机等 ack 超时：120s，对齐状态机 JOINED 等 ack（MANUAL_TIMEOUT_MS 同一值；v0.4.4）。 */
+        private const val TAKEOVER_ACK_TIMEOUT_MS: Long = 120_000L
 
         /**
          * A5：当前引擎实例（MainActivity 创建，init 注册 / release 注销）。

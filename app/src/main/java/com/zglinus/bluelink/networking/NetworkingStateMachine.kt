@@ -54,11 +54,12 @@ enum class NetState {
  *   复核仅保留在「同网免热点」场景（本状态机暂无该分支）或非热点方/异常 joinedIp 兜底，probeTcp 仅辅助不阻断）→ 发 ack → TRANSPORT
  *   → [Callbacks.onTransportReady](peerIp)；
  * - 对端（`who == PEER`）：NEGOTIATING（120s 等 offer，与④ 手动配置对齐）→ 收到 offer → [Callbacks.onOfferReceived](ssid,pwd)
- *   → WAIT_JOIN（等 WifiJoiner）→ `onWifiJoined(ip)` 发 joined → JOINED（15s 等 ack）
- *   → 收到 ack → TRANSPORT → [Callbacks.onTransportReady]；
+ *   → WAIT_JOIN（等 WifiJoiner）→ `onWifiJoined(ip)` 发 joined → JOINED（120s 等 ack，与④ 手动配置/等 offer/等 joined 对齐，
+ *   v0.4.4：热点方 ack 仅经 BLE 单通道回传、与 120s 心跳 ping/pong 排队，默认 15s 过紧）
+ *   → 收到 ack → TRANSPORT → [Callbacks.onTransportReady](offer 携带的热点 IP)；
  * - 手动（`who == null` 即 MANUAL）：NEGOTIATING → HOTSPOT_STARTING（触发 ④ UI）→ `onManualConfigured(ssid,pwd)`
  *   → offer → OFFER_SENT（后续同热点方）；
- * - 超时/失败：任意等待步骤超时（三处 120s：手动配置/等 offer/等 joined 对齐；其余 15s）或失败
+ * - 超时/失败：任意等待步骤超时（四处 120s：手动配置/等 offer/等 joined/从机等 ack 对齐；其余 15s）或失败
  *   → 发 abort(type=abort, reason) → TEARDOWN → [Callbacks.onAbort](reason)；
  * - 切角色：收到对端 abort 且 reason 含「[REASON_CANT_OPEN_HOTSPOT]」、本机能力可用 →
  *   Arbiter 重算（对端能力按无法开启置零）→ 重新走热点方流程；
@@ -234,7 +235,9 @@ class NetworkingStateMachine(
             return
         }
         enter(NetState.JOINED)
-        scheduleTimeout("JOINED 等待 ack")
+        // v0.4.4：从机等 ack 超时对齐 120s（MANUAL_TIMEOUT_MS，与等 offer/等 joined 一致）——
+        // 热点方 ack 仅经 BLE 单通道回传（与 120s 心跳 ping/pong 排队），真机偶发延迟，默认 15s 过紧
+        scheduleTimeout("JOINED 等待 ack", PEER_ACK_TIMEOUT_MS)
     }
 
     /**
@@ -551,7 +554,9 @@ class NetworkingStateMachine(
         callbacks.onTransportReady(peerIp)
     }
 
-    /** 对端流程：收到 ack（热点方已确认传输就绪）→ TRANSPORT → onTransportReady(offer 中的热点 IP)。 */
+    /** 对端流程：收到 ack（热点方已确认传输就绪）→ TRANSPORT → onTransportReady(offer 中的热点 IP)。
+     *  v0.4.4：与热点方 JOINED→TRANSPORT 对齐；peerIp 取 offer 携带的 A 端热点 IP（offerPeerIp，
+     *  onOffer 已记录；offer 未带 ip 字段则为空串，由上层按占位处理）。 */
     private fun onAck() {
         if (state != NetState.JOINED) {
             DiagLogger.log(tag, "收到 ack 但非 JOINED（state=$state），忽略")
@@ -770,5 +775,9 @@ class NetworkingStateMachine(
 
         /** 热点方等待 joined 超时：与④ 手动配网回填/对端等 offer 对齐为 120s（引用 [MANUAL_TIMEOUT_MS] 同一值；对端接入含「用户点系统 Specifier 确认弹窗」环节，15s 必不够，热点被 abort 关闭）。 */
         private const val PEER_JOIN_TIMEOUT_MS: Long = MANUAL_TIMEOUT_MS
+
+        /** 对端（从机）等待 ack 超时：与④ 手动配网/等 offer/等 joined 对齐为 120s（v0.4.4；引用 [MANUAL_TIMEOUT_MS]
+         *  同一值——热点方 ack 仅经 BLE 单通道回传、与 120s 心跳 ping/pong 排队，真机偶发延迟，默认 15s 过紧）。 */
+        private const val PEER_ACK_TIMEOUT_MS: Long = MANUAL_TIMEOUT_MS
     }
 }

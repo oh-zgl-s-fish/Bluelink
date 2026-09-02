@@ -358,31 +358,32 @@ private fun MainTopBar(
 }
 
 /**
- * 广播呼吸圆钮（v0.5.6g 峰值 1.5 / 光晕贴钮 5dp 档——v0.5.6f 基态 30→20dp、v0.5.6e 幅度清晰基线；
+ * 广播呼吸圆钮（v0.5.6h 峰值 1.3 / 光晕贴钮 3dp 档——v0.5.6f 基态 30→20dp、v0.5.6e 幅度清晰基线；
  * v0.5.6b 开关圆钮化 / v0.5.6c 尺寸呼吸见文末历史）。
  * 视觉四要素（Compose 落地映射）：
- * 1) 幅度清晰（v0.5.6e 实机反馈 1.05 太隐 → 上调；v0.5.6f 基态 30→20dp；v0.5.6g 峰值 1.25→1.5）：呼吸 scale 1.0↔1.5——
- *    20dp 圆钮峰值直径 20→30dp（Δ10dp、双侧各 5dp；1.25→25dp Δ5dp 在 20dp 小钮上仍偏隐 → 取 1.5
- *    回旧 30dp 峰值量级、肉眼清晰），峰值钮缘外扩 r=15dp ≪ 48dp 命中区半径 24dp（光晕 +5dp ≤r20dp 亦不越，见 3)）；
+ * 1) 幅度清晰（v0.5.6e 实机反馈 1.05 太隐 → 上调；v0.5.6f 基态 30→20dp；v0.5.6g 峰值 1.25→1.5；v0.5.6h 峰值 1.5→1.3）：
+ *    呼吸 scale 1.0↔1.3——20dp 圆钮峰值直径 20→26dp（Δ6dp、双侧各 3dp：v0.5.6g 取 1.5=30dp 峰实测过大、用户要求
+ *    回落 26dp → 1.3=26dp 较 1.25=25dp 更清晰、较 1.5=30dp 更收敛），峰值钮缘外扩 r=13dp ≪ 48dp 命中区半径 24dp
+ *    （光晕 +3dp ≤r16dp 亦不越，见 3)）；
  *    仅向外膨胀、不缩于基态 → 无晃动感（区别于 v0.5.6c 曾 0.9↔1.08 双向晃动过大 → 已收窄，勿双向摆动）；
  * 2) 非对称节奏：keyframes + infiniteRepeatable，单周期 ~3.2s——膨胀段 ~1900ms（~60% 周期，
  *    FastOutSlowInEasing 缓出「到顶停住」）→ 收缩段 ~1300ms（~40% 周期，LinearOutSlowInEasing 近 ease-in
  *    「回落干脆」）；段端点均 1.0 → RepeatMode.Restart 无缝；
  * 3) 厚重感（阴影/光晕联动）：Compose 无 box-shadow → Modifier.drawBehind 画径向 glow（成功色 radial
- *    gradient：钮缘满 α 起向外衰减；不透明钮体盖住中心 → 呈沿钮缘外扩的辉光）——光晕贴钮外扩仅 ~5dp
- *    （v0.5.6g 光晕调小：glow 半径 = 钮视觉半径×displayScale + 5dp：基态钮 r10dp→glow r15dp、
- *    峰（×1.5）钮 r15dp→glow r20dp；不再取 48dp 命中区 size.minDimension×0.58 大扩散），径向渐变自钮缘
- *    满 α 向外的 5dp 带内线性衰减到 α=0（清晰贴钮亮环、不糊大）；模拟「隆起推开」的厚重暗示；关闭/静止态不画（无/极弱）；
+ *    gradient：钮缘满 α 起向外衰减；不透明钮体盖住中心 → 呈沿钮缘外扩的辉光）——光晕贴钮外扩仅 ~3dp
+ *    （v0.5.6h 光晕 5dp→3dp 贴钮更紧：glow 半径 = 钮视觉半径×displayScale + 3dp：基态钮 r10dp→glow r13dp、
+ *    峰（×1.3）钮 r13dp→glow r16dp；不再取 48dp 命中区 size.minDimension×0.58 大扩散），径向渐变自钮缘
+ *    满 α 向外的 3dp 带内线性衰减到 α=0（清晰贴钮亮环、不糊大）；模拟「隆起推开」的厚重暗示；关闭/静止态不画（无/极弱）；
  * 4) 点击蓄力回弹：interactionSource.collectIsPressedAsState() —— 按下 scale 瞬压 0.94（~80ms tween），
  *    松手 ~120ms 回弹 1.03（releaseBounce 窗口）再回落/交还呼吸 → 「蓄力→弹起→回落」。
  *
  * 节奏/幅度/光晕/点击映射表：
  * | 阶段 | scale | 时长 | easing |
- * | 膨胀（0→~60%） | 1.0→1.5 | ~1900ms | FastOutSlowIn（近 ease-out，缓出停止感） |
- * | 收缩（~60%→100%） | 1.5→1.0 | ~1300ms | LinearOutSlowIn（近 ease-in，干脆回落） |
+ * | 膨胀（0→~60%） | 1.0→1.3 | ~1900ms | FastOutSlowIn（近 ease-out，缓出停止感） |
+ * | 收缩（~60%→100%） | 1.3→1.0 | ~1300ms | LinearOutSlowIn（近 ease-in，干脆回落） |
  * | 按下 | →0.94 瞬压 | ~80ms | FastOutSlowIn |
  * | 松手回弹 | →1.03 再回落 | ~120ms | FastOutSlowIn |
- * | 光晕 | 贴钮外扩 5dp（钮半径×scale+5dp；基态 r15/峰 r20）、alpha 0.45 满至钮缘后向外衰减 | 随呼吸 | drawBehind radial |
+ * | 光晕 | 贴钮外扩 3dp（钮半径×scale+3dp；基态 r13/峰 r16）、alpha 0.45 满至钮缘后向外衰减 | 随呼吸 | drawBehind radial |
  * | 关 / 减动效 | 静止 1.0、无 glow | — | — |
  *
  * 覆盖优先级：pressed / releaseBounce 窗口 → pressScale（0.94 / 1.03 覆盖优先）；空闲 → 呼吸 keyframes 直驱。
@@ -390,7 +391,7 @@ private fun MainTopBar(
  *   呼吸循环 → 静止 1.0（按压手感保留——用户触发的瞬时反馈）；关：surfaceVariant 灰底静止、无光晕；
  * - 语义（audit A2/P2-2 原 Switch）：clickable(role=Role.Switch) + stateDescription「广播开启/广播停止」；
  * - 触达：外命中区 48dp（audit ≥48×48）保持不缩放（v0.5.6f 钮 30→20dp 不缩命中）；内层 20dp 圆钮 graphicsLayer scale（transformOrigin 中心）；
- *   v0.5.6g 峰值外扩 r15dp（直径 30dp）、光晕 r20dp 均 < 命中区半径 24dp → 呼吸/辉光全程不越命中区。
+ *   v0.5.6h 峰值外扩 r13dp（直径 26dp）、光晕 r16dp 均 < 命中区半径 24dp → 呼吸/辉光全程不越命中区。
  *
  * v0.5.6b：广播 Switch → 圆钮（docs 原「广播/扫描开关」广播侧换控件，扫描随广播联动未动）；
  * v0.5.6c：呼吸由 alpha 0.5↔1 改尺寸缩放 0.9↔1.08（650ms 对称往返 = DurationPulse 1300ms 脉冲档）；
@@ -410,6 +411,11 @@ private fun MainTopBar(
  *   size.minDimension×0.58 系数（旧静息 r≈27.8dp/峰 r≈34.8dp 大扩散）→ 改 glow 半径 = 钮视觉半径×displayScale
  *   + 5.dp（基态 10+5=15dp、峰 15+5=20dp；LocalDensity 转 px 直算，不随钮体尺寸换算），径向渐变自钮缘满 α
  *   向外 5dp 带衰减到 α=0（alpha 保持 0.45×displayScale——贴钮窄环取清晰不糊大；0.4 偏淡不用）。
+ * v0.5.6h：用户要求广播钮峰值 30dp→26dp——scale 1.5→1.3（替代 1.5=30dp：20×1.3=26dp 峰、Δ6dp 双侧各 3dp；
+ *   量级较 1.25=25dp 清晰、较 1.5=30dp 收敛（30dp 峰用户实测过大）；26dp 峰钮缘 r13dp ≪ 命中区 r24dp 不越）；
+ *   光晕外扩 5dp→3dp 贴钮更紧（glow 半径 = 钮视觉半径×displayScale + 3dp：基态 10+3=13dp、峰 13+3=16dp，
+ *   衰减带收窄至 3dp 亮环贴钮缘，峰 glow r16dp 仍 < 命中区 r24dp）；alpha 0.45/节奏/时长/点击蓄力回弹
+ *   （0.94/1.03）/关态/减动效保持不动。
  */
 @Composable
 private fun BroadcastBreathButton(
@@ -428,7 +434,7 @@ private fun BroadcastBreathButton(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant // 点置灰
     }
-    // ===== 呼吸循环（v0.5.6g 峰值 1.5 档：非对称 keyframes 1.0↔1.5（20dp 基态 → 30dp 峰）、单周期 ~3.2s；节奏/时长同 v0.5.6d）=====
+    // ===== 呼吸循环（v0.5.6h 峰值 1.3 档：非对称 keyframes 1.0↔1.3（20dp 基态 → 26dp 峰）、单周期 ~3.2s；节奏/时长同 v0.5.6d）=====
     // 减动效（ui.reduceMotion，P2-1/M1）或关闭态 → 不创建 rememberInfiniteTransition（无无限动画节点）
     val breathState: State<Float>? = if (advertisingWanted && !reduceMotion) {
         val pulse = rememberInfiniteTransition(label = "broadcastBreath")
@@ -436,12 +442,12 @@ private fun BroadcastBreathButton(
             initialValue = 1.0f,
             targetValue = 1.0f,
             animationSpec = infiniteRepeatable(
-                // keyframes 非对称段：0%:1.0 → ~60%:1.5（~1900ms 膨胀，ease-out 缓出「到顶停住」）
+                // keyframes 非对称段：0%:1.0 → ~60%:1.3（~1900ms 膨胀，ease-out 缓出「到顶停住」）
                 //             → 100%:1.0（~1300ms 收缩，ease-in 类「回落干脆」）；端点同 1.0 → Restart 无缝
                 animation = keyframes {
                     durationMillis = MotionTokens.BreathPeriod // 全周期 ~3200ms
                     1.0f at 0 with LinearEasing
-                    1.5f at MotionTokens.BreathExpand with MotionTokens.EasingBreathExpand // v0.5.6g 峰值 1.5：20dp 钮直径 20→30dp（Δ10dp、双侧各 5dp）清晰（1.25→25dp Δ5dp 在 20dp 小钮上仍偏隐 → 回旧 30dp 峰量级）；峰值钮缘 r15dp ≪ 48dp 命中区 r24dp、光晕 +5dp ≤r20dp 亦不越命中区；仅外扩不缩于基态 → 无晃动
+                    1.3f at MotionTokens.BreathExpand with MotionTokens.EasingBreathExpand // v0.5.6h 峰值 1.3（替代 v0.5.6g 1.5=30dp）：20dp 钮直径 20→26dp（Δ6dp、双侧各 3dp）——30dp 峰用户要求回落：1.3=26dp 较 1.25=25dp 清晰、较 1.5=30dp 收敛；峰值钮缘 r13dp ≪ 48dp 命中区 r24dp、光晕 +3dp ≤r16dp 亦不越命中区；仅外扩不缩于基态 → 无晃动
                     1.0f at MotionTokens.BreathPeriod with MotionTokens.EasingBreathContract
                 },
                 repeatMode = RepeatMode.Restart,
@@ -482,29 +488,29 @@ private fun BroadcastBreathButton(
     )
     // 最终缩放：按压/回弹窗口 → pressScale（覆盖优先）；空闲 → 呼吸 keyframes 直驱（形态不被中间层扭曲）
     val displayScale = if (pressed || releaseBounce) pressScale else breathScale
-    // v0.5.6g：光晕贴钮外扩 5dp 以 dp 直算（drawBehind 内需 px）——弃外层 48dp 命中区 ×0.58 的换算（会随钮体尺寸漂移）
+    // v0.5.6h：光晕贴钮外扩 3dp 以 dp 直算（drawBehind 内需 px）——弃外层 48dp 命中区 ×0.58 的换算（会随钮体尺寸漂移）
     val density = LocalDensity.current
     Box(
         modifier = Modifier
             .size(MetricTokens.AdvertiseKnobTouch) // 48dp 命中区（≥48×48 触达 audit）
-            // v0.5.6g 厚重感光晕（放链首 → 绘于最底层，钮体/水波纹盖其上）：drawBehind 径向辉光——
-            // 贴钮外扩仅 ~5dp（v0.5.6g 光晕调小，不再取 48dp 命中区 size.minDimension×0.58 大扩散）：
-            // glow 半径 = 钮视觉半径×displayScale + 5dp（基态钮 r10dp → glow r15dp；峰 ×1.5 钮 r15dp → glow r20dp），
-            // 径向渐变自钮缘满 α 向外 5dp 带内衰减到 α=0 → 清晰贴钮亮环不糊大（Compose 无 box-shadow，以 glow 模拟阴影）；
+            // v0.5.6h 厚重感光晕（放链首 → 绘于最底层，钮体/水波纹盖其上）：drawBehind 径向辉光——
+            // 贴钮外扩仅 ~3dp（v0.5.6h 光晕 5dp→3dp 贴钮更紧，不再取 48dp 命中区 size.minDimension×0.58 大扩散）：
+            // glow 半径 = 钮视觉半径×displayScale + 3dp（基态钮 r10dp → glow r13dp；峰 ×1.3 钮 r13dp → glow r16dp），
+            // 径向渐变自钮缘满 α 向外 3dp 带内衰减到 α=0 → 清晰贴钮亮环不糊大（Compose 无 box-shadow，以 glow 模拟阴影）；
             // 关闭/减动效态不画（无/极弱）
             .drawBehind {
                 if (advertisingWanted && !reduceMotion) { // 减动效/关闭：静止钮无 glow（装饰光晕仅随呼吸出现）
-                    // v0.5.6g：glowRadiusDp = 钮直径/2 × displayScale + 5dp —— 基态 10×1.0+5=15dp、
-                    // 峰值 10×1.5+5=20dp（外扩带恒定 5dp，不随 scale 拉伸）；峰 glow r20dp < 命中区 r24dp（48dp/2）
-                    // → 不越命中区/顶栏；钮体不透明盖住中心满 α 区 → 可视亮环 = 钮缘外 5dp 衰减带
-                    val knobRadiusPx = with(density) { (MetricTokens.AdvertiseKnob / 2f * displayScale).toPx() } // 钮视觉半径 px（随 displayScale：基态 10dp/峰 15dp）
-                    val glowRadiusPx = with(density) { (MetricTokens.AdvertiseKnob / 2f * displayScale + 5.dp).toPx() } // 光晕半径 = 钮视觉半径 + 5dp 贴钮外扩（基态 15dp/峰 20dp）
+                    // v0.5.6h：glowRadiusDp = 钮直径/2 × displayScale + 3dp —— 基态 10×1.0+3=13dp、
+                    // 峰值 10×1.3+3=16dp（外扩带恒定 3dp，不随 scale 拉伸）；峰 glow r16dp < 命中区 r24dp（48dp/2）
+                    // → 不越命中区/顶栏；钮体不透明盖住中心满 α 区 → 可视亮环 = 钮缘外 3dp 衰减带
+                    val knobRadiusPx = with(density) { (MetricTokens.AdvertiseKnob / 2f * displayScale).toPx() } // 钮视觉半径 px（随 displayScale：基态 10dp/峰 13dp）
+                    val glowRadiusPx = with(density) { (MetricTokens.AdvertiseKnob / 2f * displayScale + 3.dp).toPx() } // 光晕半径 = 钮视觉半径 + 3dp 贴钮外扩（基态 13dp/峰 16dp）
                     val glowAlpha = 0.45f * displayScale // alpha 保持 0.45（放大时稍升）；贴钮窄环取清晰不糊大（0.4 偏淡不用）
                     drawCircle(
                         brush = Brush.radialGradient(
                             colorStops = arrayOf(
                                 0f to backgroundColor.copy(alpha = glowAlpha), // 中心满 α（被钮体盖住，仅兜底）
-                                // 钮缘处仍满 α → 自此向外 5dp 带线性衰减到 α=0：径向渐变「从中心钮缘向外衰减到 glow 半径」
+                                // 钮缘处仍满 α → 自此向外 3dp 带线性衰减到 α=0：径向渐变「从中心钮缘向外衰减到 glow 半径」
                                 (knobRadiusPx / glowRadiusPx).coerceIn(0f, 1f) to backgroundColor.copy(alpha = glowAlpha),
                                 1f to Color.Transparent,
                             ),

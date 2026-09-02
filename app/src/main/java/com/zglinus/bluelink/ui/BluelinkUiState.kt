@@ -234,6 +234,14 @@ class BluelinkUiState {
     /** 配对后视图（会话建立且 PIN 关/已验 → true，主页面切换对端卡视图；复位点随会话 detach/stopAllBle）。 */
     var pairedView by mutableStateOf(false)
 
+    /**
+     * v0.5.4a 配网极简弹窗（NetPairingDialog）可见性：openDevice（点设备发起握手）/ startNetworking /
+     * beginPinVerification（PIN 校验，含对端被邀请输入）/ 收到组网邀请（接管路径）置 true；
+     * 配对完成（pairedView 置 true 点：握手成功免验 / onPinMatch / 对端放行 / 模式切关）或传输就绪
+     * （onTransportReadyInternal 收敛点）自动置 false；中止/失败保留弹窗显错误态（关闭由弹窗「关闭」按钮）。
+     */
+    var pairingDialog by mutableStateOf(false)
+
     /** 本端设备卡数据（engine 握手/刷新时填）。 */
     var selfCard by mutableStateOf(SelfInfo())
 

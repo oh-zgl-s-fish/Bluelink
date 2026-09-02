@@ -580,6 +580,7 @@ class BluelinkEngine(private val context: Context) {
             logUiEvent(EVT_NETWORK, "收到组网邀请（SSID=$ssid），接入热点…")
             // B4 温和收尾：收到 offer = 本机为从机（非热点方），传输完成后状态卡显示「断开网络」
             ui.hotspotSideAfterTransfer = false
+            ui.pairingDialog = true // v0.5.4a：收到组网邀请（状态机路径）→ 配网弹窗显示接入阶段（防御性置位）
             pendingJoinSsid = ssid
             pendingJoinPwd = pwd ?: ""
             pendingJoinCallbacks = wifiJoinCallbacks
@@ -637,6 +638,8 @@ class BluelinkEngine(private val context: Context) {
         }
         mainHandler.removeCallbacks(receivePoller)
         mainHandler.post(receivePoller)
+        // v0.5.4a：传输就绪（状态机 onTransportReady / 接管 ack / 同网直连共用收敛点）→ 自动关配网弹窗
+        ui.pairingDialog = false
     }
 
     /** 组网状态机（按选中对端握手能力 + 本机能力仲裁后创建；结束后置 null）。 */
@@ -932,6 +935,8 @@ class BluelinkEngine(private val context: Context) {
         // v0.4.9 PIN 配对验证：本端主动发起握手 → 标记为发起方（握手完成时生成配对码）；复位上次会话 PIN 状态
         iAmInitiator = true
         resetPinVerifyState()
+        // v0.5.4a：点设备发起握手 → 配网极简弹窗（配对完成/传输就绪自动关，失败保留错误态）
+        ui.pairingDialog = true
         DiagLogger.log(TAG, "点设备发起握手 ${device.address}")
         // 新握手前先释放既有持久会话（若附着）：GattClient 单连接槽被会话连接占用时，
         // connect 会以"会话忙"拒绝，故必须先 detach 恢复原 cleanup 再发起新握手
@@ -1209,6 +1214,8 @@ class BluelinkEngine(private val context: Context) {
         ui.writeSettingsDialog = false
         ui.manualPwdDialog = false
         ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：新流程复位系统热点登记模式
+        // v0.5.4a：手动组网/同网直连 → 配网极简弹窗接管进度（同网直连与热点路径都经此后置位）
+        ui.pairingDialog = true
 
         // A8 同网免热点直连：先刷新本机网络（用当前数据判同网；对端侧 net 取自握手时刻，握手后即固化、无需等 offer），
         // 同网 → 跳过仲裁/热点/offer 全流程直接 TRANSPORT；异网 → 走下方现状（仲裁 + 热点逐级）
@@ -1820,6 +1827,7 @@ class BluelinkEngine(private val context: Context) {
         pendingJoinPwd = pwd
         pendingJoinCallbacks = peerOfferJoinCallbacks
         ui.netState = "收到组网邀请，正在接入热点…"
+        ui.pairingDialog = true // v0.5.4a：接管邀请（对端主动发起组网、本端未走 startNetworking）→ 配网弹窗接管接入进度
         startWifiJoinMonitor(s) // A6：接管 offer 后注册 Wi-Fi 变化监听（弹窗被忽略/手动接入 → 自动回 joined）
         wifiJoiner.join(s, pwd, peerOfferJoinCallbacks)
     }
@@ -2072,6 +2080,8 @@ class BluelinkEngine(private val context: Context) {
                 ui.pinVerifyActive = true
                 pendingPinFingerprint = fp
                 pinFailCount = 0
+                // v0.5.4a：PIN 校验阶段（含对端被邀请输入——握手由对方发起、本端未走 openDevice）→ 保持/开启配网弹窗
+                ui.pairingDialog = true
                 if (iAmInitiator) {
                     val pin = Random.nextInt(PIN_MIN, PIN_MAX) // 4-6 位（1000..999999）
                     pendingPin = pin
@@ -2144,6 +2154,7 @@ class BluelinkEngine(private val context: Context) {
                 DiagLogger.log(TAG, "PIN 验证：收到对端放行确认，本会话已解锁（配对码不回显）")
                 logUiEvent(EVT_HANDSHAKE, "对端确认 PIN 验证通过（可组建局域网）")
                 refreshPairedView() // v0.5.0 UI-1：PIN 验毕 → 切对端卡视图
+                ui.pairingDialog = false // v0.5.4a：配对完成（pairedView 置 true 点）→ 自动关配网弹窗
             } else {
                 val n = payload.optInt("failCount", 0)
                 if (n >= PIN_MAX_FAILS) {
@@ -2174,6 +2185,7 @@ class BluelinkEngine(private val context: Context) {
         ui.pinStatus = "✅ PIN 验证通过，可组建局域网"
         logUiEvent(EVT_HANDSHAKE, "PIN 配对验证通过（可组建局域网）")
         refreshPairedView() // v0.5.0 UI-1：PIN 验毕 → 切对端卡视图
+        ui.pairingDialog = false // v0.5.4a：配对完成（pairedView 置 true 点）→ 自动关配网弹窗
         // 通知对端放行（同一 type pin；对端不自己判，等待本端确认）
         val ok = sessionManager.sendSignal(SignalMessage(SignalProtocol.TYPE_PIN, JSONObject().put("ok", true)))
         DiagLogger.log(TAG, "PIN 验证通过：已发送放行通知 ok=$ok")
@@ -2278,6 +2290,7 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "PIN 验证：模式切为关，当前会话直接放行")
             logUiEvent(EVT_INFO, "PIN 验证模式切为关，当前会话直接放行")
             refreshPairedView() // v0.5.0 UI-1：PIN 关 → 切对端卡视图
+            ui.pairingDialog = false // v0.5.4a：PIN 关直接放行 = 配对完成 → 自动关配网弹窗
         }
     }
 
@@ -2340,6 +2353,7 @@ class BluelinkEngine(private val context: Context) {
         // v0.5.0 UI-1：会话 detach/停止 → 配对视图与对端卡复位（复位点随会话）
         ui.pairedView = false
         ui.selectedDevice = null
+        ui.pairingDialog = false // v0.5.4a：全部流程停止 → 配网弹窗一并关闭
     }
 
     private fun handleScanResult(result: android.bluetooth.le.ScanResult) {
@@ -2391,6 +2405,8 @@ class BluelinkEngine(private val context: Context) {
         // v0.5.0 UI-1：握手后刷新本机卡 + 配对视图（PIN 关/已验 → 对端卡视图）+ 事件时间流
         refreshSelfCard()
         refreshPairedView()
+        // v0.5.4a：配对完成且无需继续 PIN 校验（PIN 关 / 仅首次免验）→ 自动关配网弹窗；PIN 校验中由弹窗接管 PIN 阶段
+        if (!ui.pinVerifyActive) ui.pairingDialog = false
         logUiEvent(EVT_HANDSHAKE, "与 ${handshake.alias.ifBlank { "未知设备" }} 握手完成（…${deviceAddress.takeLast(8)}）")
     }
 

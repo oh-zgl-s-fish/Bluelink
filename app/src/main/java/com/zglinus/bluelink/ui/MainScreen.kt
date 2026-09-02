@@ -10,19 +10,9 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -50,9 +40,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -65,7 +54,6 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -103,7 +91,6 @@ import com.zglinus.bluelink.ui.theme.MetricTokens
 import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
 import com.zglinus.bluelink.ui.theme.extended
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -111,20 +98,21 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 主页面（docs/ui-design.md §4.1 两态左右布局，v0.5.0 UI-1；v0.5.1a 实机反馈微调五点：
- * ① 时间流占下半屏 ~45%（原固定 160dp）② 「重新扫描」=退出对端卡回设备选择列表（pairedView=false + rescan）
- * ③ 宽度切换/脉冲/展开动画放慢 ④ 流程区只留必要信息行（设备/握手/PIN 码/组网短状态）⑤ 区块与字段留白加大。
- * 本文件改动仅 UI 层：不新增页面、不改导航、不动引擎逻辑（仅调用 ui 现有字段与 engine 现有方法）。）：
- * - 开屏（配对前）：顶部左右两栏——左「本端设备卡」1/3、右「对端扫描列表」2/3（LazyColumn
- *   上下滑动；长按或 × 清除失效设备）→ 其下「流程动画区」（配对/组网进行中显示：环形进度/脉冲 +
- *   阶段文案；无进行中流程收起——高度动画）→ 最下「时间流」（事件时间线：倒序 + 自动滚顶 + 上下滚动）。
- * - 配对/会话建立后：顶部等宽两栏（本端 1/2 | 对端 1/2 设备卡：alias/电量/网络 + 状态
- *   「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮）；宽度 1/3→1/2 切换用 Compose 动画
- *   （[animateFloatAsState] 驱动 Row weight，[animateDpAsState] 用于流程区脉冲环）。
+ * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿）：
+ * v0.5.4a 全 App 扁平化：无任何内容型卡片/容器/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层；
+ * 仅浮层（ModalBottomSheet/AlertDialog/抽屉）保留面板背景（必须压住背景），圆角归 10dp
+ * （ShapeTokens.Modal，接线见 theme/BluelinkTheme.kt）；小件（badge/按钮/输入框）保持 8dp（shapes.small）。
+ * - 布局（两态）：顶部左右两栏——配对前 1/3|2/3（左「本端设备区」、右「对端扫描列表」LazyColumn，
+ *   长按或 × 清除失效设备），配对/会话建立后 1/2|1/2（左本端、右对端区：alias/电量/网络/状态 +
+ *   重新扫描 + 组网/同网直连按钮）；宽度切换用 [animateFloatAsState] 驱动 Row weight；
+ *   最下「时间流」（占屏 ~45%，倒序 + 自动滚顶 + 上下滚动）。
+ * - 配网（v0.5.4a）：握手→PIN→组网进度一律在极简弹窗 [NetPairingDialog]（主页流程动画区已移除）；
+ *   点设备/组网/PIN 校验触发 ui.pairingDialog；配对完成（pairedView 置位）或传输就绪自动关，
+ *   中止/失败保留弹窗显错误态 + 关闭；时间流仍记录全部事件。
  * - 抽屉（[ModalNavigationDrawer]）：头部（应用名/本机 alias）+ 入口（主页面/发送/接收/记录/
  *   设置/权限/关于）→ 设 [BluelinkUiState.currentPage]；非主页面先放骨架占位（「UI-2+ 实现」）。
- * - 控件搬迁：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测
- *   移入抽屉设置页；发送/接收 SAF launcher、诊断/组网/PIN/发送确认弹层与设备详情弹层原样保留。
+ * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测移入
+ *   抽屉设置页；发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
  *
  * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页；
  * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
@@ -245,9 +233,10 @@ fun MainScreen(
         if (ui.sendDialog) SendConfirmDialog(it)
     }
 
-    // v0.4.9 PIN 配对验证：对端输入框（被验证方可能未打开设备弹层——握手由对方发起，顶层渲染保证可见）
+    // v0.5.4a 配网极简弹窗：握手→PIN→组网全进度在此（引擎置 ui.pairingDialog；配对完成/传输就绪自动关，
+    // 中止/失败保留弹窗显错误态 + 「关闭」）。原独立 PinInputDialog 已并入本弹窗（对端内嵌单行输入）。
     engine?.let {
-        if (ui.pinInputDialog) PinInputDialog(it)
+        if (ui.pairingDialog) NetPairingDialog(it)
     }
 }
 
@@ -297,7 +286,7 @@ private fun pageTitle(page: Int): String = when (page) {
     else -> "Bluelink"
 }
 
-/** 主页面（两态左右布局）：横幅 → 两栏（1/3|2/3 ⇄ 1/2|1/2，weight 动画）→ 流程动画区 → 底部动作行 → 时间流。 */
+/** 主页面（两态左右布局）：横幅 → 两栏（1/3|2/3 ⇄ 1/2|1/2，weight 动画）→ 底部动作行 → 时间流；配网进度在 [NetPairingDialog]（v0.5.4a）。 */
 @Composable
 private fun MainPage(
     ui: BluelinkUiState,
@@ -332,14 +321,14 @@ private fun MainPage(
             .fillMaxWidth()
             .weight(1f)
         ) {
-            SelfDeviceCard(
+            SelfDevicePane(
                 ui = ui,
                 onRefreshNetwork = onRefreshNetwork,
                 modifier = Modifier
                     .weight(selfWeight)
                     .fillMaxHeight(),
             )
-            Spacer(Modifier.width(SpacingTokens.SpaceMd)) // v0.5.1a-5：两栏卡片间 gap ≥ 12dp
+            Spacer(Modifier.width(SpacingTokens.SpaceMd)) // v0.5.1a-5：两栏间 gap ≥ 12dp
             Crossfade(
                 targetState = ui.pairedView,
                 modifier = Modifier
@@ -348,17 +337,16 @@ private fun MainPage(
                 label = "peerPanel",
             ) { paired ->
                 if (paired) {
-                    PeerDeviceCard(ui = ui, engine = engine)
+                    PeerDevicePane(ui = ui, engine = engine)
                 } else {
                     ScanListPanel(ui = ui, onDeviceClick = onDeviceClick)
                 }
             }
         }
 
-        // ---- 流程动画区：配对/组网进行中显示（环形进度/脉冲 + 必要信息行）；无则收起（高度动画） ----
-        FlowAnimationArea(ui)
-
-        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.1a-5：流程区与后续区块间距加大
+        // v0.5.4a：配网进度（握手→PIN→组网）改由极简弹窗 NetPairingDialog 展示，主页流程动画区已移除；
+        // 两栏与底部动作行之间保留区块留白
+        Spacer(Modifier.height(SpacingTokens.SpaceMd))
 
         // ---- 底部动作行：发送文件 / 收尾（结束组网·结束直连·关闭热点·断开网络）/ 接收保存位置 ----
         BottomActionRow(
@@ -373,7 +361,7 @@ private fun MainPage(
         // ---- 时间流（下半屏 ~45% 屏高；事件时间线：倒序 + 自动滚顶 + 上下滚动） ----
         TimeFlowPanel(
             ui = ui,
-            // v0.5.1a-1：时间流占屏高 ~45%（原固定 160dp）；上半屏为顶部两栏 + 流程区，页面不额外滚动
+            // v0.5.1a-1：时间流占屏高 ~45%（原固定 160dp）；上半屏为顶部两栏 + 底部动作行，页面不额外滚动
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.45f),
@@ -381,81 +369,78 @@ private fun MainPage(
     }
 }
 
-/** 本端设备卡（左栏；配对前 1/3、配对后 1/2，宽度由外层 Row weight 动画驱动）。 */
+/** 本端设备区（左栏；配对前 1/3、配对后 1/2，宽度由外层 Row weight 动画驱动；v0.5.4a 平铺无容器）。 */
 @Composable
-private fun SelfDeviceCard(
+private fun SelfDevicePane(
     ui: BluelinkUiState,
     onRefreshNetwork: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    OutlinedCard(modifier = modifier) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
-        ) {
+    // v0.5.4a：去除 OutlinedCard 容器——内容直接平铺 surface 背景；区块靠留白与字段间距分层
+    Column(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
+    ) {
+        Text(
+            text = "本端设备",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = ui.selfCard.alias.ifBlank { "本机" },
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = ui.selfCard.model,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        ui.selfCard.batteryPct?.let {
+            Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            text = ui.selfCard.netText.ifBlank { "未连接网络" },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = if (ui.advertising) "广播中 · 扫描中" else "广播已停止",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (ui.advertising) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+        ui.advertiserError?.let {
             Text(
-                text = "本端设备",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                text = ui.selfCard.alias.ifBlank { "本机" },
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = ui.selfCard.model,
+                text = "广播异常: $it",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            ui.selfCard.batteryPct?.let {
-                Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
-            }
-            Text(
-                text = ui.selfCard.netText.ifBlank { "未连接网络" },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.error,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = if (ui.advertising) "广播中 · 扫描中" else "广播已停止",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (ui.advertising) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-            ui.advertiserError?.let {
-                Text(
-                    text = "广播异常: $it",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            ui.scanError?.let {
-                Text(
-                    text = "扫描异常: $it",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = onRefreshNetwork,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("刷新网络") }
         }
+        ui.scanError?.let {
+            Text(
+                text = "扫描异常: $it",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        TextButton(
+            onClick = onRefreshNetwork,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("刷新网络") }
     }
 }
 
@@ -659,195 +644,108 @@ private fun LanStatusLine(lanStatus: LanStatus, modifier: Modifier = Modifier) {
     }
 }
 
-/** 对端设备卡（配对后右栏 1/2）：alias/电量/网络 + 状态「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮。 */
+/** 对端设备区（配对后右栏 1/2）：alias/电量/网络 + 状态「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮；v0.5.4a 平铺无容器。 */
 @Composable
-private fun PeerDeviceCard(
+private fun PeerDevicePane(
     ui: BluelinkUiState,
     engine: BluelinkEngine?,
     modifier: Modifier = Modifier,
 ) {
     val peer = ui.selectedDevice
-    OutlinedCard(modifier = modifier) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "对端设备",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.weight(1f),
-                )
-                val status = peer?.statusText ?: "未连接"
-                // 状态徽标三档容器对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant；
-                // icon（点）+ label + token 双通道，不以色 alone 表达状态
-                val (statusContainer, statusContent) = when (status) {
-                    "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
-                    "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-                    else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Surface(
-                    shape = MaterialTheme.shapes.small,
-                    color = statusContainer,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        StatusDot(color = statusContent)
-                        Spacer(Modifier.width(SpacingTokens.SpaceXs))
-                        Text(
-                            text = status,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = statusContent,
-                        )
-                    }
-                }
-            }
-            Text(
-                text = peer?.alias ?: "未知设备",
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = peer?.model ?: "—",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            peer?.batteryPct?.let {
-                Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
-            }
-            Text(
-                text = peer?.netText ?: "网络未知",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.weight(1f))
-            OutlinedButton(
-                onClick = {
-                    // v0.5.1a-2：重新扫描 = 退出对端卡回设备选择列表（pairedView=false）+ 触发 rescan；状态进时间流
-                    ui.pairedView = false
-                    ui.selectedDevice = null
-                    engine?.logUiEvent(BluelinkEngine.EVT_INFO, "重新扫描中…")
-                    engine?.rescan()
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("重新扫描") }
-            val sameLan = peer?.sameLan == true
-            Button(
-                onClick = { engine?.startNetworking() },
-                enabled = engine != null && !engine.pinRequired(),
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (sameLan) "同网免热点直连" else "组建临时局域网") }
-            if (engine?.pinRequired() == true) {
-                Text(
-                    text = "需先完成 PIN 配对验证（对端输入配对码）",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-    }
-}
-
-/**
- * 流程动画区（v0.5.1a-4 精简）：ui.netState / 组网阶段 / PIN 验证驱动——有进行中流程才显示
- * （环形进度 + 脉冲 + 必要信息行：设备名称 / 握手状态 / PIN 码行 / 组网短状态；技术细节已进时间流），
- * 无则收起（AnimatedVisibility 高度动画）。
- * v0.5.1a-3：展开/收起动画放慢（expandVertically 450ms + fade 400ms+），避免「太快」观感。
- */
-@Composable
-private fun FlowAnimationArea(ui: BluelinkUiState) {
-    // 有进行中流程（组网阶段/阶段文案/PIN 验证中）才显示；无则收起（高度动画）
-    val visible = ui.netState != null || ui.pinVerifyActive
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(animationSpec = tween(MotionTokens.DurationGentle)) + fadeIn(animationSpec = tween(MotionTokens.DurationFast)),
-        exit = shrinkVertically(animationSpec = tween(MotionTokens.DurationGentle)) + fadeOut(animationSpec = tween(MotionTokens.DurationFast)),
+    // v0.5.4a：去除 OutlinedCard 容器——内容直接平铺 surface 背景；区块靠留白与字段间距分层
+    Column(
+        modifier = modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
     ) {
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd), // 14→16（audit S1）
-                verticalAlignment = Alignment.CenterVertically,
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "对端设备",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+            )
+            val status = peer?.statusText ?: "未连接"
+            // 状态徽标三档 token 对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant；
+            // icon（点）+ label + token 双通道，不以色 alone 表达状态（小件 8dp 徽章保留）
+            val (statusContainer, statusContent) = when (status) {
+                "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
+                "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = statusContainer,
             ) {
-                val busy = ui.netActive || ui.pinVerifyActive
-                if (busy) {
-                    PulseRing()
-                } else {
-                    // 静态状态点（audit P1-4/C7：emoji/字形 → 8dp 语义点，icon+label+token；右侧文案双通道）：
-                    // 失败=error、传输就绪(✅)=success、其余进行中/已就绪=primary
-                    StatusDot(
-                        color = when {
-                            ui.netState?.contains("失败") == true ||
-                                ui.netState?.contains("中止") == true ||
-                                ui.netState?.contains("超时") == true ->
-                                MaterialTheme.colorScheme.error
-                            ui.netState?.startsWith("✅") == true -> MaterialTheme.extended.success
-                            else -> MaterialTheme.colorScheme.primary
-                        },
-                        size = MetricTokens.PulseRingDot,
-                    )
-                }
-                Spacer(Modifier.width(SpacingTokens.SpaceMd))
-                // v0.5.1a-4：必要信息行（行间 8dp；细节保留在时间流）
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+                Row(
+                    modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // ① 设备名称：对端 alias 或「正在连接…」
-                    val peerAlias = ui.selectedDevice?.alias
-                        ?: ui.devices.values.firstOrNull { it.handshake != null }?.handshake?.alias
+                    StatusDot(color = statusContent)
+                    Spacer(Modifier.width(SpacingTokens.SpaceXs))
                     Text(
-                        text = peerAlias?.takeIf { it.isNotBlank() } ?: "正在连接…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                        text = status,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusContent,
                     )
-                    // ② 握手状态：已握手 / 握手中
-                    Text(
-                        text = if (ui.handshaking) "握手中" else "已握手",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    // ③ PIN 码行：仅 PIN 验证中显示展示码或「等待对端输入」
-                    if (ui.pinVerifyActive) {
-                        Text(
-                            text = ui.pinShow ?: "等待对端输入",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                    // ④ 组网状态：短阶段文案（开热点…/等待接入…/传输就绪等）；长细节在时间流
-                    ui.netState?.let { state ->
-                        Text(
-                            text = shortNetStage(state),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = when {
-                                state.contains("失败") || state.contains("中止") || state.contains("超时") ->
-                                    MaterialTheme.colorScheme.error
-                                state.startsWith("✅") -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.onSurface
-                            },
-                        )
-                    }
                 }
             }
+        }
+        Text(
+            text = peer?.alias ?: "未知设备",
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = peer?.model ?: "—",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        peer?.batteryPct?.let {
+            Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            text = peer?.netText ?: "网络未知",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.weight(1f))
+        OutlinedButton(
+            onClick = {
+                // v0.5.1a-2：重新扫描 = 退出对端视图回设备选择列表（pairedView=false）+ 触发 rescan；状态进时间流
+                ui.pairedView = false
+                ui.selectedDevice = null
+                engine?.logUiEvent(BluelinkEngine.EVT_INFO, "重新扫描中…")
+                engine?.rescan()
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("重新扫描") }
+        val sameLan = peer?.sameLan == true
+        Button(
+            onClick = { engine?.startNetworking() },
+            enabled = engine != null && !engine.pinRequired(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (sameLan) "同网免热点直连" else "组建临时局域网") }
+        if (engine?.pinRequired() == true) {
+            Text(
+                text = "需先完成 PIN 配对验证（对端输入配对码）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }
 
+// v0.5.4a：主页流程动画区已移除——配网进度（握手→PIN→组网）一律在极简弹窗 NetPairingDialog 展示；
+// 本区块原职责（环形进度/脉冲/PIN 码行/组网短状态）由弹窗承接，时间流仍记录全部事件。
+
 /**
- * 组网阶段 → 必要信息短文案（v0.5.1a-4 精简；技术细节保留在时间流/各弹窗，流程区不展示）。
- * 只映射状态机/引擎常用阶段字串为短标签，未命中时回退原文长度截断的通用文案。
+ * 组网阶段 → 必要信息短文案（v0.5.1a-4 精简；v0.5.4a 起供配网极简弹窗 NetPairingDialog 状态短语用；
+ * 技术细节保留在时间流/各弹窗）。只映射状态机/引擎常用阶段字串为短标签，未命中时回退通用文案。
  */
 private fun shortNetStage(state: String): String = when {
     state.contains("中止") -> "组网中止"
@@ -866,40 +764,7 @@ private fun shortNetStage(state: String): String = when {
     else -> "进行中…"
 }
 
-/** 环形进度 + 脉冲：animateDpAsState 呼吸环 + 无限 alpha 脉冲内点（v0.5.1a-3：呼吸/脉冲放慢，防「太快」观感）。 */
-@Composable
-private fun PulseRing() {
-    val transition = rememberInfiniteTransition(label = "pulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(MotionTokens.DurationPulse), RepeatMode.Reverse), // 原 800ms → 1300ms
-        label = "pulseAlpha",
-    )
-    var big by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(MotionTokens.DelayPulse) // 原 600ms → 1000ms（呼吸周期放慢）
-            big = !big
-        }
-    }
-    val ringSize by animateDpAsState(
-        targetValue = if (big) MetricTokens.PulseRingLarge else MetricTokens.PulseRingBase,
-        animationSpec = tween(MotionTokens.DurationRing), // 原 600ms → 1000ms
-        label = "ringSize",
-    )
-    Box(contentAlignment = Alignment.Center) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(ringSize),
-            strokeWidth = 3.dp,
-        )
-        Box(
-            modifier = Modifier
-                .size(MetricTokens.PulseRingDot)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha), CircleShape),
-        )
-    }
-}
+
 
 /** 底部动作行：发送文件（入口）/ 收尾按钮（结束组网/结束直连/关闭热点/断开网络/取消）/ 接收保存位置。 */
 @Composable
@@ -1352,42 +1217,38 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
     }
 }
 
-/** 权限引导卡（未授权时置顶）。 */
+/** 权限提示行（未授权时置顶；v0.5.4a 平铺：去 Card 容器，error 点 + 文案双通道）。 */
 @Composable
 private fun PermissionBanner(onRequestPermissions: () -> Unit) {
-    Card(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer,
-        ),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceMd, vertical = SpacingTokens.SpaceSm),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "需要权限: 蓝牙 + 位置",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onRequestPermissions) { Text("去授权") }
-        }
+        StatusDot(color = MaterialTheme.colorScheme.error)
+        Spacer(Modifier.width(SpacingTokens.SpaceSm))
+        Text(
+            text = "需要权限: 蓝牙 + 位置",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onRequestPermissions) { Text("去授权") }
     }
 }
 
-/** 蓝牙未开提示（不自动开，仅提示）。 */
+/** 蓝牙未开提示（不自动开，仅提示；v0.5.4a 平铺无容器）。 */
 @Composable
 private fun BluetoothOffBanner() {
-    Card(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-        ),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
+        StatusDot(color = MaterialTheme.colorScheme.tertiary)
+        Spacer(Modifier.width(SpacingTokens.SpaceSm))
         Text(
             text = "请在系统设置开启蓝牙",
-            modifier = Modifier.padding(SpacingTokens.SpaceMd),
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -1566,56 +1427,8 @@ fun DeviceDetailSheet(
                 }
             }
 
-            // ============ v0.4.9 PIN 配对验证（握手后：发起方展示配对码 / 对端输入回传 / 状态） ============
-            if (engine != null) {
-                val ui = engine.ui
-                if (ui.pinVerifyActive || ui.pinShow != null || ui.pinVerifyOk || ui.pinStatus != null || ui.pinError != null) {
-                    HorizontalDivider()
-                    Text("PIN 配对验证", style = MaterialTheme.typography.titleSmall)
-                    ui.pinShow?.let { pin ->
-                        Text(
-                            text = pin,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                        Text(
-                            text = "请对方在 Bluelink 中输入此配对码（自动回传比对，内容不落日志）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (ui.pinVerifyOk) {
-                        // 状态行 icon+label（audit P1-4）：✅ → success 语义点 + 文字双通道
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            StatusDot(color = MaterialTheme.extended.success)
-                            Spacer(Modifier.width(SpacingTokens.SpaceSm))
-                            Text(
-                                text = "PIN 验证通过，可组建局域网",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                    }
-                    ui.pinStatus?.let {
-                        Text(text = it, style = MaterialTheme.typography.bodySmall)
-                    }
-                    ui.pinError?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    // 对端（非发起方，pinShow==null）：输入框被取消后可重新打开
-                    if (ui.pinVerifyActive && ui.pinShow == null && !ui.pinInputDialog) {
-                        OutlinedButton(onClick = {
-                            ui.pinInput = ""
-                            ui.pinInputDialog = true
-                        }) { Text("输入配对码") }
-                    }
-                }
-            }
+            // v0.5.4a：PIN 配对验证阶段已并入顶层极简弹窗 NetPairingDialog（beginPinVerification 置
+            // ui.pairingDialog，发起方大号码字 / 对端内嵌单行输入），详情弹层不再重复展示 PIN 面板
 
             HorizontalDivider()
 
@@ -2036,19 +1849,120 @@ private fun initialReceiveDirUri(): Uri? = try {
     null
 }
 
-/** v0.4.9 PIN 配对验证：对端输入框（本端为被验证方；输入 → 经信令回传 pin，等待发起方比对确认——对端不自己判）。 */
+/**
+ * v0.5.4a 配网极简弹窗（替代 v0.5.1a 主页流程动画区）：握手→PIN→组网全过程极简单列——
+ * 设备名一行（对端 alias 或「正在连接…」）+ 状态短语一行（正在握手…/PIN 阶段/开热点…/等待接入…/传输就绪）
+ * + 细 LinearProgressIndicator（indeterminate，进行中）；PIN 阶段：发起方大号码字（ui.pinShow）/
+ * 对端内嵌单行输入框（复用原 PinInputDialog 逻辑）；中止/失败保留弹窗显错误态（error 色文案 + 「关闭」）。
+ * 开关由引擎收敛：openDevice/startNetworking/PIN 校验置 ui.pairingDialog=true；
+ * 配对完成（pairedView 置 true）或传输就绪自动关（false）。弹窗为浮层面板（保留），内部不套任何内容卡片。
+ */
 @Composable
-private fun PinInputDialog(engine: BluelinkEngine) {
+private fun NetPairingDialog(engine: BluelinkEngine) {
     val ui = engine.ui
+    // 设备名：对端 alias（对端区/已握手设备）或「正在连接…」
+    val peerAlias = ui.selectedDevice?.alias
+        ?: ui.devices.values.firstOrNull { it.handshake != null }?.handshake?.alias
+    val deviceName = peerAlias?.takeIf { it.isNotBlank() } ?: "正在连接…"
+
+    val handshaking = ui.handshaking
+    val pinActive = ui.pinVerifyActive
+    // 终态错误（保留弹窗显错误态 + 关闭）：握手失败 / PIN 验证中止（非进行中残留错误）/ 组网中止·失败·超时
+    val netErr = ui.netState?.takeIf { it.contains("中止") || it.contains("失败") || it.contains("超时") }
+    val terminalErr: String? = when {
+        ui.handshakeError != null && !handshaking -> "握手失败：${ui.handshakeError}"
+        ui.pinError != null && !pinActive -> ui.pinError
+        netErr != null -> netErr
+        else -> null
+    }
+
     AlertDialog(
-        onDismissRequest = { engine.cancelPinInput() },
-        title = { Text("PIN 配对验证") },
+        // 进行中不允许误关（back/点外无效）；仅终态错误可关闭（另见 confirmButton「关闭」）
+        onDismissRequest = { if (terminalErr != null) ui.pairingDialog = false },
+        title = {
+            Text(
+                text = deviceName,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
-                Text(
-                    text = "对方要求 PIN 配对验证，请输入对方设备展示的配对码：",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd)) {
+                when {
+                    // ---- PIN 阶段（进行中：发起方大号码字 / 对端内嵌输入） ----
+                    pinActive -> PinStageColumn(ui, engine)
+                    // ---- 握手进行中 ----
+                    handshaking -> {
+                        StatusPhrase("正在握手…")
+                        ThinProgress()
+                    }
+                    // ---- 终态错误：中止/失败保留弹窗 ----
+                    terminalErr != null -> StatusPhrase(terminalErr, error = true)
+                    // ---- 组网进行中（短阶段文案；长细节在时间流） ----
+                    ui.netState != null || ui.netActive -> {
+                        StatusPhrase(shortNetStage(ui.netState ?: "进行中…"))
+                        ThinProgress()
+                    }
+                    // ---- 兑底：已触发、回调未回执 ----
+                    else -> {
+                        StatusPhrase("正在连接…")
+                        ThinProgress()
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (terminalErr != null) {
+                TextButton(onClick = { ui.pairingDialog = false }) { Text("关闭") }
+            }
+        },
+    )
+}
+
+/** 状态短语一行（v0.5.4a）：进行中=onSurface；错误态=error 色文案。 */
+@Composable
+private fun StatusPhrase(text: String, error: Boolean = false) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+    )
+}
+
+/** 细 LinearProgressIndicator（indeterminate；v0.5.4a 极简进度）。 */
+@Composable
+private fun ThinProgress() {
+    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+}
+
+/**
+ * PIN 阶段（NetPairingDialog 内嵌，v0.5.4a）：发起方展示大号码字（ui.pinShow 数字部分）；
+ * 对端（pinShow==null）内嵌单行输入框——复用原输入框逻辑（数字过滤、≤8 位、confirmPinInput 回传；
+ * 取消后可「输入配对码」重开）。
+ */
+@Composable
+private fun PinStageColumn(ui: BluelinkUiState, engine: BluelinkEngine) {
+    // pinShow 为委托属性（by mutableStateOf）无法智能转换：先取局部再判空（pinShow 可能为 null）
+    val pin = ui.pinShow
+    Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
+        if (pin != null) {
+            // 发起方：大号码字（只取数字，Monospace 同宽易读）
+            Text(
+                text = pin.filter { it.isDigit() },
+                style = MaterialTheme.typography.displayMedium,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+            )
+            Text(
+                text = "请对方在 Bluelink 中输入此配对码（自动回传比对，内容不落日志）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            // 对端：内嵌单行输入（复用原输入逻辑）
+            if (ui.pinInputDialog) {
                 OutlinedTextField(
                     value = ui.pinInput,
                     onValueChange = { ui.pinInput = it.filter { c -> c.isDigit() }.take(8) },
@@ -2056,22 +1970,36 @@ private fun PinInputDialog(engine: BluelinkEngine) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                ui.pinError?.let {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { engine.cancelPinInput() }) { Text("取消") }
+                    Spacer(Modifier.weight(1f))
+                    Button(onClick = { engine.confirmPinInput() }) { Text("发送") }
                 }
+            } else {
+                TextButton(onClick = {
+                    ui.pinInput = ""
+                    ui.pinInputDialog = true
+                }) { Text("输入配对码") }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { engine.confirmPinInput() }) { Text("发送") }
-        },
-        dismissButton = {
-            TextButton(onClick = { engine.cancelPinInput() }) { Text("取消") }
-        },
-    )
+        }
+        ui.pinStatus?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        ui.pinError?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
 }
 
 /** v0.4.9：PIN 验证模式 → 展示文本。 */

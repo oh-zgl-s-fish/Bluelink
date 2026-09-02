@@ -147,12 +147,15 @@ class BluelinkUiState {
     /** 发送确认框是否可见（SAF 选文件后展示文件名/大小/目标；确认后 engine 后台发送）。 */
     var sendDialog by mutableStateOf(false)
 
-    /**
-     * 传输状态行文本（null=无传输）：发送侧「发送中 文件名 45%」/「发送完成/失败/已取消：…」；
-     * 接收侧「接收中 文件名 45%」（Engine 轮询 LocalSendServer.getActiveSessions 映射）。
+    /** 传输状态行文本（null=无传输）：发送侧「发送中 文件名 45%」/「发送完成/失败/已取消：…」；
+     * 接收侧「接收中 文件名 45%」（Engine 轮询 LocalSendServer.getActiveSessions 映射）、
+     * 「已收到…请选择保存位置」（未选保存目录）与「已保存到 <目录名>」（SAF 转存成功，v0.4.5）。
      */
     var transferState by mutableStateOf<String?>(null)
 
-    /** 收到的文件列表（服务端落盘完成回调 + 启动扫描 filesDir/localsend/ 初始化；按文件名展示）。 */
-    var receivedFiles by mutableStateOf<List<String>>(emptyList())
+    /** 接收保存目录显示名（SAF OpenDocumentTree 选定目录；null=尚未选择，收到文件时提示点选）。 */
+    var receiveDirName by mutableStateOf<String?>(null)
+
+    /** 收到文件但未选保存目录 → UI 应发起 OpenDocumentTree 目录选择（MainScreen LaunchedEffect 消费后复位）。 */
+    var receiveDirPrompt by mutableStateOf(false)
 }

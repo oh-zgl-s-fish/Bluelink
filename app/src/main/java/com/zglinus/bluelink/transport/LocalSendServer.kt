@@ -49,6 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * - `FileOutputStream` 直接写 `context.filesDir/localsend/<sessionId>/<fileName>`；
  * - 严格 ≤ 声明 size 写入：超出部分丢弃（drain），不足视为失败并删除残件。
  *
+ * ## 暂存与转存（v0.4.5 接收侧 SAF）
+ * - `filesDir/localsend/` 为**传输中转暂存**（防断连丢数据，不对外展示）：每文件完整落盘后经
+ *   [onFileReceived] 通知上层（语义 = 文件已入暂存，待/已转存用户目录）；上层负责把暂存文件写入
+ *   用户经 SAF OpenDocumentTree 选择的目录（DocumentFile 拷贝），成功后删除暂存原件；
+ * - 未选用户目录时暂存文件保留在磁盘（可后续补存），本类不持有任何 UI/目录状态。
+ *
  * ## 安全
  * - 文件名拒绝空、`..`、`/`、`\`、NUL、超长；落盘前再 canonical 校验父目录仍等于会话目录；
  * - sessionId 仅允许 `[A-Za-z0-9_-]`（目录名防穿越）；请求行/头/JSON 体均有字节上限防内存滥用；
@@ -93,11 +99,12 @@ class LocalSendServer(
     private val activeSessions = ConcurrentHashMap<String, SessionState>()
 
     /**
-     * 文件接收完成回调（T3 只读扩展字段，不改变 T1 构造/方法形状）：单文件完整落盘校验通过后触发
-     * （sessionId=会话 ID，fileName=安全文件名，path=落盘绝对路径）。
+     * 文件接收完成回调（v0.4.5 语义：文件已完整落盘到**暂存目录** `filesDir/localsend/<sessionId>/`，
+     * 待/已由上层转存用户目录）：单文件完整落盘校验通过后触发（sessionId=会话 ID，fileName=安全文件名，
+     * path=暂存绝对路径，mimeType=发送方声明类型（缺省 application/octet-stream））。
      * 触发线程：worker 线程（非主线程）——调用方需自行切回主线程再更新 UI。
      */
-    var onFileReceived: ((sessionId: String, fileName: String, path: String) -> Unit)? = null
+    var onFileReceived: ((sessionId: String, fileName: String, path: String, mimeType: String) -> Unit)? = null
 
     /** 单文件进度视图（供 UI/日志展示）。多文件会话聚合：size/received 为总和，fileName 拼接。 */
     data class SessionProgress(val fileName: String, val size: Long, val received: Long)
@@ -393,9 +400,9 @@ class LocalSendServer(
             }
             meta.received = written
             DiagLogger.log(TAG, "文件完成 会话=$sessionId 文件=${meta.fileName} 大小=$written")
-            // T3：文件接收完成 → 通知上层（Engine 切主线程更新接收列表）；回调异常不影响传输结果
+            // v0.4.5：文件完整落盘（暂存目录）→ 通知上层转存用户目录或提示选择保存位置（回调异常不影响传输结果）
             try {
-                onFileReceived?.invoke(sessionId, meta.fileName, target.absolutePath)
+                onFileReceived?.invoke(sessionId, meta.fileName, target.absolutePath, meta.mimeType)
             } catch (e: Exception) {
                 DiagLogger.log(TAG, "onFileReceived 回调异常（忽略，不影响传输）: ${e.javaClass.simpleName} ${e.message}")
             }

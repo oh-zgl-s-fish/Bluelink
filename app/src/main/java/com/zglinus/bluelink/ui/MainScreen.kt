@@ -3,6 +3,8 @@ package com.zglinus.bluelink.ui
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +85,23 @@ fun MainScreen(
         if (uri != null) BluelinkEngine.current()?.onSendFilePicked(uri)
     }
 
+    // v0.4.5 接收侧：SAF OpenDocumentTree 目录选择器（系统 picker，不自建文件浏览器；
+    // 结果 → engine.onReceiveDirPicked；初始目录经 EXTRA_INITIAL_URI 尽力，不支持则系统默认）
+    val receiveDirLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) BluelinkEngine.current()?.onReceiveDirPicked(uri)
+    }
+
+    // v0.4.5：收到文件但未选保存目录（engine 置 receiveDirPrompt）→ 自动弹目录选择器（消费后复位；
+    // 用户取消则保持未选，可再点「选择保存目录」，暂存文件选定后补存）
+    LaunchedEffect(ui.receiveDirPrompt) {
+        if (ui.receiveDirPrompt) {
+            receiveDirLauncher.launch(initialReceiveDirUri())
+            ui.receiveDirPrompt = false
+        }
+    }
+
     Scaffold { innerPadding ->
         Column(
             modifier = Modifier
@@ -107,6 +126,7 @@ fun MainScreen(
                 onAdvertisingWantedChange = onAdvertisingWantedChange,
                 onRefreshNetwork = onRefreshNetwork,
                 onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
+                onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
             )
 
             Spacer(Modifier.height(8.dp))
@@ -168,6 +188,7 @@ private fun LocalStatusCard(
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onRefreshNetwork: () -> Unit,
     onSendFileClick: () -> Unit,
+    onChooseReceiveDir: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -282,7 +303,7 @@ private fun LocalStatusCard(
                 }
             }
 
-            // ============ T3 LocalSend 传输（发送入口 / 进度 / 接收列表） ============
+            // ============ T3 LocalSend 传输（发送入口 / 进度 / 接收保存位置） ============
             BluelinkEngine.current()?.let { engine ->
                 // 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
                 val canSend = engine.transportPeerIp.isNotBlank() ||
@@ -318,12 +339,21 @@ private fun LocalStatusCard(
                         TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
                     }
                 }
-                if (ui.receivedFiles.isNotEmpty()) {
+                // ============ v0.4.5 接收保存位置（SAF OpenDocumentTree 目录，不自建文件浏览器） ============
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "收到文件：" + ui.receivedFiles.joinToString("、"),
+                        text = "接收保存至：${ui.receiveDirName ?: "未选择（点选）"}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = if (ui.receiveDirName != null) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.weight(1f),
                     )
+                    if (ui.receiveDirName == null) {
+                        OutlinedButton(onClick = onChooseReceiveDir) { Text("选择保存目录") }
+                    }
                 }
             }
         }
@@ -944,4 +974,17 @@ private fun formatFileSize(bytes: Long): String = when {
     bytes >= 1024L * 1024 -> String.format(Locale.US, "%.2f MB", bytes / (1024.0 * 1024))
     bytes >= 1024L -> String.format(Locale.US, "%.2f KB", bytes / 1024.0)
     else -> "$bytes B"
+}
+
+/**
+ * 尽力构造 OpenDocumentTree 初始目录 Uri（Downloads）。SAF 的 OpenDocumentTree 本身不支持指定初始
+ * 目录——仅 Android 8+ 经 Intent EXTRA_INITIAL_URI 尽力（buildDocumentUri 失败回退 null 由系统默认）。
+ */
+private fun initialReceiveDirUri(): Uri? = try {
+    DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:${Environment.DIRECTORY_DOWNLOADS}",
+    )
+} catch (e: Exception) {
+    null
 }

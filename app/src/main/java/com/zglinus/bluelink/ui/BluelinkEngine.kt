@@ -18,6 +18,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
 import com.zglinus.bluelink.ble.BleAdvertiser
 import com.zglinus.bluelink.ble.BleScanner
 import com.zglinus.bluelink.ble.GattClient
@@ -49,6 +50,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 一期 BLE 链路接线（生命周期由 MainActivity 持有）：
@@ -86,10 +88,14 @@ import java.util.UUID
  * 与状态机路径 JOINED→TRANSPORT→onTransportReady 对齐；发 joined 后 120s ack 超时（对齐
  * NetworkingStateMachine 的 JOINED 等 ack，同 MANUAL_TIMEOUT_MS 语义）。
  *
- * T3 LocalSend 传输接线：TRANSPORT 后自动启动 [LocalSendServer]（alias=Build.MODEL）并扫描收件目录
- * 初始化接收列表；「发送文件」SAF 选文件 → [confirmSend] 后台线程 [LocalSendClient.send]，进度/结果写
- * transferState + DiagLogger（内容不回显）；服务端文件接收完成（[LocalSendServer.onFileReceived]）入
- * receivedFiles，轮询 getActiveSessions 映射「接收中 …」到 transferState；中止/停止时停服务与轮询。
+ * T3 LocalSend 传输接线：TRANSPORT 后自动启动 [LocalSendServer]（alias=Build.MODEL）供对端经 53317
+ * 发送文件；「发送文件」SAF 选文件 → [confirmSend] 后台线程 [LocalSendClient.send]，进度/结果写
+ * transferState + DiagLogger（内容不回显）；服务端每文件完整落盘（[LocalSendServer.onFileReceived]，
+ * 语义 = 文件已入**暂存** filesDir/localsend/，v0.4.5 不再自建收件列表/私有目录常态化展示）→ 接收侧经
+ * 用户 SAF OpenDocumentTree 选择的目录转存：已选（[receiveDirUri]，[onReceiveDirPicked]）→ 后台
+ * DocumentFile.createFile 拷贝后删暂存原件；未选 → 提示「请选择保存位置」（MainScreen 弹目录选择器），
+ * 选定后再补存（[pendingStagedFiles] 排队）；轮询 getActiveSessions 映射「接收中 …」到 transferState；
+ * 中止/停止时停服务与轮询（暂存文件保留在磁盘）。
  *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
@@ -220,6 +226,18 @@ class BluelinkEngine(private val context: Context) {
             mainHandler.postDelayed(this, RECEIVE_POLL_INTERVAL_MS)
         }
     }
+
+    // ============ v0.4.5 接收侧：SAF 保存目录（暂存 → 用户目录转存） ============
+
+    /** 接收保存目录（SAF OpenDocumentTree tree uri；null=未选择，收到文件时提示点选后补存）。 */
+    @Volatile
+    private var receiveDirUri: Uri? = null
+
+    /** 已完整落盘到暂存目录、等待转存用户目录的文件（key=暂存绝对路径，天然去重；线程安全）。 */
+    private val pendingStagedFiles = ConcurrentHashMap<String, StagedFile>()
+
+    /** 暂存文件元信息（fileName 展示用 / path 拷贝源 / mimeType createFile 用）。 */
+    private class StagedFile(val fileName: String, val path: String, val mimeType: String)
 
     // ============ A5 组网接线 ============
 
@@ -462,8 +480,8 @@ class BluelinkEngine(private val context: Context) {
     /**
      * TRANSPORT 就绪收敛（v0.4.4）：状态机回调 [netCallbacks.onTransportReady] 与接管路径
      * [handlePeerAck] 共用——记录对端 IPv4（transportPeerIp，发送目标）→ 自动启动
-     * [LocalSendServer]（alias=Build.MODEL，对端即可经 53317 发送文件到本机）→ 扫描收件目录
-     * 初始化接收列表 → 启动接收进度轮询。幂等：服务已运行时不再重复 start。
+     * [LocalSendServer]（alias=Build.MODEL，对端即可经 53317 发送文件到本机）→ 启动接收进度轮询。
+     * 幂等：服务已运行时不再重复 start。
      */
     private fun onTransportReadyInternal(peerIp: String) {
         transportPeerIp = peerIp
@@ -471,7 +489,6 @@ class BluelinkEngine(private val context: Context) {
             val ok = localsendServer.start()
             DiagLogger.log(TAG, "T3 LocalSend 服务自动启动：ok=$ok alias=${Build.MODEL}")
         }
-        refreshReceivedFiles()
         mainHandler.removeCallbacks(receivePoller)
         mainHandler.post(receivePoller)
     }
@@ -589,14 +606,10 @@ class BluelinkEngine(private val context: Context) {
         // 握手进行中（发起置 true / 完成或失败置 false 由现有逻辑维护）对端新连接一律掐断。
         // ui 声明在 gattServer 之后，故在此 init（ui 已初始化）注册，lambda 每次查询实时值。
         gattServer.setHandshakingProvider { ui.handshaking }
-        // T3：LocalSend 服务文件接收完成 → 主线程更新接收列表（Server 回调在 worker 线程触发）
-        localsendServer.onFileReceived = { _, fileName, _ ->
-            mainHandler.post {
-                if (fileName !in ui.receivedFiles) {
-                    ui.receivedFiles = ui.receivedFiles + fileName
-                    DiagLogger.log(TAG, "T3 收到文件已入接收列表: $fileName")
-                }
-            }
+        // v0.4.5：LocalSend 服务文件完整落盘（worker 线程）→ 转存用户目录或提示选择保存位置。
+        // Server 回调语义 = 文件已入**暂存** filesDir/localsend/（防断连丢数据），待/已转存用户目录。
+        localsendServer.onFileReceived = { _, fileName, path, mimeType ->
+            handleFileReceived(fileName, path, mimeType)
         }
     }
 
@@ -1204,30 +1217,96 @@ class BluelinkEngine(private val context: Context) {
         activeSendClient?.cancel()
     }
 
+    // ============ v0.4.5 接收侧：SAF 目录选择 / 暂存转存用户目录 ============
+
     /**
-     * 扫描收件根目录 filesDir/localsend/<sessionId>/<fileName> 的已有文件，增量补全
-     * [BluelinkUiState.receivedFiles]（TRANSPORT 启动服务时初始化；历史收件跨会话保留展示）。
+     * SAF OpenDocumentTree 目录选择回调（主线程，MainScreen launcher 触发）：记录 tree uri →
+     * 持久化目录权限（[takePersistableUriPermission] 尽力；失败仅本次运行有效）→ 展示目录显示名 →
+     * 补存排队中的暂存文件（后台线程逐个 DocumentFile 转存）。
      */
-    private fun refreshReceivedFiles() {
-        val root = File(appContext.filesDir, "localsend")
-        if (!root.isDirectory) return
-        val names = root.listFiles()?.filter { it.isDirectory }?.flatMap { d ->
-            d.listFiles()?.map { it.name } ?: emptyList()
-        } ?: emptyList()
-        if (names.isEmpty()) return
-        val existing = ui.receivedFiles.toMutableList()
-        var added = false
-        for (n in names) {
-            if (n !in existing) {
-                existing.add(n)
-                added = true
-            }
+    fun onReceiveDirPicked(uri: Uri) {
+        receiveDirUri = uri
+        ui.receiveDirPrompt = false
+        try {
+            appContext.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+            DiagLogger.log(TAG, "T3 接收目录权限已持久化: $uri")
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "T3 接收目录权限持久化失败（尽力，仅本次运行有效）: ${e.javaClass.simpleName} ${e.message}")
         }
-        if (added) {
-            ui.receivedFiles = existing
-            DiagLogger.log(TAG, "T3 扫描收件目录初始化接收列表：共 ${existing.size} 个文件")
+        ui.receiveDirName = queryTreeDisplayName(uri) ?: "已选择目录"
+        DiagLogger.log(TAG, "T3 接收保存目录已选定: ${ui.receiveDirName}")
+        // 选定后再补存（未选期间入暂存的文件，多文件同一目录逐个转存）
+        val pending = pendingStagedFiles.values.toList()
+        pendingStagedFiles.clear()
+        if (pending.isNotEmpty()) {
+            DiagLogger.log(TAG, "T3 选定目录后补存暂存文件: ${pending.size} 个")
+            Thread({
+                for (f in pending) persistStagedFile(f, uri)
+            }, "localsend-persist").apply { isDaemon = true }.start()
         }
     }
+
+    /**
+     * LocalSendServer.onFileReceived（worker 线程）：文件已完整落盘到**暂存目录** filesDir/localsend/
+     * （防断连丢数据）→ 已选保存目录则立即后台转存；未选则排队并提示 UI 发起目录选择（选定后补存）。
+     */
+    private fun handleFileReceived(fileName: String, path: String, mimeType: String) {
+        val uri = receiveDirUri
+        if (uri != null) {
+            Thread({ persistStagedFile(StagedFile(fileName, path, mimeType), uri) }, "localsend-persist")
+                .apply { isDaemon = true }.start()
+        } else {
+            pendingStagedFiles[path] = StagedFile(fileName, path, mimeType)
+            mainHandler.post {
+                ui.transferState = "已收到「${truncateName(fileName)}」，请选择保存位置"
+                ui.receiveDirPrompt = true
+                DiagLogger.log(TAG, "T3 文件已入暂存（未选保存目录），提示选择: $fileName")
+            }
+        }
+    }
+
+    /**
+     * 把暂存文件转存到用户 SAF 目录（后台线程）：[DocumentFile.fromTreeUri] → createFile(mimeType, fileName)
+     * → 流式拷贝 → 成功后删除暂存原件；失败保留暂存（防断连丢数据）并提示。
+     */
+    private fun persistStagedFile(f: StagedFile, treeUri: Uri) {
+        try {
+            val dir = DocumentFile.fromTreeUri(appContext, treeUri)
+            if (dir == null || !dir.canWrite()) throw IOException("目标目录不可写")
+            val doc = dir.createFile(f.mimeType.ifBlank { "application/octet-stream" }, f.fileName)
+                ?: throw IOException("createFile 返回 null")
+            appContext.contentResolver.openOutputStream(doc.uri)?.use { out ->
+                File(f.path).inputStream().use { it.copyTo(out, 64 * 1024) }
+            } ?: throw IOException("openOutputStream 返回 null")
+            File(f.path).delete() // 转存成功 → 删暂存原件
+            mainHandler.post {
+                ui.transferState = "已保存到 ${truncateName(dir.name ?: f.fileName)}"
+                DiagLogger.log(TAG, "T3 文件已转存用户目录: ${f.fileName}")
+            }
+        } catch (e: Exception) {
+            mainHandler.post {
+                ui.transferState = "保存失败：${e.javaClass.simpleName}（暂存文件已保留，可重新选择目录后补存）"
+            }
+            DiagLogger.log(TAG, "T3 转存用户目录失败（暂存保留 ${f.path}）: ${f.fileName} ${e.javaClass.simpleName} ${e.message}")
+        }
+    }
+
+    /** 查询 SAF tree uri 的目录显示名（尽力；失败回退 uri 末段解码）。 */
+    private fun queryTreeDisplayName(uri: Uri): String? {
+        val name = try {
+            DocumentFile.fromTreeUri(appContext, uri)?.name?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        }
+        return name ?: uri.lastPathSegment?.substringAfterLast(':')?.let { Uri.decode(it) }
+    }
+
+    /** 名称截断显示（超长省略号；transferState 展示用）。 */
+    private fun truncateName(name: String, max: Int = 24): String =
+        if (name.length > max) name.take(max - 1) + "…" else name
 
     /**
      * ④ 手动配网确认：登记密码 → 打开系统热点设置 → 回填状态机 onManualConfigured。

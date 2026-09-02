@@ -13,7 +13,6 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -79,7 +78,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -90,6 +88,10 @@ import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.HandshakeProtocol
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
+import com.zglinus.bluelink.ui.theme.MetricTokens
+import com.zglinus.bluelink.ui.theme.MotionTokens
+import com.zglinus.bluelink.ui.theme.SpacingTokens
+import com.zglinus.bluelink.ui.theme.extended
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -292,7 +294,7 @@ private fun MainPage(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = SpacingTokens.SpaceLg),
     ) {
         if (!ui.permissionsGranted) {
             PermissionBanner(onRequestPermissions)
@@ -300,13 +302,13 @@ private fun MainPage(
             BluetoothOffBanner()
         }
 
-        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：区块间距加大
+        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.1a-5：区块间距加大
 
         // ---- 两态左右栏：开屏 1/3 | 2/3；配对后 1/2 | 1/2（Row weight 动画，宽度平滑切换） ----
         val selfWeight by animateFloatAsState(
             targetValue = if (ui.pairedView) 0.5f else 1f / 3f,
             // v0.5.1a-3：宽度切换放慢（650ms FastOutSlowIn，避免「太快」观感）
-            animationSpec = tween(650, easing = FastOutSlowInEasing),
+            animationSpec = tween(MotionTokens.DurationLong, easing = MotionTokens.EasingLayout),
             label = "selfWeight",
         )
         Row(modifier = Modifier
@@ -320,7 +322,7 @@ private fun MainPage(
                     .weight(selfWeight)
                     .fillMaxHeight(),
             )
-            Spacer(Modifier.width(12.dp)) // v0.5.1a-5：两栏卡片间 gap ≥ 12dp
+            Spacer(Modifier.width(SpacingTokens.SpaceMd)) // v0.5.1a-5：两栏卡片间 gap ≥ 12dp
             Crossfade(
                 targetState = ui.pairedView,
                 modifier = Modifier
@@ -339,7 +341,7 @@ private fun MainPage(
         // ---- 流程动画区：配对/组网进行中显示（环形进度/脉冲 + 必要信息行）；无则收起（高度动画） ----
         FlowAnimationArea(ui)
 
-        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：流程区与后续区块间距加大
+        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.1a-5：流程区与后续区块间距加大
 
         // ---- 底部动作行：发送文件 / 收尾（结束组网·结束直连·关闭热点·断开网络）/ 接收保存位置 ----
         BottomActionRow(
@@ -349,7 +351,7 @@ private fun MainPage(
             onChooseReceiveDir = onChooseReceiveDir,
         )
 
-        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：时间流前留白加大
+        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.1a-5：时间流前留白加大
 
         // ---- 时间流（下半屏 ~45% 屏高；事件时间线：倒序 + 自动滚顶 + 上下滚动） ----
         TimeFlowPanel(
@@ -373,8 +375,8 @@ private fun SelfDeviceCard(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
+                .padding(SpacingTokens.SpaceMd),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
         ) {
             Text(
                 text = "本端设备",
@@ -449,7 +451,7 @@ private fun ScanListPanel(
 ) {
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(6.dp), // v0.5.1a-5：标题/提示/列表间留白
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm), // v0.5.1a-5：标题/提示/列表间留白
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -475,7 +477,7 @@ private fun ScanListPanel(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
             ) {
                 items(
                     ui.devices.values.sortedBy { it.firstSeen },
@@ -502,12 +504,12 @@ private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> U
             .combinedClickable(onClick = onClick, onLongClick = onRemove),
     ) {
         Row(
-            modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+            modifier = Modifier.padding(start = SpacingTokens.SpaceMd, top = SpacingTokens.SpaceSm, bottom = SpacingTokens.SpaceSm, end = SpacingTokens.SpaceXs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs), // 行内距 2→4（audit S5）
             ) {
                 val hs = entry.handshake
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -564,20 +566,33 @@ private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> U
 /** 网络徽标：同Wi-Fi / 蜂窝 / 未知（取自对方握手 net 字段）。 */
 @Composable
 private fun NetworkBadge(hs: HandshakeMessage) {
-    val (text, color) = when {
-        hs.net.wifi -> "同Wi-Fi" to Color(0xFF2E7D32)
-        hs.net.cellular -> "蜂窝" to Color(0xFFEF6C00)
-        else -> "未知" to MaterialTheme.colorScheme.onSurfaceVariant
+    // 徽章容器/文字对（audit P0-2/P1-4）：同Wi-Fi=successContainer 对；蜂窝/未知=中性 surfaceVariant 对（蜂窝非警告，中性化）
+    val (text, containerColor, contentColor) = when {
+        hs.net.wifi -> Triple(
+            "同Wi-Fi",
+            MaterialTheme.extended.successContainer,
+            MaterialTheme.extended.onSuccessContainer,
+        )
+        hs.net.cellular -> Triple(
+            "蜂窝",
+            MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        else -> Triple(
+            "未知",
+            MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     Surface(
         shape = MaterialTheme.shapes.small,
-        color = color.copy(alpha = 0.15f),
+        color = containerColor,
     ) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外（P1 徽章化时随样式调整）
             style = MaterialTheme.typography.labelSmall,
-            color = color,
+            color = contentColor,
         )
     }
 }
@@ -594,8 +609,8 @@ private fun PeerDeviceCard(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
+                .padding(SpacingTokens.SpaceMd),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -605,20 +620,21 @@ private fun PeerDeviceCard(
                     modifier = Modifier.weight(1f),
                 )
                 val status = peer?.statusText ?: "未连接"
-                val statusColor = when (status) {
-                    "接入" -> Color(0xFF2E7D32)
-                    "已连接" -> MaterialTheme.colorScheme.primary
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                // 状态徽标三档容器对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant
+                val (statusContainer, statusContent) = when (status) {
+                    "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
+                    "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
                 }
                 Surface(
                     shape = MaterialTheme.shapes.small,
-                    color = statusColor.copy(alpha = 0.15f),
+                    color = statusContainer,
                 ) {
                     Text(
                         text = status,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
                         style = MaterialTheme.typography.labelSmall,
-                        color = statusColor,
+                        color = statusContent,
                     )
                 }
             }
@@ -685,12 +701,12 @@ private fun FlowAnimationArea(ui: BluelinkUiState) {
     val visible = ui.netState != null || ui.pinVerifyActive
     AnimatedVisibility(
         visible = visible,
-        enter = expandVertically(animationSpec = tween(450)) + fadeIn(animationSpec = tween(400)),
-        exit = shrinkVertically(animationSpec = tween(450)) + fadeOut(animationSpec = tween(400)),
+        enter = expandVertically(animationSpec = tween(MotionTokens.DurationGentle)) + fadeIn(animationSpec = tween(MotionTokens.DurationFast)),
+        exit = shrinkVertically(animationSpec = tween(MotionTokens.DurationGentle)) + fadeOut(animationSpec = tween(MotionTokens.DurationFast)),
     ) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd), // 14→16（audit S1）
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val busy = ui.netActive || ui.pinVerifyActive
@@ -702,11 +718,11 @@ private fun FlowAnimationArea(ui: BluelinkUiState) {
                         style = MaterialTheme.typography.titleMedium,
                     )
                 }
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(SpacingTokens.SpaceMd))
                 // v0.5.1a-4：必要信息行（行间 8dp；细节保留在时间流）
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
                 ) {
                     // ① 设备名称：对端 alias 或「正在连接…」
                     val peerAlias = ui.selectedDevice?.alias
@@ -779,19 +795,19 @@ private fun PulseRing() {
     val alpha by transition.animateFloat(
         initialValue = 0.25f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse), // 原 800ms → 1300ms
+        animationSpec = infiniteRepeatable(tween(MotionTokens.DurationPulse), RepeatMode.Reverse), // 原 800ms → 1300ms
         label = "pulseAlpha",
     )
     var big by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(1000) // 原 600ms → 1000ms（呼吸周期放慢）
+            delay(MotionTokens.DelayPulse) // 原 600ms → 1000ms（呼吸周期放慢）
             big = !big
         }
     }
     val ringSize by animateDpAsState(
-        targetValue = if (big) 30.dp else 24.dp,
-        animationSpec = tween(1000), // 原 600ms → 1000ms
+        targetValue = if (big) MetricTokens.PulseRingLarge else MetricTokens.PulseRingBase,
+        animationSpec = tween(MotionTokens.DurationRing), // 原 600ms → 1000ms
         label = "ringSize",
     )
     Box(contentAlignment = Alignment.Center) {
@@ -801,7 +817,7 @@ private fun PulseRing() {
         )
         Box(
             modifier = Modifier
-                .size(8.dp)
+                .size(MetricTokens.PulseRingDot)
                 .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha), CircleShape),
         )
     }
@@ -815,7 +831,7 @@ private fun BottomActionRow(
     onSendFileClick: () -> Unit,
     onChooseReceiveDir: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { // v0.5.1a-5：动作行行距加大
+    Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) { // v0.5.1a-5：动作行行距加大
         // T3 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
         val canSend = engine != null &&
             (engine.transportPeerIp.isNotBlank() || ui.devices.values.any { it.handshake != null })
@@ -824,7 +840,7 @@ private fun BottomActionRow(
                 onClick = onSendFileClick,
                 enabled = canSend,
             ) { Text("发送文件") }
-            Spacer(Modifier.width(12.dp)) // v0.5.1a-5：按钮/文字不紧贴
+            Spacer(Modifier.width(SpacingTokens.SpaceMd)) // v0.5.1a-5：按钮/文字不紧贴
             Text(
                 text = if (engine != null && engine.transportPeerIp.isNotBlank()) {
                     "目标: ${engine.transportPeerIp}"
@@ -903,7 +919,7 @@ private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(8.dp)) // v0.5.1a-5：时间流标题与列表间距加大
+        Spacer(Modifier.height(SpacingTokens.SpaceSm)) // v0.5.1a-5：时间流标题与列表间距加大
         TimeFlowList(ui, Modifier.fillMaxSize())
     }
 }
@@ -927,7 +943,7 @@ private fun TimeFlowList(ui: BluelinkUiState, modifier: Modifier = Modifier) {
         LazyColumn(
             state = listState,
             modifier = modifier,
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
         ) {
             itemsIndexed(ui.eventLog.asReversed()) { _, ev ->
                 EventRow(ev)
@@ -939,17 +955,17 @@ private fun TimeFlowList(ui: BluelinkUiState, modifier: Modifier = Modifier) {
 /** 事件行：时间（等宽）+ 色点（按 kind）+ 文案。 */
 @Composable
 private fun EventRow(ev: EventItem) {
+    // kind → 语义色（audit P0-2/C4：传输蓝并入 primary 品牌蓝；网络/成功=success 扩展对；错误=error）
     val color = when (ev.kind) {
-        BluelinkEngine.EVT_HANDSHAKE -> MaterialTheme.colorScheme.primary
-        BluelinkEngine.EVT_NETWORK -> Color(0xFF2E7D32)
-        BluelinkEngine.EVT_TRANSFER -> Color(0xFF1565C0)
+        BluelinkEngine.EVT_NETWORK -> MaterialTheme.extended.success
+        BluelinkEngine.EVT_HANDSHAKE, BluelinkEngine.EVT_TRANSFER -> MaterialTheme.colorScheme.primary
         BluelinkEngine.EVT_ERROR -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant // EVT_INFO / EVT_TEARDOWN
     }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp),
+            .padding(vertical = SpacingTokens.SpaceXs), // 日志行距 2→4（audit S5）
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -957,14 +973,14 @@ private fun EventRow(ev: EventItem) {
             style = MaterialTheme.typography.labelSmall,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(58.dp),
+            modifier = Modifier.width(MetricTokens.TimeColumnWidth),
         )
         Box(
             modifier = Modifier
-                .size(6.dp)
+                .size(MetricTokens.EventDot) // 色点 6→8dp（audit S6：语义图形 ≥8dp）
                 .background(color, CircleShape),
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(SpacingTokens.SpaceSm))
         Text(
             text = ev.text,
             style = MaterialTheme.typography.bodySmall,
@@ -982,7 +998,7 @@ private fun LogPage(ui: BluelinkUiState) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(SpacingTokens.SpaceLg),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -992,7 +1008,7 @@ private fun LogPage(ui: BluelinkUiState) {
             )
             TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(SpacingTokens.SpaceSm))
         TimeFlowList(ui, Modifier.fillMaxSize())
     }
 }
@@ -1004,8 +1020,8 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(SpacingTokens.SpaceLg),
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1049,7 +1065,7 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
                     onClick = { engine.setPinMode(m) },
                     enabled = ui.pinMode != m,
                 ) { Text(label) }
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(SpacingTokens.SpaceSm))
             }
         }
         Text(
@@ -1142,22 +1158,22 @@ private fun PlaceholderPage(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(SpacingTokens.SpaceXl),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Text(title, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(SpacingTokens.SpaceSm))
         Text(
             text = "UI-2+ 实现（骨架先行）",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         extraAction?.let {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(SpacingTokens.SpaceLg))
             Button(onClick = it) { Text("去授权") }
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(SpacingTokens.SpaceXl))
         OutlinedButton(onClick = { ui.currentPage = 0 }) { Text("返回主页面") }
     }
 }
@@ -1170,7 +1186,7 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 20.dp),
+                .padding(horizontal = SpacingTokens.SpaceLg, vertical = 20.dp), // 20dp 非 4dp 节奏（审计未列，保持原值）
         ) {
             Text("Bluelink", style = MaterialTheme.typography.headlineSmall)
             Text(
@@ -1210,7 +1226,7 @@ private fun PermissionBanner(onRequestPermissions: () -> Unit) {
         ),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceMd, vertical = SpacingTokens.SpaceSm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -1234,7 +1250,7 @@ private fun BluetoothOffBanner() {
     ) {
         Text(
             text = "请在系统设置开启蓝牙",
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(SpacingTokens.SpaceMd),
             style = MaterialTheme.typography.bodyMedium,
         )
     }
@@ -1246,7 +1262,7 @@ private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 32.dp),
+            .padding(top = SpacingTokens.SpaceXxl),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
@@ -1254,7 +1270,7 @@ private fun EmptyState() {
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(SpacingTokens.SpaceXs))
         Text(
             text = "确保对方已打开 Bluelink 广播",
             style = MaterialTheme.typography.bodySmall,
@@ -1283,9 +1299,9 @@ fun DeviceDetailSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = SpacingTokens.SpaceLg)
+                .padding(bottom = SpacingTokens.SpaceXxl),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
         ) {
             val hs = entry.handshake
             Text(
@@ -1419,7 +1435,7 @@ fun DeviceDetailSheet(
                         modifier = Modifier.size(16.dp),
                         strokeWidth = 2.dp,
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(SpacingTokens.SpaceSm))
                     Text("正在握手…", style = MaterialTheme.typography.bodyMedium)
                 }
                 handshakeError != null -> Text(
@@ -1434,7 +1450,7 @@ fun DeviceDetailSheet(
                 )
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(SpacingTokens.SpaceSm))
             Button(
                 onClick = onDismiss,
                 modifier = Modifier.fillMaxWidth(),
@@ -1472,7 +1488,7 @@ private fun SystemHotspotPwdDialog(engine: BluelinkEngine) {
         onDismissRequest = { ui.manualPwdDialog = false },
         title = { Text("系统热点登记（②）") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "热点已自动开启，请输入本机系统热点的名称与密码：",
                     style = MaterialTheme.typography.bodySmall,
@@ -1515,7 +1531,7 @@ private fun ManualPwdDialogV4(engine: BluelinkEngine) {
         onDismissRequest = { ui.manualPwdDialog = false },
         title = { Text("手动配网（④）") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "本机无法自动开启热点，请手动操作：",
                     style = MaterialTheme.typography.bodySmall,
@@ -1561,7 +1577,7 @@ private fun LocalOnlyPwdDialog(engine: BluelinkEngine) {
         onDismissRequest = { ui.localOnlyPwdDialog = false },
         title = { Text("本地热点密码登记（③）") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "系统已弹出本地热点通知/弹窗，展示 SSID 与密码：",
                     style = MaterialTheme.typography.bodySmall,
@@ -1603,7 +1619,7 @@ private fun LoTestPwdDialog(engine: BluelinkEngine) {
         onDismissRequest = { ui.loTestPwdDialog = false },
         title = { Text("LocalOnly 密码登记（自测 ③）") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "系统已弹出本地热点通知/弹窗，展示 SSID 与密码（App 侧不可读）：",
                     style = MaterialTheme.typography.bodySmall,
@@ -1639,7 +1655,7 @@ private fun JoinFailDialog(engine: BluelinkEngine) {
         onDismissRequest = { ui.joinFailDialog = false },
         title = { Text("接入失败") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "未能接入对方热点：${ui.joinFailReason ?: "未知原因"}",
                     style = MaterialTheme.typography.bodySmall,
@@ -1711,18 +1727,18 @@ private fun DiagnosticLogDialog(
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 360.dp)
+                        .heightIn(max = MetricTokens.DiagLogMaxHeight)
                         .verticalScroll(rememberScrollState()),
                 )
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Spacer(Modifier.height(SpacingTokens.SpaceSm))
+                Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                     TextButton(onClick = onRefresh) { Text("刷新") }
                     TextButton(onClick = {
                         clipboard.setText(AnnotatedString(text))
                         Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
                     }) { Text("复制全部") }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                     TextButton(onClick = { exportDiagnosticFile(context, text) }) { Text("导出文件") }
                     TextButton(onClick = onClear) { Text("清空") }
                 }
@@ -1758,7 +1774,7 @@ private fun SendConfirmDialog(engine: BluelinkEngine) {
         onDismissRequest = { engine.dismissSendDialog() },
         title = { Text("发送文件") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "文件：${engine.pendingSendName ?: "未知"}",
                     style = MaterialTheme.typography.bodyMedium,
@@ -1818,7 +1834,7 @@ private fun PinInputDialog(engine: BluelinkEngine) {
         onDismissRequest = { engine.cancelPinInput() },
         title = { Text("PIN 配对验证") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
                     text = "对方要求 PIN 配对验证，请输入对方设备展示的配对码：",
                     style = MaterialTheme.typography.bodySmall,

@@ -3,13 +3,9 @@ package com.zglinus.bluelink
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
 import com.zglinus.bluelink.ui.BluelinkEngine
 import com.zglinus.bluelink.ui.BluelinkRoot
+import com.zglinus.bluelink.ui.theme.BluelinkTheme
 
 /**
  * 唯一 Activity。职责：
@@ -25,6 +21,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         engine = BluelinkEngine(applicationContext)
         setContent {
+            // 主题接线（浅/深双 scheme + 语义 token + Shapes）见 ui/theme/BluelinkTheme.kt（docs/md3-audit.md §3 P0-4）
             BluelinkTheme {
                 BluelinkRoot(engine)
             }
@@ -35,19 +32,4 @@ class MainActivity : ComponentActivity() {
         engine.release()
         super.onDestroy()
     }
-}
-
-/**
- * 应用主题：深色跟随系统（Material 3）。
- * 一期为占位配色（lightColorScheme/darkColorScheme 默认值），后续按 docs/ui-design.md §4.10 扩展。
- */
-@Composable
-fun BluelinkTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
-) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) darkColorScheme() else lightColorScheme(),
-        content = content
-    )
 }

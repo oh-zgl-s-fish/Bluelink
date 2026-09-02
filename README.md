@@ -1,45 +1,101 @@
-# Bluelink
+# 蓝鲸·X（Bluelink）
 
-> 正式命名：**Bluelink**（包名 `com.zglinus.bluelink`）。
-> > 状态：**异网组网闭环完全体**（v0.4.1，2026-09-01）：BLE 握手→仲裁→②'系统热点/k1 式或 ③ LocalOnly（**A12 实测密码自动读取，全版本自动**）→offer→对端 Specifier 接入→joined→**热点方复核直接放行→TRANSPORT**；同网复核子网一致兜底。工程根：/srv/android/bluelink。
+> **离线 · 端到端 · 无服务器文件传输**：BLE 发现握手 → 同网判定 → 异网自动组网 → LocalSend 协议直传。
+> 状态快照：v0.5.6h（2026-09-02）· 仓库：`github.com/oh-zgl-s-fish/Bluelink`
 
-Android 8+（API 26+）设备间文件传输客户端：
+Android 8+（API 26+）设备间文件传输客户端。两台设备**不需要任何服务器/账号/互联网**：打开 App 即可被 BLE 发现，扫描握手交换网络信息，自动判断双方是否同网——同网直接传输，异网则由一方自动开启热点（系统预配热点 / LocalOnlyHotspot / 手动四级兜底），另一方自动接入，随后经 **LocalSend v2 协议**（HTTP 53317）完成文件收发。
 
-1. **蓝牙发现**：打开即广播（BLE 为主、经典蓝牙降级），可扫描周围设备
-2. **蓝牙握手**：BLE GATT 交换网络状态 / IP / 证书指纹 / PIN / root 能力
-3. **局域网判定**：子网比较 + TCP 连通的**实测**（不只看网段）
-4. **异网组网**：热点方开热点（root=真热点带外网 / 非 root=LocalOnlyHotspot），对端接入（root=`cmd wifi connect-network` / 非 root=`WifiNetworkSpecifier`）
-5. **传输**：内置 LocalSend v2 协议实现，端口 53317，与官方 LocalSend 互通
-6. **Root 增强模式（可选）**：逐环节 root 快路径 + 失败自动降级到标准 API
+## 特性
 
-技术栈：Kotlin · Jetpack Compose · Material 3（深色模式跟随系统）· targetSdk 34/35 · minSdk 26
+- 🔵 **BLE 全链路**：广播/扫描 → GATT 握手（MTU 512）→ 持久信令会话（写队列串行化）
+- 🧭 **同网免热点直连**：双方同一 Wi-Fi（SSID+子网一致）→ 握手即传，跳过热点
+- 📶 **异网自动组网**：系统预配热点自动开（Android 8–15 多版本机制）→ offer → 自动接入（Specifier）→ 复核直放
+- 🔐 **PIN 配对验证**：关 / 仅首次 / 每次 三模式，防陌生设备误连
+- 📤 **LocalSend v2 传输**：HTTP 53317、multipart 流式、进度/取消、SAF 选文件与保存目录
+- 🧹 **温和收尾**：传输完可选关热点/断网，BLE 保留可续传
+- 🎨 Material 3 语义化 UI（MD3 Skill 驱动重构）+ 全版本权限矩阵适配
+- 🔒 密码/PIN 全程不回显；内置诊断日志（App 内查看/复制/导出）
 
-## 目录
+## 工作流
 
-- `docs/ui-design.md` — UI 设计定稿（页面线框 + 交互规则 + 决策清单 + root 命令矩阵）
-- `docs/troubleshooting.md` — 真机排障手册（BLE 扫描静默坑 / GATT 握手 MTU 超时 / logcat 标签）
-- `docs/`（后续）— 架构/协议/权限矩阵细化文档
+```
+两台设备开 App（同一局域网或面对面）
+      │
+      ▼
+BLE 广播 ⇄ 扫描 → 点设备握手（GATT 交换网络信息/电量/设备标识）
+      │
+      ▼
+同网判定（双方 Wi-Fi 同 SSID 且子网一致？）
+      ├─ 是 → 同网直连：双方起 LocalSend 服务 → 传输就绪
+      └─ 否 → 仲裁（系统预配/私有 API/LocalOnly/手动 等级 + 电量决定谁开热点）
+              ├─ 系统预配热点自动开（②'：MD 同源按名枚举；③ LocalOnly：全版本密码自动读）
+              ├─ offer（SSID/密码/IP 经 BLE 下发）→ 对端自动 Specifier 接入（或手动连，SSID 匹配自动回 joined）
+              ├─ 复核直放（热点方 joined 即同网）→ TRANSPORT
+              └─ 兜底：④ 手动系统热点（用户开+登记密码一次）
+      │
+      ▼
+LocalSend v2：发送（SAF 选文件 → prepare-upload → multipart 流式）⇄ 接收（落盘用户所选目录）
+      │
+      ▼
+温和收尾：可选「关闭热点/断开网络」，BLE 保留可继续
+```
 
-## 关键设计原则
+### 版本分支矩阵
 
-- 全自动上限受系统限制：目标为「一次点击的引导式自动化」；双端 root 时可完全静默
-- 信令与数据分离：BLE 只做握手信令，文件全走 LAN（LocalSend 协议）
-- 未验证不启用：root 快路径需先在目标机型（含荣耀 8 / Android 8.0）验证命令矩阵再启用
+| 场景 | 路径 |
+|---|---|
+| 同 Wi-Fi（最常用） | 握手 → **同网直连**，免热点 |
+| 异网自动（Android 8–15） | 仲裁 → ②'/③ 自动开+读密码 → offer → Specifier 接入 → TRANSPORT |
+| 手动连热点 | Wi-Fi 监听 SSID 匹配 → 自动回 joined |
+| 密码盲区兜底（个别 ROM/手动） | ④ 手动系统热点+密码登记 |
 
-## 协作与执行约定（2026-09-01 定）
+### 技术要点（docs/）
 
-- **编码与编译报错排查**：委派 **pi 子 agent**（DSH `pi_subagent`，one-shot、不支持追问/steering），只执行不反问
-- **运行身份与仓库权限**（2026-09-01 修订）：
-  - pi 以 **uid 1000（agent）** 运行（实测确认）；**仓库属主 root**
-  - pi 对仓库**只读**（读设计文档/参考代码）；产物一律写 pi 自己的工作目录 `/home/agent/pi-subagent/session-<会话id>/`
-  - 运行结束插件自动收割产物到父会话工作区（`/root/user`），**主管（root）负责归档进仓库并 git commit**
-- **主会话（主管）职责**：设计决策、任务拆包、结果验收、文件归档、文档维护（本目录）
-- **任务包格式**：每次委派必须自包含——项目路径 + 上下文背景 + 明确验收标准，一次讲清；产物路径明示为工作目录
-- **设备实机操作**：荣耀 8 无线 adb（不稳定 + 需专用 key 环境）由主管负责保活重连与授权，不塞进 pi 任务包
-- **执行节奏**：未验证不启用；开工按「后续路线」分期推进，每期由主管验收 + git commit 后归档
+- `docs/networking.md` — 组网设计定稿（仲裁/热点等级/同网判定/超时语义）
+- `docs/ui-design.md` — UI 设计（两态左右布局/抽屉/个性化规格）
+- `docs/md3-audit.md` — Material 3 审计与落地（语义 token/组件行为/无障碍）
+- `docs/troubleshooting.md` — 真机排障档案
+- `docs/TODO.md` — 任务看板（未完成项见下）
 
-## 验证授权边界（2026-09-01 定）
+## 未完成（TODO 摘要）
 
-- **允许（主管可远程执行）**：只读验证——读取属性/配置、`su -c id`、Wi-Fi/蓝牙状态查询、`/data/misc/wifi/` 只读
-- **需用户手动（主管不得远程执行）**：开/关热点、连接/切换 Wi-Fi、改蓝牙可发现模式等**任何改变设备状态的操作**；用户手动实测，结果回填文档
-- 二期/三期热点链路验证依赖用户手动实测；10/11 段 `cmd wifi` 矩阵需第二台 Android 10+ 设备（待确认）
+- **UI1b-B**：个性化页（统一/深色/浅色三壁纸槽、取色区 API27+、遮罩、预览）
+- **UI1b-C**：设置-设备页（PIN 管理/重置指纹、热点密码预设、下载目录、权限检测）+ 全局深浅切换
+- **工程收尾**：移除 LocalOnly 测试包开关（`DISABLE_PRIVATE_API`）并回归 ②；版本对齐（versionName 与发布同步）；release 签名
+- **迭代候选**：PIN 短时窗过期/失败锁定；直连加密（握手指纹互认）；8-9 段机型回归（荣耀 8）
+- 详细见 `docs/TODO.md`
+
+## 构建
+
+```bash
+./gradlew --no-daemon assembleDebug
+# 产物：app/build/outputs/apk/debug/app-debug.apk
+```
+
+要求：JDK 17、Android SDK（compileSdk 37 / targetSdk 34 / minSdk 26）、Gradle 9.7.1 + AGP 9.3.2 + Kotlin 2.4.10。
+
+## 开源许可
+
+本项目采用 **GNU General Public License v3.0**（GPL-3.0）。完整文本见 [LICENSE](LICENSE)。
+
+### 第三方许可兼容性
+
+| 组件 | 许可 | 与 GPL-3.0 兼容性 |
+|---|---|---|
+| AndroidX（Compose/Material3/Activity 等） | Apache-2.0 | ✅ 兼容（Apache 2.0 与 GPLv3 可共存；分发时保留其 NOTICE） |
+| org.json（Android 平台内置） | JSON License（宽松） | ✅ 宽松许可不构成冲突 |
+| Kotlin/AGP/Gradle | Apache-2.0 / 各工具链许可 | ✅ 构建工具，非分发组件 |
+| 自研代码（本仓库全部源码） | GPL-3.0 | — |
+| 逆向参考（MacroDroid 热点机制） | 仅方法启发，**不含其代码** | ✅ 无拷贝即无衍生义务（已在 docs/macrodroid-notes.md 记录边界） |
+
+> 说明：本仓库不包含任何第三方源码副本；LocalSend 仅为**协议形状参考**（见下致谢），实现为本项目自研，故以 GPL-3.0 分发无外部传染源。
+
+## 致谢
+
+- **[LocalSend](https://github.com/localsend/localsend)** — 传输协议（HTTP 53317 / prepare-upload / upload / cancel 形状）的设计启发；本项目按该协议形状自研实现，用于端到端互通。感谢 LocalSend 社区的出色工作。🫶
+- **MacroDroid** — 系统热点「按名枚举 startTethering」与 LocalOnlyHotspot 密码自动读取等机制的逆向参考（仅方法论，未使用其代码）。
+- **Material Design 3 / material-design-3-ui-skill** — UI/UX 决策系统与落地指导。
+
+---
+
+© 2026 zglinus-for-agent — [GPL-3.0](LICENSE)

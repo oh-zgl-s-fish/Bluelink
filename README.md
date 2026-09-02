@@ -114,6 +114,12 @@ LocalSend v2：发送（SAF 选文件 → prepare-upload → multipart 流式）
 - **MacroDroid** — 系统热点「按名枚举 startTethering」与 LocalOnlyHotspot 密码自动读取等机制的逆向参考（仅方法论，未使用其代码）。
 - **Material Design 3 / material-design-3-ui-skill** — UI/UX 决策系统与落地指导。
 
+## Contributors
+
+- **zglinus-for-agent** — 项目维护与集成（编码协调、构建发布）
+- **[DeepSeek](https://www.deepseek.com)** — 本仓库绝大多数代码与设计由 DeepSeek 模型生成（需求-设计-编码-修复全程）
+- **pi agent（DeepSeek-powered coding subagent）** — 按任务切割执行模块编码/修复/逆向分析（工作流见上文「Agent 写作工作流」）
+
 ---
 
 © 2026 zglinus-for-agent — [GPL-3.0](LICENSE)

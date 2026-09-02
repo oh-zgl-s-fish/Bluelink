@@ -13,6 +13,7 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -97,7 +98,10 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 主页面（docs/ui-design.md §4.1 两态左右布局，v0.5.0 UI-1）：
+ * 主页面（docs/ui-design.md §4.1 两态左右布局，v0.5.0 UI-1；v0.5.1a 实机反馈微调五点：
+ * ① 时间流占下半屏 ~45%（原固定 160dp）② 「重新扫描」=退出对端卡回设备选择列表（pairedView=false + rescan）
+ * ③ 宽度切换/脉冲/展开动画放慢 ④ 流程区只留必要信息行（设备/握手/PIN 码/组网短状态）⑤ 区块与字段留白加大。
+ * 本文件改动仅 UI 层：不新增页面、不改导航、不动引擎逻辑（仅调用 ui 现有字段与 engine 现有方法）。）：
  * - 开屏（配对前）：顶部左右两栏——左「本端设备卡」1/3、右「对端扫描列表」2/3（LazyColumn
  *   上下滑动；长按或 × 清除失效设备）→ 其下「流程动画区」（配对/组网进行中显示：环形进度/脉冲 +
  *   阶段文案；无进行中流程收起——高度动画）→ 最下「时间流」（事件时间线：倒序 + 自动滚顶 + 上下滚动）。
@@ -296,11 +300,13 @@ private fun MainPage(
             BluetoothOffBanner()
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：区块间距加大
 
         // ---- 两态左右栏：开屏 1/3 | 2/3；配对后 1/2 | 1/2（Row weight 动画，宽度平滑切换） ----
         val selfWeight by animateFloatAsState(
             targetValue = if (ui.pairedView) 0.5f else 1f / 3f,
+            // v0.5.1a-3：宽度切换放慢（650ms FastOutSlowIn，避免「太快」观感）
+            animationSpec = tween(650, easing = FastOutSlowInEasing),
             label = "selfWeight",
         )
         Row(modifier = Modifier
@@ -314,7 +320,7 @@ private fun MainPage(
                     .weight(selfWeight)
                     .fillMaxHeight(),
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(12.dp)) // v0.5.1a-5：两栏卡片间 gap ≥ 12dp
             Crossfade(
                 targetState = ui.pairedView,
                 modifier = Modifier
@@ -330,10 +336,10 @@ private fun MainPage(
             }
         }
 
-        // ---- 流程动画区：配对/组网进行中显示（环形进度/脉冲 + 阶段文案）；无则收起（高度动画） ----
+        // ---- 流程动画区：配对/组网进行中显示（环形进度/脉冲 + 必要信息行）；无则收起（高度动画） ----
         FlowAnimationArea(ui)
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：流程区与后续区块间距加大
 
         // ---- 底部动作行：发送文件 / 收尾（结束组网·结束直连·关闭热点·断开网络）/ 接收保存位置 ----
         BottomActionRow(
@@ -343,14 +349,15 @@ private fun MainPage(
             onChooseReceiveDir = onChooseReceiveDir,
         )
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp)) // v0.5.1a-5：时间流前留白加大
 
-        // ---- 时间流（事件时间线：倒序 + 自动滚顶 + 上下滚动） ----
+        // ---- 时间流（下半屏 ~45% 屏高；事件时间线：倒序 + 自动滚顶 + 上下滚动） ----
         TimeFlowPanel(
             ui = ui,
+            // v0.5.1a-1：时间流占屏高 ~45%（原固定 160dp）；上半屏为顶部两栏 + 流程区，页面不额外滚动
             modifier = Modifier
                 .fillMaxWidth()
-                .height(160.dp),
+                .fillMaxHeight(0.45f),
         )
     }
 }
@@ -367,7 +374,7 @@ private fun SelfDeviceCard(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
         ) {
             Text(
                 text = "本端设备",
@@ -440,7 +447,10 @@ private fun ScanListPanel(
     onDeviceClick: (DeviceEntry) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp), // v0.5.1a-5：标题/提示/列表间留白
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = "对端扫描",
@@ -585,7 +595,7 @@ private fun PeerDeviceCard(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp), // v0.5.1a-5：卡片内字段间距 ≥ 12dp
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -637,10 +647,15 @@ private fun PeerDeviceCard(
             )
             Spacer(Modifier.weight(1f))
             OutlinedButton(
-                onClick = { engine?.rescan() },
+                onClick = {
+                    // v0.5.1a-2：重新扫描 = 退出对端卡回设备选择列表（pairedView=false）+ 触发 rescan；状态进时间流
+                    ui.pairedView = false
+                    ui.selectedDevice = null
+                    engine?.logUiEvent(BluelinkEngine.EVT_INFO, "重新扫描中…")
+                    engine?.rescan()
+                },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("重新扫描") }
-            Spacer(Modifier.height(4.dp))
             val sameLan = peer?.sameLan == true
             Button(
                 onClick = { engine?.startNetworking() },
@@ -659,8 +674,10 @@ private fun PeerDeviceCard(
 }
 
 /**
- * 流程动画区：ui.netState / 组网阶段 / PIN 验证驱动——有进行中流程才显示
- * （环形进度 + 脉冲 + 阶段文案），无则收起（AnimatedVisibility 高度动画）。
+ * 流程动画区（v0.5.1a-4 精简）：ui.netState / 组网阶段 / PIN 验证驱动——有进行中流程才显示
+ * （环形进度 + 脉冲 + 必要信息行：设备名称 / 握手状态 / PIN 码行 / 组网短状态；技术细节已进时间流），
+ * 无则收起（AnimatedVisibility 高度动画）。
+ * v0.5.1a-3：展开/收起动画放慢（expandVertically 450ms + fade 400ms+），避免「太快」观感。
  */
 @Composable
 private fun FlowAnimationArea(ui: BluelinkUiState) {
@@ -668,12 +685,12 @@ private fun FlowAnimationArea(ui: BluelinkUiState) {
     val visible = ui.netState != null || ui.pinVerifyActive
     AnimatedVisibility(
         visible = visible,
-        enter = expandVertically() + fadeIn(),
-        exit = shrinkVertically() + fadeOut(),
+        enter = expandVertically(animationSpec = tween(450)) + fadeIn(animationSpec = tween(400)),
+        exit = shrinkVertically(animationSpec = tween(450)) + fadeOut(animationSpec = tween(400)),
     ) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val busy = ui.netActive || ui.pinVerifyActive
@@ -685,55 +702,96 @@ private fun FlowAnimationArea(ui: BluelinkUiState) {
                         style = MaterialTheme.typography.titleMedium,
                     )
                 }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
+                Spacer(Modifier.width(12.dp))
+                // v0.5.1a-4：必要信息行（行间 8dp；细节保留在时间流）
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // ① 设备名称：对端 alias 或「正在连接…」
+                    val peerAlias = ui.selectedDevice?.alias
+                        ?: ui.devices.values.firstOrNull { it.handshake != null }?.handshake?.alias
                     Text(
-                        text = "流程",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = peerAlias?.takeIf { it.isNotBlank() } ?: "正在连接…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    // ② 握手状态：已握手 / 握手中
+                    Text(
+                        text = if (ui.handshaking) "握手中" else "已握手",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(
-                        text = ui.netState ?: flowFallbackText(ui),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (ui.netState?.startsWith("✅") == true || ui.pinVerifyOk) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
+                    // ③ PIN 码行：仅 PIN 验证中显示展示码或「等待对端输入」
+                    if (ui.pinVerifyActive) {
+                        Text(
+                            text = ui.pinShow ?: "等待对端输入",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    // ④ 组网状态：短阶段文案（开热点…/等待接入…/传输就绪等）；长细节在时间流
+                    ui.netState?.let { state ->
+                        Text(
+                            text = shortNetStage(state),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = when {
+                                state.contains("失败") || state.contains("中止") || state.contains("超时") ->
+                                    MaterialTheme.colorScheme.error
+                                state.startsWith("✅") -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/** 无 netState 时的流程文案兜底（PIN 验证进行中/已通过）。 */
-private fun flowFallbackText(ui: BluelinkUiState): String = when {
-    ui.pinVerifyActive -> "PIN 配对验证进行中…"
-    ui.pinVerifyOk -> "PIN 验证已通过"
-    else -> ""
+/**
+ * 组网阶段 → 必要信息短文案（v0.5.1a-4 精简；技术细节保留在时间流/各弹窗，流程区不展示）。
+ * 只映射状态机/引擎常用阶段字串为短标签，未命中时回退原文长度截断的通用文案。
+ */
+private fun shortNetStage(state: String): String = when {
+    state.contains("中止") -> "组网中止"
+    state.contains("超时") -> "连接超时"
+    state.contains("失败") || state.contains("异常") -> "组网失败"
+    state.contains("无法") -> "操作失败"
+    state.contains("传输就绪") -> "传输就绪"
+    state.contains("等待对方接入") || state.contains("加入") || state.contains("接入热点") -> "等待接入…"
+    state.contains("等待对方确认") || state.contains("入网") || state.contains("确认") -> "等待确认…"
+    state.contains("协商") || state.contains("仲裁") -> "协商中…"
+    state.contains("权限") || state.contains("授权") -> "等待授权…"
+    state.contains("热点") || state.contains("配网") || state.contains("登记") || state.contains("回填") -> "开热点…"
+    state.contains("PIN") || state.contains("验证") -> "等待配对验证"
+    state.contains("接入") -> "等待接入…"
+    state.startsWith("✅") -> "传输就绪"
+    else -> "进行中…"
 }
 
-/** 环形进度 + 脉冲：animateDpAsState 呼吸环 + 无限 alpha 脉冲内点。 */
+/** 环形进度 + 脉冲：animateDpAsState 呼吸环 + 无限 alpha 脉冲内点（v0.5.1a-3：呼吸/脉冲放慢，防「太快」观感）。 */
 @Composable
 private fun PulseRing() {
     val transition = rememberInfiniteTransition(label = "pulse")
     val alpha by transition.animateFloat(
         initialValue = 0.25f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+        animationSpec = infiniteRepeatable(tween(1300), RepeatMode.Reverse), // 原 800ms → 1300ms
         label = "pulseAlpha",
     )
     var big by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(600)
+            delay(1000) // 原 600ms → 1000ms（呼吸周期放慢）
             big = !big
         }
     }
     val ringSize by animateDpAsState(
         targetValue = if (big) 30.dp else 24.dp,
-        animationSpec = tween(600),
+        animationSpec = tween(1000), // 原 600ms → 1000ms
         label = "ringSize",
     )
     Box(contentAlignment = Alignment.Center) {
@@ -757,7 +815,7 @@ private fun BottomActionRow(
     onSendFileClick: () -> Unit,
     onChooseReceiveDir: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { // v0.5.1a-5：动作行行距加大
         // T3 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
         val canSend = engine != null &&
             (engine.transportPeerIp.isNotBlank() || ui.devices.values.any { it.handshake != null })
@@ -766,7 +824,7 @@ private fun BottomActionRow(
                 onClick = onSendFileClick,
                 enabled = canSend,
             ) { Text("发送文件") }
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(12.dp)) // v0.5.1a-5：按钮/文字不紧贴
             Text(
                 text = if (engine != null && engine.transportPeerIp.isNotBlank()) {
                     "目标: ${engine.transportPeerIp}"
@@ -845,7 +903,7 @@ private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(8.dp)) // v0.5.1a-5：时间流标题与列表间距加大
         TimeFlowList(ui, Modifier.fillMaxSize())
     }
 }

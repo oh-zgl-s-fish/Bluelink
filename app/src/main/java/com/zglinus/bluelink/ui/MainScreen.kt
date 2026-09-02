@@ -412,64 +412,83 @@ private fun SelfDevicePane(
         modifier = Modifier
             .fillMaxSize()
             .padding(SpacingTokens.SpaceLg),
-        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
+        // v0.5.5a-①：顶部卡内字段间距 12→8dp 回退紧凑（v0.5.1a-⑤ 曾 6→12 加大；窄栏 1/3 时压缩不溢出）
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
     ) {
-        Text(
-            text = "本端设备",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = ui.selfCard.alias.ifBlank { "本机" },
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = ui.selfCard.model,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        ui.selfCard.batteryPct?.let {
-            Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
-        }
-        Text(
-            text = ui.selfCard.netText.ifBlank { "未连接网络" },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = if (ui.advertising) "广播中 · 扫描中" else "广播已停止",
-            style = MaterialTheme.typography.bodySmall,
-            color = if (ui.advertising) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
-        ui.advertiserError?.let {
+        // v0.5.5a-①：字段区 weight(1f)+verticalScroll 允许收缩——窄栏 1/3/大字号下字段超高只滚字段区，
+        // 卡底操作按钮固定、不被 weight 挤压出可视区（1/3 与 1/2 两态均可见）；文本行均 maxLines+Ellipsis
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+        ) {
             Text(
-                text = "广播异常: $it",
+                text = "本端设备",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = ui.selfCard.alias.ifBlank { "本机" },
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = ui.selfCard.model,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            ui.selfCard.batteryPct?.let {
+                Text(
+                    text = "电量 $it%",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                text = ui.selfCard.netText.ifBlank { "未连接网络" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
-        ui.scanError?.let {
             Text(
-                text = "扫描异常: $it",
+                text = if (ui.advertising) "广播中 · 扫描中" else "广播已停止",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                maxLines = 2,
+                color = if (ui.advertising) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            ui.advertiserError?.let {
+                Text(
+                    text = "广播异常: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            ui.scanError?.let {
+                Text(
+                    text = "扫描异常: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        Spacer(Modifier.weight(1f))
         TextButton(
             onClick = onRefreshNetwork,
             modifier = Modifier.fillMaxWidth(),
@@ -709,65 +728,84 @@ private fun PeerDevicePane(
         modifier = Modifier
             .fillMaxSize()
             .padding(SpacingTokens.SpaceLg),
-        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
+        // v0.5.5a-①：顶部卡内字段间距 12→8dp 回退紧凑（窄栏/1/2 态压缩不溢出）
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "对端设备",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f),
-            )
-            val status = peer?.statusText ?: "未连接"
-            // 状态徽标三档 token 对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant；
-            // icon（点）+ label + token 双通道，不以色 alone 表达状态（小件 8dp 徽章保留）
-            val (statusContainer, statusContent) = when (status) {
-                "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
-                "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-                else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
-            }
-            Surface(
-                shape = MaterialTheme.shapes.small,
-                color = statusContainer,
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
-                    verticalAlignment = Alignment.CenterVertically,
+        // v0.5.5a-①：内容区（标题行/字段）weight(1f)+verticalScroll 允许收缩——超高只滚内容区，
+        // 卡底操作按钮（重新扫描/直连）固定、不被 weight 挤压出可视区（1/2 态与窄屏均可见）
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "对端设备",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val status = peer?.statusText ?: "未连接"
+                // 状态徽标三档 token 对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant；
+                // icon（点）+ label + token 双通道，不以色 alone 表达状态（小件 8dp 徽章保留）
+                val (statusContainer, statusContent) = when (status) {
+                    "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
+                    "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = statusContainer,
                 ) {
-                    StatusDot(color = statusContent)
-                    Spacer(Modifier.width(SpacingTokens.SpaceXs))
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusContent,
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StatusDot(color = statusContent)
+                        Spacer(Modifier.width(SpacingTokens.SpaceXs))
+                        Text(
+                            text = status,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = statusContent,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
+            Text(
+                text = peer?.alias ?: "未知设备",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = peer?.model ?: "—",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            peer?.batteryPct?.let {
+                Text(
+                    text = "电量 $it%",
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                text = peer?.netText ?: "网络未知",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Text(
-            text = peer?.alias ?: "未知设备",
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = peer?.model ?: "—",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        peer?.batteryPct?.let {
-            Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
-        }
-        Text(
-            text = peer?.netText ?: "网络未知",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.weight(1f))
         OutlinedButton(
             onClick = {
                 // v0.5.1a-2：重新扫描 = 退出对端视图回设备选择列表（pairedView=false）+ 触发 rescan；状态进时间流
@@ -789,6 +827,8 @@ private fun PeerDevicePane(
                 text = "需先完成 PIN 配对验证（对端输入配对码）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

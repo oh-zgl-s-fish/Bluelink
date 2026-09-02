@@ -122,8 +122,9 @@ import kotlin.random.Random
  * wifi=true、双方 ssid 非空且相等、[SameLanChecker.isSameLan] 子网一致）——同网 → **跳过仲裁/热点/
  * offer 全流程**，直接 [onTransportReadyInternal]（对端握手 net.ip）起 LocalSend 服务免热点
  * TRANSPORT（双方各自起 Server 互连，无协调冲突）；probeTcp(peerIp, 53317) 后台线程异步执行
- * （成功 → 确认「直连可达」；失败 → 仅提示「直连不可达（可能 AP 隔离）」不阻断——对端服务可能
- * 尚未监听，probe 容忍）；异网 → 现状（仲裁 + 热点逐级）不动；收尾沿用 v0.4.6 B4 温和收尾
+ * （首次延迟 ≥2s 待对端服务监听就绪，成功 → 确认「直连可达」；失败 → 文案中性化：不进
+ * transferState 主提示/不显示错误态，仅时间流记「直连探测未通（对端服务未就绪/AP 隔离），传输仍可用」
+ * ——probe 不阻断语义不变，v0.5.5a-②）；异网 → 现状（仲裁 + 热点逐级）不动；收尾沿用 v0.4.6 B4 温和收尾
  * （[endSameLanDirect] 同网直连收尾只停服务 + 复位，BLE 会话/广播/扫描保留）。
  *
  * v0.4.8 A6 Wi-Fi 变化监听：从机未走 Specifier（系统弹窗被忽略 / 用户手动连了热点）时——
@@ -1290,9 +1291,11 @@ class BluelinkEngine(private val context: Context) {
      * A8 同网免热点直连（startNetworking 同网分支）：**跳过仲裁/热点/offer 全流程**——
      * 直接 [onTransportReadyInternal]（起 LocalSendServer + 接收轮询）进入 TRANSPORT，
      * peerIp=对端握手 net.ip（握手时刻采集，同网判定已过即固化，无需等 offer）；
-     * probeTcp(peerIp, 53317) 后台线程异步执行：成功 → 确认「直连可达」；失败 → 仍进入传输
-     * （同网判定已过，probe 仅提示「直连不可达（可能 AP 隔离）」不阻断——对端 LocalSend 服务
-     * 可能尚未监听，probe 容忍：多次重试 + 失败不阻断）。
+     * probeTcp(peerIp, 53317) 后台线程异步执行（v0.5.5a-②：首次延迟 ≥2s——同网直连双方各自
+     * onTransportReadyInternal 起 Server 为毫秒级，先延迟覆盖对端 LocalSendServer 已监听，避免
+     * 「对端尚未监听即探 → 必败误报」；成功 → 确认「直连可达」；失败 → 文案中性化：不进 transferState
+     * 主提示（保持「同网直连：传输就绪」不被覆盖/不显示错误态），仅时间流记
+     * 「直连探测未通（对端服务未就绪/AP 隔离），传输仍可用」——probe 不阻断传输语义不变）。
      * 边界：双方同时判同网同时直连 → 无协调冲突（各自起 Server，端口各自本机 53317，互连即可）。
      */
     private fun startSameLanDirect(hs: HandshakeMessage) {
@@ -1312,38 +1315,60 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "A8 同网直连：对端握手 net.ip 为空，跳过 probeTcp（无可探测地址）")
             return
         }
-        // probe 异步（后台线程真实 TCP 探测，不阻塞主线程；失败不阻断传输）
+        // probe 异步（后台线程真实 TCP 探测，不阻塞主线程；失败不阻断传输、不覆盖 transferState）
         Thread({
+            // v0.5.5a-②：首次探测延迟 ≥2s（SAME_LAN_PROBE_INITIAL_DELAY_MS）——同网直连双方各自
+            // onTransportReadyInternal 起 Server 为毫秒级，但 BLE 握手/组网触发时序下对端 LocalSendServer
+            // 可能稍后才监听；原先「立即探测」在对端尚未监听时必败 → 误报「直连探测未通」。2s 延迟基本
+            // 覆盖对端监听就绪（若真 AP 隔离仍失败——仅记录，语义不变）。
             var reachable = false
-            for (attempt in 1..SAME_LAN_PROBE_ATTEMPTS) {
-                if (SameLanChecker.probeTcp(peerIp, Constants.DEFAULT_TCP_PROBE_PORT, SAME_LAN_PROBE_TIMEOUT_MS)) {
-                    reachable = true
-                    break
+            var attempt = 0
+            var attemptsMade = 0
+            while (attempt < SAME_LAN_PROBE_ATTEMPTS && !reachable) {
+                if (attempt == 0) {
+                    try {
+                        Thread.sleep(SAME_LAN_PROBE_INITIAL_DELAY_MS)
+                    } catch (ie: InterruptedException) {
+                        break // 线程被中断（收尾中）：放弃探测
+                    }
                 }
-                if (attempt < SAME_LAN_PROBE_ATTEMPTS) {
+                attemptsMade++
+                reachable = SameLanChecker.probeTcp(
+                    peerIp,
+                    Constants.DEFAULT_TCP_PROBE_PORT,
+                    SAME_LAN_PROBE_TIMEOUT_MS,
+                )
+                if (!reachable && attempt < SAME_LAN_PROBE_ATTEMPTS - 1) {
                     try {
                         Thread.sleep(SAME_LAN_PROBE_RETRY_DELAY_MS)
                     } catch (ie: InterruptedException) {
                         break
                     }
                 }
-            }
-            val result = if (reachable) {
-                "✅ 直连可达（probeTcp $peerIp:${Constants.DEFAULT_TCP_PROBE_PORT} 成功）"
-            } else {
-                "直连不可达（可能 AP 隔离或对端服务尚未监听，probe 仅提示不阻断）"
+                attempt++
             }
             mainHandler.post {
-                // 不覆盖进行中的发送/接收进度：仅当仍处于直连就绪文案时回写 probe 结果
-                val cur = ui.transferState
-                if (cur == null || cur.startsWith("同网直连：传输就绪")) {
-                    ui.transferState = if (reachable) {
-                        "同网直连：传输就绪（免热点）·直连可达"
-                    } else {
-                        "同网直连：传输就绪（免热点）·直连探测未通（可能 AP 隔离）"
+                if (reachable) {
+                    // 成功 → 增强确认：仅当仍处于直连就绪文案时回写（不覆盖进行中的发送/接收进度）
+                    val cur = ui.transferState
+                    if (cur == null || cur.startsWith("同网直连：传输就绪")) {
+                        ui.transferState = "同网直连：传输就绪（免热点）·直连可达"
                     }
+                    DiagLogger.log(
+                        TAG,
+                        "A8 同网直连 probe 结果：✅ 直连可达（probeTcp $peerIp:${Constants.DEFAULT_TCP_PROBE_PORT} 成功）",
+                    )
+                } else {
+                    // v0.5.5a-② 失败文案中性化：不进 ui.transferState 主提示（transferState 保持
+                    // 「同网直连：传输就绪（免热点）」绿态不被「未通」覆盖、不显示错误条），仅时间流 + 日志
+                    // 记录——probe 不阻断传输语义不变（同网判定已过，探测仅辅助，对端服务未就绪/AP 隔离）。
+                    logUiEvent(EVT_INFO, "直连探测未通（对端服务未就绪/AP 隔离），传输仍可用")
+                    DiagLogger.log(
+                        TAG,
+                        "A8 同网直连 probe 结果：直连探测未通（probeTcp $peerIp:${Constants.DEFAULT_TCP_PROBE_PORT} " +
+                            "${attemptsMade} 次 × ${SAME_LAN_PROBE_TIMEOUT_MS}ms 均失败），仅记录不阻断、不覆盖 transferState",
+                    )
                 }
-                DiagLogger.log(TAG, "A8 同网直连 probe 结果：$result")
             }
         }, "samelan-direct-probe").apply { isDaemon = true }.start()
     }
@@ -2644,6 +2669,13 @@ class BluelinkEngine(private val context: Context) {
 
         /** A8 同网直连：probe 重试间隔（ms；给对端 LocalSend 服务启动留时间）。 */
         private const val SAME_LAN_PROBE_RETRY_DELAY_MS = 1_000L
+
+        /**
+         * A8 同网直连（v0.5.5a-②）：probe 首次延迟（ms）——同网直连双方各自 onTransportReadyInternal
+         * 起 LocalSendServer 为毫秒级，但 BLE 握手/组网触发时序下对端监听可能稍后才就绪；
+         * 首次延迟 ≥2s 基本覆盖对端 Server 已监听（避免「对端未监听即探 → 必败」误报）。
+         */
+        private const val SAME_LAN_PROBE_INITIAL_DELAY_MS = 2_000L
 
         /** A6 Wi-Fi 监听：命中后取 IP 的短延迟重试间隔（ms；对齐 WifiJoiner IP_POLL_INTERVAL_MS）。 */
         private const val WIFI_MONITOR_IP_RETRY_INTERVAL_MS: Long = 500L

@@ -79,6 +79,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -293,7 +294,9 @@ fun MainScreen(
 /** 顶栏（v0.5.6 UI1b-A）：左侧 Text 应用名「蓝鲸·X」（titleLarge/语义色 primary）；右侧 ☰（开抽屉，
  *  contentDescription「打开菜单」已备——由导航槽位移至此）+ 广播开关（置顶栏）。
  * v0.5.6b：广播开关 Switch → 呼吸圆钮 [BroadcastBreathButton]（开=绿底呼吸/关=灰底静止；
- * 减动效静止；语义保持 role=Switch + stateDescription「广播开启/广播停止」）。 */
+ * 减动效静止；语义保持 role=Switch + stateDescription「广播开启/广播停止」）。
+ * v0.5.6c：M3 1.4 无导航槽 TopAppBar 不把 actions 槽推到右缘（实机 ☰ 居中偏左）→ 弃用 actions 槽：
+ * 标题与右侧组并入同一条 fillMaxWidth Row，标题后 Spacer(weight(1f)) 吸余宽 → 右侧组贴右缘、☰ 在右上。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTopBar(
@@ -302,18 +305,23 @@ private fun MainTopBar(
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onMenuClick: () -> Unit,
 ) {
+    // v0.5.6c：整条顶栏内容并入 title 槽的单 Row（fillMaxWidth 占满）——标题后 Spacer(weight(1f))
+    // 吸收余宽，右侧组（状态字+呼吸钮+☰）整体贴右缘；☰ 为最末子项 → 恒在最右端（右上）。
     TopAppBar(
         title = {
-            Text(
-                text = "蓝鲸·X",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        actions = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "蓝鲸·X",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // v0.5.6c：标题（左）与右侧控件组之间 Spacer 占满剩余宽度 → 右侧组被推到屏幕右缘
+                Spacer(Modifier.weight(1f))
                 Text(
                     text = if (advertisingWanted) "广播" else "停止",
                     style = MaterialTheme.typography.labelSmall,
@@ -324,7 +332,7 @@ private fun MainTopBar(
                     reduceMotion = reduceMotion,
                     onAdvertisingWantedChange = onAdvertisingWantedChange,
                 )
-                // v0.5.6 UI1b-A：☰ 自导航槽位移至右侧（左侧让位应用名）；字形 + contentDescription 保持具名（audit A1/K3）
+                // v0.5.6 UI1b-A：☰ 自导航槽位移至右侧组最末位（☰ 贴最右端）；字形 + contentDescription 保持具名（audit A1/K3）
                 IconButton(onClick = onMenuClick) {
                     Text(
                         text = "☰",
@@ -339,16 +347,19 @@ private fun MainTopBar(
 /**
  * 广播呼吸圆钮（v0.5.6b：顶栏广播 Switch → 自定义圆钮；docs 原「广播/扫描开关」中广播侧换控件，
  * 扫描无独立开关控件——扫描随广播开关联动，未动）。
+ * v0.5.6c：呼吸由「透明度 0.5↔1 变化」改为「尺寸缩放 0.9↔1.08」（实机反馈要大小变化而非透明度变化）——
+ * 动画改驱动 graphicsLayer scaleX/scaleY（transformOrigin 默认中心 → 圆钮中心缩放）；alpha 段删除、底色恒不透明。
  *
  * - 开（advertisingWanted=true）：绿底 = extended.success / onSuccess 白点（success 语义对 + 中心点/相邻文字双通道）；
- *   呼吸动画：rememberInfiniteTransition 驱动 alpha 0.5↔1 往复（单程 tween DurationPulse/2=650ms、Reverse
+ *   呼吸动画：rememberInfiniteTransition 驱动 scale 0.9↔1.08 往复（单程 tween DurationPulse/2=650ms、Reverse
  *   全周期 = MotionTokens.DurationPulse 1300ms 脉冲档；无 delay，往返平滑无跳变）；
- * - 减动效（ui.reduceMotion=true，P2-1/M1 豁免）：不创建动画 → 静止绿（alpha 恒 1，动画节点不挂载、零开销）；
+ * - 减动效（ui.reduceMotion=true，P2-1/M1 豁免）：不创建动画 → 静止 scale=1f（动画节点不挂载、零开销）；
  * - 关（advertisingWanted=false）：surfaceVariant 灰底静止、中心点 onSurfaceVariant 置灰、无动画；
  * - 语义保持（audit A2/P2-2 原 Switch 语义）：clickable(role=Role.Switch) 承接切换（读屏按开关播报），
  *   semantics stateDescription「广播开启/广播停止」；点击沿用既有 onAdvertisingWantedChange 回调
  *   （BluelinkRoot → engine.setAdvertisingWanted，见 BluelinkRoot LaunchedEffect(advertisingWanted)）。
- * - 触达：外命中区 48dp（audit ≥48×48），内 30dp 圆钮视觉居中。
+ * - 触达：外命中区 48dp（audit ≥48×48），内 30dp 圆钮视觉居中（scale 仅作用于内层视觉圆钮，
+ *   外层 48dp 命中区不缩放 → 触达尺寸恒定满足 audit）。
  */
 @Composable
 private fun BroadcastBreathButton(
@@ -367,13 +378,14 @@ private fun BroadcastBreathButton(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant // 点置灰
     }
-    // 呼吸循环（reduced-motion 分支）：仅「开」且非减动效才挂载 rememberInfiniteTransition；
-    // 关/减动效 → 静止 alpha=1f（不创建动画节点，符合 P2-1/M1：减动效无无限重复动画）
-    val breathAlpha = if (advertisingWanted && !reduceMotion) {
+    // 呼吸循环（v0.5.6c 透明度→尺寸呼吸；reduced-motion 分支不变）：仅「开」且非减动效才挂载 rememberInfiniteTransition；
+    // 关/减动效 → 静止 scale=1f（不创建动画节点，符合 P2-1/M1：减动效无无限重复动画）
+    val breathScale = if (advertisingWanted && !reduceMotion) {
         val pulse = rememberInfiniteTransition(label = "broadcastBreath")
-        val alpha by pulse.animateFloat(
-            initialValue = 1f,
-            targetValue = 0.5f,
+        val scale by pulse.animateFloat(
+            // v0.5.6c：幅度 0.9↔1.08（围绕名义尺寸放大/缩小，视觉明显；原 alpha 0.5↔1 透明度段已删）
+            initialValue = 0.9f,
+            targetValue = 1.08f,
             animationSpec = infiniteRepeatable(
                 animation = tween(
                     // 单程 650ms；RepeatMode.Reverse 往返 → 全周期 = MotionTokens.DurationPulse(1300ms 脉冲档)
@@ -382,9 +394,9 @@ private fun BroadcastBreathButton(
                 ),
                 repeatMode = RepeatMode.Reverse,
             ),
-            label = "broadcastBreathAlpha",
+            label = "broadcastBreathScale",
         )
-        alpha
+        scale
     } else {
         1f
     }
@@ -401,12 +413,17 @@ private fun BroadcastBreathButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 圆钮视觉（30dp）：呼吸 alpha 走底色（copy(alpha)），中心点保持不透明高对比
+        // 圆钮视觉（30dp）：v0.5.6c 呼吸改走 scale——graphicsLayer 默认 transformOrigin=中心 → 圆钮中心缩放；
+        // scale 只作用于内层视觉圆钮，外层 48dp 命中区不缩放（触达 audit 恒定）；底色恒不透明（alpha 段已删）
         Box(
             modifier = Modifier
                 .size(MetricTokens.AdvertiseKnob)
+                .graphicsLayer {
+                    scaleX = breathScale
+                    scaleY = breathScale
+                }
                 .clip(CircleShape)
-                .background(backgroundColor.copy(alpha = breathAlpha)),
+                .background(backgroundColor),
             contentAlignment = Alignment.Center,
         ) {
             // 中心小圆点（8dp，语义图形 ≥8dp audit S6）

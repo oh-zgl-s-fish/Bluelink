@@ -98,10 +98,17 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿）：
- * v0.5.4a 全 App 扁平化：无任何内容型卡片/容器/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层；
- * 仅浮层（ModalBottomSheet/AlertDialog/抽屉）保留面板背景（必须压住背景），圆角归 10dp
- * （ShapeTokens.Modal，接线见 theme/BluelinkTheme.kt）；小件（badge/按钮/输入框）保持 8dp（shapes.small）。
+ * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿；
+ * v0.5.4b 去阴影 + surfaceContainer 容器分层）：
+ * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
+ * v0.5.4b 保持「无 elevation（不设阴影）/无边框」的扁平观感，改以 surfaceContainer 系列容器分层表达各内容区：
+ * - surfaceContainerLowest（最贴近背景、弱层次）：设置分组容器、设备详情弹层正文、底部动作行/流程信息行（页内常规内容块）；
+ * - surfaceContainerLow / surfaceContainer（主层次）：本端设备区、对端扫描列表、时间流/记录列表、横幅提示；
+ * - surfaceContainerHigh（仅个别、强调浮起）：配对后对端设备区；
+ * - 徽章（8dp 小件）保持 token 双通道（successContainer/primaryContainer/surfaceVariant 对，shapes.small=8）；
+ *   浮层面板（ModalBottomSheet/AlertDialog/抽屉）本体由系统 MaterialTheme surface 提供（不动）。
+ * 块级容器圆角 10dp（MaterialTheme.shapes.large = ShapeTokens.Modal，接线见 theme/BluelinkTheme.kt），
+ * 小件（badge/按钮/输入框）保持 8dp（shapes.small）；容器一律 Surface(color=…) 不设 elevation（无阴影）、无边框。
  * - 布局（两态）：顶部左右两栏——配对前 1/3|2/3（左「本端设备区」、右「对端扫描列表」LazyColumn，
  *   长按或 × 清除失效设备），配对/会话建立后 1/2|1/2（左本端、右对端区：alias/电量/网络/状态 +
  *   重新扫描 + 组网/同网直连按钮）；宽度切换用 [animateFloatAsState] 驱动 Row weight；
@@ -369,16 +376,24 @@ private fun MainPage(
     }
 }
 
-/** 本端设备区（左栏；配对前 1/3、配对后 1/2，宽度由外层 Row weight 动画驱动；v0.5.4a 平铺无容器）。 */
+/** 本端设备区（左栏；配对前 1/3、配对后 1/2，宽度由外层 Row weight 动画驱动；v0.5.4b surfaceContainerLow 容器分层）。 */
 @Composable
 private fun SelfDevicePane(
     ui: BluelinkUiState,
     onRefreshNetwork: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // v0.5.4a：去除 OutlinedCard 容器——内容直接平铺 surface 背景；区块靠留白与字段间距分层
+    // v0.5.4b 映射：本端设备区＝次级/主层次块 → surfaceContainerLow；无 elevation（不设阴影）、无边框；
+    // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal，theme 接线见 BluelinkTheme.kt）
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+    ) {
     Column(
-        modifier = modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(SpacingTokens.SpaceLg),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
     ) {
         Text(
@@ -442,17 +457,27 @@ private fun SelfDevicePane(
             modifier = Modifier.fillMaxWidth(),
         ) { Text("刷新网络") }
     }
+    }
 }
 
-/** 对端扫描列表（右栏，配对前 2/3）：LazyColumn 上下滑动；点击设备握手；长按/× 清除失效设备。 */
+/** 对端扫描列表（右栏，配对前 2/3，v0.5.4b surfaceContainerLow 列表容器分层）：LazyColumn 上下滑动；点击设备握手；长按/× 清除失效设备。 */
 @Composable
 private fun ScanListPanel(
     ui: BluelinkUiState,
     onDeviceClick: (DeviceEntry) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    // v0.5.4b 映射：对端扫描列表（列表容器保留）＝次级/主层次块 → surfaceContainerLow；
+    // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
         modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+    ) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(SpacingTokens.SpaceLg),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm), // v0.5.1a-5：标题/提示/列表间留白
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -494,6 +519,7 @@ private fun ScanListPanel(
                 }
             }
         }
+    }
     }
 }
 
@@ -644,7 +670,7 @@ private fun LanStatusLine(lanStatus: LanStatus, modifier: Modifier = Modifier) {
     }
 }
 
-/** 对端设备区（配对后右栏 1/2）：alias/电量/网络 + 状态「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮；v0.5.4a 平铺无容器。 */
+/** 对端设备区（配对后右栏 1/2，v0.5.4b surfaceContainerHigh 强调分层）：alias/电量/网络 + 状态「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮。 */
 @Composable
 private fun PeerDevicePane(
     ui: BluelinkUiState,
@@ -652,9 +678,17 @@ private fun PeerDevicePane(
     modifier: Modifier = Modifier,
 ) {
     val peer = ui.selectedDevice
-    // v0.5.4a：去除 OutlinedCard 容器——内容直接平铺 surface 背景；区块靠留白与字段间距分层
+    // v0.5.4b 映射：配对后对端卡＝需强调/浮起块（仅个别） → surfaceContainerHigh；
+    // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = MaterialTheme.shapes.large,
+    ) {
     Column(
-        modifier = modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(SpacingTokens.SpaceLg),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd), // v0.5.1a-5：区内字段间距 ≥ 12dp
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -738,6 +772,7 @@ private fun PeerDevicePane(
             )
         }
     }
+    }
 }
 
 // v0.5.4a：主页流程动画区已移除——配网进度（握手→PIN→组网）一律在极简弹窗 NetPairingDialog 展示；
@@ -766,7 +801,7 @@ private fun shortNetStage(state: String): String = when {
 
 
 
-/** 底部动作行：发送文件（入口）/ 收尾按钮（结束组网/结束直连/关闭热点/断开网络/取消）/ 接收保存位置。 */
+/** 底部动作行（v0.5.4b surfaceContainerLowest 容器分层）：发送文件（入口）/ 收尾按钮（结束组网/结束直连/关闭热点/断开网络/取消）/ 接收保存位置。 */
 @Composable
 private fun BottomActionRow(
     ui: BluelinkUiState,
@@ -774,7 +809,19 @@ private fun BottomActionRow(
     onSendFileClick: () -> Unit,
     onChooseReceiveDir: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) { // v0.5.1a-5：动作行行距加大
+    // v0.5.4b 映射：底部动作行（含流程信息行 transferState、接收目录行）＝页内常规内容块 → surfaceContainerLowest；
+    // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        shape = MaterialTheme.shapes.large,
+    ) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceSm),
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+    ) { // v0.5.1a-5：动作行行距加大
         // T3 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
         val canSend = engine != null &&
             (engine.transportPeerIp.isNotBlank() || ui.devices.values.any { it.handshake != null })
@@ -844,26 +891,39 @@ private fun BottomActionRow(
             }
         }
     }
+    }
 }
 
-/** 时间流面板（主页面最下）：标题 + 条数 + [TimeFlowList]。 */
+/** 时间流面板（主页面最下，v0.5.4b surfaceContainerLow 列表容器分层）：标题 + 条数 + [TimeFlowList]。 */
 @Composable
 private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
-    Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "时间流",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = "${ui.eventLog.size} 条",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    // v0.5.4b 映射：时间流＝列表容器（主层次） → surfaceContainerLow；无 elevation（不设阴影）、无边框；
+    // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(SpacingTokens.SpaceLg),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "时间流",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "${ui.eventLog.size} 条",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(SpacingTokens.SpaceSm)) // v0.5.1a-5：时间流标题与列表间距加大
+            TimeFlowList(ui, Modifier.fillMaxSize())
         }
-        Spacer(Modifier.height(SpacingTokens.SpaceSm)) // v0.5.1a-5：时间流标题与列表间距加大
-        TimeFlowList(ui, Modifier.fillMaxSize())
     }
 }
 
@@ -935,7 +995,7 @@ private fun EventRow(ev: EventItem) {
     }
 }
 
-/** 记录页（抽屉 3）：全屏时间流（复用 [TimeFlowList]）。 */
+/** 记录页（抽屉 3）：全屏时间流（复用 [TimeFlowList]；v0.5.4b surfaceContainerLow 列表容器分层）。 */
 @Composable
 private fun LogPage(ui: BluelinkUiState) {
     Column(
@@ -952,11 +1012,24 @@ private fun LogPage(ui: BluelinkUiState) {
             TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
         }
         Spacer(Modifier.height(SpacingTokens.SpaceSm))
-        TimeFlowList(ui, Modifier.fillMaxSize())
+        // v0.5.4b 映射：记录列表＝列表容器（主层次） → surfaceContainerLow；无 elevation（不设阴影）、无边框；
+        // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = MaterialTheme.shapes.large,
+        ) {
+            TimeFlowList(
+                ui,
+                Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = SpacingTokens.SpaceSm),
+            )
+        }
     }
 }
 
-/** 设置页（抽屉 4）：PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此）。 */
+/** 设置页（抽屉 4；v0.5.4b 设置分组容器＝surfaceContainerLowest）：PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此）。 */
 @Composable
 private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
     // 破坏性动作显式确认（audit K12/P1-1）：清除配对列表先弹确认框，确认后才执行
@@ -976,7 +1049,19 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
             )
             TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
         }
-        HorizontalDivider()
+        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.4b：页面标题与分组容器间距（区块 ≥12dp）
+        // v0.5.4b 映射：设置分组容器＝页内常规内容块 → surfaceContainerLowest；
+        // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）；
+        // 组内各分节（PIN/信令自测/LocalOnly 自测/诊断）仍以 HorizontalDivider 分隔（audit K11 容器内分节）
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            shape = MaterialTheme.shapes.large,
+        ) {
+        Column(
+            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+        ) {
         if (engine == null) {
             Text(
                 text = "引擎未就绪",
@@ -1116,6 +1201,8 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
         // ============ 诊断 ============
         Text("诊断", style = MaterialTheme.typography.titleSmall)
         TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
+        }
+        }
     }
 
     // 清除配对列表确认框（audit K12/P1-1）：破坏性操作显式、防误触；确认才执行 engine.clearPairedDevices()
@@ -1217,39 +1304,59 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
     }
 }
 
-/** 权限提示行（未授权时置顶；v0.5.4a 平铺：去 Card 容器，error 点 + 文案双通道）。 */
+/** 权限提示行（未授权时置顶；v0.5.4b 横幅容器：surfaceContainer，无 elevation、无边框，块级圆角 10）。 */
 @Composable
 private fun PermissionBanner(onRequestPermissions: () -> Unit) {
-    Row(
+    // v0.5.4b 映射：横幅＝提示块（主层次） → surfaceContainer；无 elevation（不设阴影）、无边框；
+    // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = MaterialTheme.shapes.large,
     ) {
-        StatusDot(color = MaterialTheme.colorScheme.error)
-        Spacer(Modifier.width(SpacingTokens.SpaceSm))
-        Text(
-            text = "需要权限: 蓝牙 + 位置",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.error,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = onRequestPermissions) { Text("去授权") }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceSm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusDot(color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(SpacingTokens.SpaceSm))
+            Text(
+                text = "需要权限: 蓝牙 + 位置",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onRequestPermissions) { Text("去授权") }
+        }
     }
 }
 
-/** 蓝牙未开提示（不自动开，仅提示；v0.5.4a 平铺无容器）。 */
+/** 蓝牙未开提示（不自动开，仅提示；v0.5.4b 横幅容器：surfaceContainer，无 elevation、无边框，块级圆角 10）。 */
 @Composable
 private fun BluetoothOffBanner() {
-    Row(
+    // v0.5.4b 映射：横幅＝提示块（主层次） → surfaceContainer；无 elevation（不设阴影）、无边框；
+    // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = MaterialTheme.shapes.large,
     ) {
-        StatusDot(color = MaterialTheme.colorScheme.tertiary)
-        Spacer(Modifier.width(SpacingTokens.SpaceSm))
-        Text(
-            text = "请在系统设置开启蓝牙",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceSm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusDot(color = MaterialTheme.colorScheme.tertiary)
+            Spacer(Modifier.width(SpacingTokens.SpaceSm))
+            Text(
+                text = "请在系统设置开启蓝牙",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -1325,7 +1432,8 @@ private fun EmptyState(ui: BluelinkUiState) {
 }
 
 /**
- * 设备详情弹层：握手详情 JSON 渲染 + 同网判定结果 + A5 组网入口/阶段/结束。
+ * 设备详情弹层：握手详情 JSON 渲染 + 同网判定结果 + A5 组网入口/阶段/结束（v0.5.4b：弹层正文用
+ * surfaceContainerLowest 分组容器分层；浮层面板本体由系统 ModalBottomSheet surface 提供，不动）。
  *
  * A5 组网状态经 [BluelinkEngine.current()]（companion 单例，init 注册 / release 注销）读取：
  * 保持 BluelinkRoot 零改动以符合「3 文件」改动范围，engine 与 UI 同包无需 import。
@@ -1359,8 +1467,20 @@ fun DeviceDetailSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            HorizontalDivider()
-
+            // v0.5.4b 映射：设备详情弹层正文（同网判定 / A5 组网 / 握手详情分节）＝弹层内页级常规内容块
+            // → surfaceContainerLowest；无 elevation（不设阴影）、无边框；块级圆角 10
+            //（MaterialTheme.shapes.large = ShapeTokens.Modal）；浮层面板本体由系统 ModalBottomSheet surface 提供（不动）
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                shape = MaterialTheme.shapes.large,
+            ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
+                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+            ) {
             Text("同网判定", style = MaterialTheme.typography.titleSmall)
             // 同网判定：icon（点）+ label + token（audit P1-4/C7：emoji 字形 → 语义点；色不单独表状态）
             val (lanLabel, lanDetail, lanColor) = when (entry.lanStatus) {
@@ -1457,6 +1577,8 @@ fun DeviceDetailSheet(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            }
             }
 
             Spacer(Modifier.height(SpacingTokens.SpaceSm))

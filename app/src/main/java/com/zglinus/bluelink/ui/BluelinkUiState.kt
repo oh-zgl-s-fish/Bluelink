@@ -251,11 +251,20 @@ class BluelinkUiState {
     /**
      * 抽屉路由当前页（v0.5.6 UI1b-A 导航重排后取值见 companion PAGE_* 常量，调用处勿再写数字字面量）：
      * [PAGE_HOME]=主页面（默认页，不列抽屉项）/ [PAGE_LOG]=文件传输记录（记录页/全屏事件流）/
-     * [PAGE_PERSONAL]=个性化（占位，UI1b-B 实现中）/ [PAGE_SETTINGS]=设置（后续扩展设备项）/
+     * [PAGE_PERSONAL]=个性化（v0.5.7 UI1b-B 真页，见 ui/personalize/PersonalizePage.kt）/ [PAGE_SETTINGS]=设置（后续扩展设备项）/
      * [PAGE_ABOUT]=关于（占位页：App 名/版本/README 摘要）。旧 1=发送 2=接收 5=权限 已移除——
      * 发送/接收已并入主页面操作与设置页、权限并入设置页（后续）。
      */
     var currentPage by mutableStateOf(PAGE_HOME)
+
+    // ============ v0.5.7 UI1b-B：个性化壁纸（主页面背景应用；纯 UI 存储层，引擎不动） ============
+
+    /**
+     * 壁纸背景刷新信号：PersonalizePage 三壁纸槽/遮罩/强调色（含清除）改动后 +1，
+     * MainScreen 根背景 [WallpaperBackdrop]（ui/personalize/WallpaperBackdrop.kt）与页面本体重读
+     * [WallpaperStore] 重绘。解码以槽内容（type+uri）为 key——遮罩/强调色变化不触发重复解码。
+     */
+    var wallpaperTick by mutableStateOf(0)
 
     // ============ v0.5.5 P2：动效 / 无障碍 / 反馈 ============
 
@@ -286,7 +295,7 @@ class BluelinkUiState {
         /** 抽屉路由：文件传输记录（记录页 LogPage / 全屏事件流，复用 [com.zglinus.bluelink.ui.MainScreen] LogPage）。 */
         const val PAGE_LOG = 1
 
-        /** 抽屉路由：个性化（新占位页，UI1b-B 实现中）。 */
+        /** 抽屉路由：个性化（v0.5.7 UI1b-B 真页，ui/personalize/PersonalizePage.kt：三壁纸槽/遮罩/取色/预览 + 主页面背景应用）。 */
         const val PAGE_PERSONAL = 2
 
         /** 抽屉路由：设置（SettingsPage，后续扩展设备项）。 */

@@ -104,6 +104,9 @@ import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
+import com.zglinus.bluelink.ui.personalize.PersonalizePage
+import com.zglinus.bluelink.ui.personalize.WallpaperBackdrop
+import com.zglinus.bluelink.ui.personalize.WallpaperStore
 import com.zglinus.bluelink.ui.theme.MetricTokens
 import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
@@ -119,8 +122,9 @@ import java.util.Locale
  * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿；
  * v0.5.4b 去阴影 + surfaceContainer 容器分层；v0.5.5c edge-to-edge 沉浸（Scaffold 背景铺满 + insets 归 Scaffold，见下方 Scaffold 注释）；
  * v0.5.6 UI1b-A 导航重排：顶栏左侧应用名「蓝鲸·X」/右侧 ☰（原左 ☰ 位移）；抽屉改 4 栏
- * （文件传输记录/个性化/设置/关于，PAGE_* 常量路由）；个性化与关于为新占位页（UI1b-B 实现中 /
- * App 名+版本+README 摘要）；主页面仍为默认页（不列抽屉项））:
+ * （文件传输记录/个性化/设置/关于，PAGE_* 常量路由）；个性化页于 v0.5.7 UI1b-B 实现真页
+ * （三壁纸槽/遮罩/取色/预览 + 主页面背景应用，见 ui/personalize/PersonalizePage.kt 与 WallpaperBackdrop.kt）；
+ * 关于仍为新占位页（App 名+版本+README 摘要）；主页面仍为默认页（不列抽屉项））:
  * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
  * v0.5.4b 保持「无 elevation（不设阴影）/无边框」的扁平观感，改以 surfaceContainer 系列容器分层表达各内容区：
  * - surfaceContainerLowest（最贴近背景、弱层次）：设置分组容器、设备详情弹层正文、底部动作行/流程信息行（页内常规内容块）；
@@ -140,13 +144,31 @@ import java.util.Locale
  * - 抽屉（[ModalNavigationDrawer]，v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+
  *   入口（文件传输记录/个性化/设置/关于）→ 设 [BluelinkUiState.currentPage]（companion PAGE_* 常量，勿写数字）；
  *   主页面为默认页不列项（子页「返回」回主页面）；发送/接收入口已并入主页面操作行与设置页、
- *   权限检测并入设置页（后续）；个性化/关于为新占位页。
+ *   权限检测并入设置页（后续）；个性化已实现（v0.5.7 UI1b-B），关于为占位页。
+ * - v0.5.7 UI1b-B 主页面背景应用：根背景 Box（纯色 background 打底）→ WallpaperBackdrop（壁纸+遮罩，
+ *   按当前系统深浅模式取槽）→ ModalNavigationDrawer/Scaffold（containerColor Transparent）；
+ *   主页面两态/时间流/配网弹窗不动。
  * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测移入
  *   抽屉设置页；发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
  *
  * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页；
  * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
+
+/** v0.5.7 UI1b-B：根背景壁纸层。自订阅 ui.wallpaperTick（槽/遮罩/强调色改动信号），
+ * 避免每次改动重排整个 MainScreen——只在此层与个性化页内重读 [WallpaperStore] 刷新。
+ * 无壁纸时 WallpaperBackdrop 不绘制，露出外层 Box 纯色 background（现状）。 */
+@Composable
+private fun RootWallpaperLayer(ui: BluelinkUiState) {
+    val context = LocalContext.current
+    val wallpaperStore = remember { WallpaperStore(context.applicationContext) }
+    WallpaperBackdrop(
+        store = wallpaperStore,
+        tick = ui.wallpaperTick,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
@@ -194,7 +216,18 @@ fun MainScreen(
         }
     }
 
-    ModalNavigationDrawer(
+    // v0.5.7 UI1b-B 主页面背景应用（App 根背景）：RootWallpaperLayer（自订阅 ui.wallpaperTick）垫在
+    // ModalNavigationDrawer/Scaffold 之下；根背景 Box = 纯色 background 打底（无壁纸回纯色现状）→
+    // WallpaperBackdrop（壁纸 + surfaceVariant 遮罩，按当前深浅模式取槽：深→深槽/浅→浅槽，槽未设→统一槽兜底）；
+    // Scaffold containerColor 改 Transparent 透出背景（TopAppBar/各内容容器自身仍不透明 M3 表面，
+    // 主页面两态/时间流/配网弹窗不动）。
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+    ) {
+        RootWallpaperLayer(ui = ui)
+        ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
             AppDrawer(
@@ -207,8 +240,9 @@ fun MainScreen(
         },
     ) {
         // v0.5.5c edge-to-edge 沉浸（配合 MainActivity.onCreate 的 enableEdgeToEdge；背景铺满说明）：
-        // Scaffold 根 Surface 默认 fillMaxSize + containerColor，铺满整窗（含状态栏/导航条下区域）——
-        // enableEdgeToEdge 后系统栏区域即透出此背景色（浅 #FDFBFF / 深 #111318，随 BluelinkTheme 主题）。
+        // Scaffold 根 Surface 默认 fillMaxSize，铺满整窗（含状态栏/导航条下区域）；v0.5.7 UI1b-B 起
+        // containerColor 改 Transparent——整窗背景由外层根背景 Box（纯色 background 打底）+
+        // WallpaperBackdrop（壁纸+遮罩）提供，enableEdgeToEdge 后系统栏区域透出壁纸氛围层。
         // 内容 insets 全部由 Scaffold 承担，页面内不重复加 statusBarsPadding/navigationBarsPadding（会双重留白）：
         // - 顶部：M3 TopAppBar（MainTopBar）自带 windowInsets = TopAppBarDefaults.windowInsets（含 statusBars），
         //   顶栏背景吃满状态栏、内容自动避开（无需再包 statusBarsPadding）；
@@ -218,8 +252,8 @@ fun MainScreen(
         // - SnackbarHost 亦由 Scaffold 抬升至导航条之上；抽屉/底部弹层/AlertDialog 系统自带 insets 处理。
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
-            // containerColor 显式接线 = 默认值 MaterialTheme.colorScheme.background（整窗背景铺满，见上注释）
-            containerColor = MaterialTheme.colorScheme.background,
+            // v0.5.7 UI1b-B：容器背景 Transparent（壁纸层在 Scaffold 之下透出）；无壁纸时由外层 Box 纯色 background 提供背景色
+            containerColor = Color.Transparent,
             topBar = {
                 MainTopBar(
                     advertisingWanted = advertisingWanted,
@@ -235,7 +269,7 @@ fun MainScreen(
                     .padding(innerPadding),
             ) {
                 // 抽屉路由（v0.5.6 UI1b-A 4 栏重排；取值 BluelinkUiState.PAGE_*，勿写数字）：
-                // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（占位）
+                // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（v0.5.7 UI1b-B 真页）
                 // PAGE_SETTINGS=设置 PAGE_ABOUT=关于（占位）
                 when (ui.currentPage) {
                     BluelinkUiState.PAGE_HOME -> MainPage(
@@ -263,6 +297,7 @@ fun MainScreen(
             }
         }
     }
+    } // ← 关闭根背景 Box（WallpaperBackdrop 层，v0.5.7 UI1b-B；包住 ModalNavigationDrawer）
 
     // 诊断日志弹窗：打开时自动加载一次 dump
     LaunchedEffect(ui.diagVisible) {
@@ -1552,43 +1587,9 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
     }
 }
 
-/** 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.6 UI1b-A 新占位页）：主题/字号/减动效等
- *  个性化项 UI1b-B 实现中——先放「UI1b-B 实现中」文案 + 返回（回主页面）。 */
-@Composable
-private fun PersonalizePage(ui: BluelinkUiState) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(SpacingTokens.SpaceLg),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "个性化",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
-        }
-        Spacer(Modifier.height(SpacingTokens.SpaceMd))
-        // v0.5.4b 映射：占位内容块＝主层次 → surfaceContainerLow；无 elevation（不设阴影）、无边框；块级圆角 10
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-            shape = MaterialTheme.shapes.large,
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "个性化设置 UI1b-B 实现中",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
+// 个性化页（抽屉 2 / PAGE_PERSONAL）自 v0.5.7 UI1b-B 起移至 ui/personalize/PersonalizePage.kt 实现：
+// 三壁纸槽（统一/深色/浅色）+ 遮罩滑块（0–80%）+ 取色区（API27+ 从壁纸取色 + 8 色板 + 选中色 chip）+
+// 预览块（按当前模式取槽渲染：壁纸+遮罩）；路由见 MainScreen 上方 when(ui.currentPage) 分支（本文件不再保留实现）。
 
 // v0.5.6 UI1b-A 关于页版本号：buildConfig 未开启（app/build.gradle.kts buildFeatures 无 buildConfig=true），
 // BuildConfig.VERSION_NAME 不可引 → 以常量同步 versionName（0.1.0）；升级 versionName 时一并更新

@@ -1,7 +1,7 @@
 # 蓝鲸·X（Bluelink）
 
 > **离线 · 端到端 · 无服务器文件传输**：BLE 发现握手 → 同网判定 → 异网自动组网 → LocalSend 协议直传。
-> 状态快照：v0.5.6h（2026-09-02）· 仓库：`github.com/oh-zgl-s-fish/Bluelink`
+> 状态快照：v0.5.7（2026-09-02）· 仓库：`github.com/oh-zgl-s-fish/Bluelink`
 
 Android 8+（API 26+）设备间文件传输客户端。两台设备**不需要任何服务器/账号/互联网**：打开 App 即可被 BLE 发现，扫描握手交换网络信息，自动判断双方是否同网——同网直接传输，异网则由一方自动开启热点（系统预配热点 / LocalOnlyHotspot / 手动四级兜底），另一方自动接入，随后经 **LocalSend v2 协议**（HTTP 53317）完成文件收发。
 
@@ -77,7 +77,6 @@ LocalSend v2：发送（SAF 选文件 → prepare-upload → multipart 流式）
 
 ## 未完成（TODO 摘要）
 
-- **UI1b-B**：个性化页（统一/深色/浅色三壁纸槽、取色区 API27+、遮罩、预览）
 - **UI1b-C**：设置-设备页（PIN 管理/重置指纹、热点密码预设、下载目录、权限检测）+ 全局深浅切换
 - **工程收尾**：移除 LocalOnly 测试包开关（`DISABLE_PRIVATE_API`）并回归 ②；版本对齐（versionName 与发布同步）；release 签名
 - **迭代候选**：PIN 短时窗过期/失败锁定；直连加密（握手指纹互认）；8-9 段机型回归（荣耀 8）

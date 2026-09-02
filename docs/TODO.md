@@ -1,6 +1,6 @@
 # Bluelink · 待办清单
 
-> 2026-09-01 快照（v0.4.1 时点：**异网组网闭环完全体**——A12 ③ LocalOnly 密码自动读+接入+复核放行+TRANSPORT 双机实测 ✅）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
+> 2026-09-02 快照（v0.4.4 时点：**组网+LocalSend 传文件端到端闭环双机实测成功**——C 项传输主体完成）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
 > 代码约定：编码/编译修复一律 pi 子 agent，主管负责构建/验收/文档/归档；**每次出包/修复同步更新文档**。
 
 ## A. 组网链路（修复批次）

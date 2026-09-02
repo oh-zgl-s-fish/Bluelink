@@ -1,4 +1,5 @@
 # Bluelink · 异网组网设计（热点同网）
+> 项目：**蓝鲸·X（Bluelink）** · 开源许可 [GPL-3.0](../LICENSE) · 项目介绍/Agent 写作工作流/未完成清单见 [../README.md](../README.md)
 
 > 2026-09-01 定稿（无码讨论收敛）。配套：ui-design.md（UI）、troubleshooting.md（排障）。
 

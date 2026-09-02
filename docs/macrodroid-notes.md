@@ -1,4 +1,5 @@
 # MacroDroid 热点开关机制 · 逆向档案
+> 项目：**蓝鲸·X（Bluelink）** · 开源许可 [GPL-3.0](../LICENSE) · 项目介绍/Agent 写作工作流/未完成清单见 [../README.md](../README.md)
 
 > 2026-09-01 提取自 MacroDroid 5.63.11（com.arlosoft.macrodroid, versionCode 896300011, minSdk 23, **targetSdk 35**, 11 个 dex）。方法：apk 拆包 + SDK dexdump（build-tools/34）。
 > 目的：评估「Android 12 无 root 自动开常规热点」可否照搬。结论：**不引入**（见文末）。

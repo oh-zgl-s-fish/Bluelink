@@ -44,6 +44,7 @@ import com.zglinus.bluelink.networking.HotspotManager
 import com.zglinus.bluelink.networking.HotspotResult
 import com.zglinus.bluelink.networking.NetState
 import com.zglinus.bluelink.networking.NetworkingStateMachine
+import com.zglinus.bluelink.networking.Who
 import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
 import org.json.JSONObject
@@ -51,6 +52,7 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 一期 BLE 链路接线（生命周期由 MainActivity 持有）：
@@ -96,6 +98,12 @@ import java.util.concurrent.ConcurrentHashMap
  * DocumentFile.createFile 拷贝后删暂存原件；未选 → 提示「请选择保存位置」（MainScreen 弹目录选择器），
  * 选定后再补存（[pendingStagedFiles] 排队）；轮询 getActiveSessions 映射「接收中 …」到 transferState；
  * 中止/停止时停服务与轮询（暂存文件保留在磁盘）。
+ *
+ * v0.4.6 B4 温和收尾：传输完成后**不自动拆、不自动断**——发送完成（onAllDone）/ 接收侧全部转存完成
+ * 置「传输完成 ✅」文案（热点保持/已接入，可继续发送/接收），状态卡按角色出「关闭热点」（热点方，
+ * [closeHotspotAfterTransfer]）或「断开网络」（从机，[disconnectNetworkAfterTransfer]）由用户手动收尾：
+ * 仅停热点/网络与 LocalSend 服务、组网状态回 IDLE，**不调用 stopAllBle / SessionManager.detach**——
+ * BLE 会话/广播/扫描全程保留（可继续传输）。
  *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
@@ -238,6 +246,9 @@ class BluelinkEngine(private val context: Context) {
 
     /** 暂存文件元信息（fileName 展示用 / path 拷贝源 / mimeType createFile 用）。 */
     private class StagedFile(val fileName: String, val path: String, val mimeType: String)
+
+    /** B4 温和收尾：接收侧转存进行中计数（SAF 转存后台线程；全部完成且无待转存/无活动接收会话时置「传输完成」态）。 */
+    private val persistInFlight = AtomicInteger(0)
 
     // ============ A5 组网接线 ============
 
@@ -438,6 +449,8 @@ class BluelinkEngine(private val context: Context) {
     private val netCallbacks = object : NetworkingStateMachine.Callbacks {
         override fun onOfferReceived(ssid: String, pwd: String?) {
             DiagLogger.log(TAG, "收到对端 offer：ssid=$ssid pwdLen=${pwd?.length ?: 0}，WifiJoiner 接入")
+            // B4 温和收尾：收到 offer = 本机为从机（非热点方），传输完成后状态卡显示「断开网络」
+            ui.hotspotSideAfterTransfer = false
             pendingJoinSsid = ssid
             pendingJoinPwd = pwd ?: ""
             pendingJoinCallbacks = wifiJoinCallbacks
@@ -1051,6 +1064,9 @@ class BluelinkEngine(private val context: Context) {
         )
         val decision = decide(mine, peer)
         DiagLogger.log(TAG, "组网仲裁：who=${decision.who} level=${decision.level} reason=${decision.reason}")
+        // B4 温和收尾：角色标志——本机仲裁为热点方（who==ME）或手动④（who==null，本机手动开热点）置 true
+        // （传输完成后状态卡显示「关闭热点」）；who==PEER 置 false（对端开热点，本机为从机）
+        ui.hotspotSideAfterTransfer = decision.who == Who.ME || decision.who == null
 
         netStateMachine = NetworkingStateMachine(
             session = sessionManager,
@@ -1076,6 +1092,71 @@ class BluelinkEngine(private val context: Context) {
         ui.writeSettingsDialog = false
         ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：结束组网复位系统热点登记模式
         netStateMachine?.cancel()
+    }
+
+    // ============ B4 温和收尾（传输完成后手动关闭热点 / 断开网络；BLE 全程保留） ============
+
+    /**
+     * B4 温和收尾（热点方）：传输完成后用户点「关闭热点」——只停热点与 LocalSend 服务、组网状态回 IDLE，
+     * **不调用 stopAllBle / SessionManager.detach**：BLE 会话/广播/扫描全程保留（可继续传输）。
+     * - ③ L2 本地热点：hotspotManager.stopLocalOnly()（close LocalOnlyHotspotReservation，幂等 no-op 安全）；
+     * - ②' Binder 直呼系统热点：hotspotManager.stopBinderTether()（复用既有 k1/c stopTethering 关热点入口
+     *   ——mdTetherDispatch 关分支；stopBinderTetherPending 仅为 pending 清理，不关热点）；
+     *   ④ 手动配网为系统热点、App 无程序化关闭句柄（用户系统设置管理），本方法对其仅停 server + 状态复位；
+     * - localsendServer.stop()（已收文件保留在磁盘）+ 组网状态回 IDLE（调用既有收尾方法
+     *   netStateMachine.cancel() → TEARDOWN → onAbort 收敛：停服务/停轮询/清 IP/netActive=false；
+     *   onAbort 不触 BLE，属温和路径）；
+     * - 状态复位：transferState 置「已关闭热点，传输结束（BLE 通信保留）」、组网文案清空。
+     */
+    fun closeHotspotAfterTransfer() {
+        DiagLogger.log(TAG, "B4 温和收尾：热点方点「关闭热点」——停热点 + 停 LocalSend 服务 + 组网回 IDLE；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        // ③ L2 本地热点：close reservation（幂等 no-op 安全）
+        hotspotManager.stopLocalOnly()
+        // ②' Binder 直呼系统热点：实际关热点入口（k1/c stopTethering 关分支，后台线程执行）
+        hotspotManager.stopBinderTether()
+        // 组网状态回 IDLE：调用既有收尾方法（cancel → TEARDOWN → onAbort，同步执行；onAbort 不触 BLE）
+        netStateMachine?.cancel()
+        netStateMachine = null
+        mainHandler.removeCallbacks(netPoller)
+        mainHandler.removeCallbacks(receivePoller)
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable) // 接管路径残留定时清理（幂等）
+        // 仅停 server + 状态复位（覆盖 onAbort 的「组网已中止」文案）
+        localsendServer.stop()
+        if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+        transportPeerIp = ""
+        ui.netActive = false
+        ui.netState = null
+        ui.hotspotSideAfterTransfer = false
+        ui.transferState = "已关闭热点，传输结束（BLE 通信保留）"
+    }
+
+    /**
+     * B4 温和收尾（从机）：传输完成后用户点「断开网络」——断开 Specifier 网络 + 停 LocalSend 服务，
+     * **不调用 stopAllBle / SessionManager.detach**：BLE 会话/广播/扫描全程保留（可继续传输）。
+     * - 断开网络：wifiJoiner.cancel()（其既有断开/释放 API——注销成功路径保留的 NetworkCallback →
+     *   系统断开 on-demand Specifier Wi-Fi；有进行中接入同样中止，幂等）；
+     *   兜底（无既有 API 时）：ConnectivityManager.bindProcessToNetwork(null) + unregisterNetworkCallback
+     *   ——已由 cancel() 内部 releaseRequest/unregisterNetworkCallback 覆盖，此处不再重复；
+     * - localsendServer.stop()（已收文件保留在磁盘）+ 组网状态回 IDLE（netStateMachine?.cancel() 既有
+     *   收尾；接管路径机器为 null 时仅停 server + 状态复位）。
+     */
+    fun disconnectNetworkAfterTransfer() {
+        DiagLogger.log(TAG, "B4 温和收尾：从机点「断开网络」——断开 Specifier 网络 + 停 LocalSend 服务；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        // 从机断网：WifiJoiner.cancel()（注销保留的 NetworkCallback → 系统断开 on-demand 网络；幂等）
+        wifiJoiner.cancel()
+        // 组网状态回 IDLE：调用既有收尾方法（状态机路径 cancel → onAbort；接管路径机器为 null，仅停 server + 状态复位）
+        netStateMachine?.cancel()
+        netStateMachine = null
+        mainHandler.removeCallbacks(netPoller)
+        mainHandler.removeCallbacks(receivePoller)
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
+        localsendServer.stop()
+        if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+        transportPeerIp = ""
+        ui.netActive = false
+        ui.netState = null
+        ui.hotspotSideAfterTransfer = false
+        ui.transferState = "已断开热点网络（BLE 保留）"
     }
 
     // ============ T3 LocalSend 传输（发送入口 / 取消 / 接收列表） ============
@@ -1179,8 +1260,14 @@ class BluelinkEngine(private val context: Context) {
         }
         client.onAllDone = { total ->
             mainHandler.post {
-                ui.transferState = "发送完成：$name（${total}B）"
-                DiagLogger.log(TAG, "T3 发送全部完成：$name total=${total}B")
+                // B4 温和收尾：发送全部完成 → 传输完成态（按角色区分文案；热点保持/已接入，可继续，
+                // 或点「关闭热点」/「断开网络」手动收尾；BLE 会话/广播/扫描全程保留，不自动拆）
+                ui.transferState = if (ui.hotspotSideAfterTransfer) {
+                    "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
+                } else {
+                    "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                }
+                DiagLogger.log(TAG, "T3 发送全部完成：$name total=${total}B（B4 温和收尾：保留 BLE/热点，等待用户手动收尾）")
                 activeSendClient = null
             }
         }
@@ -1243,6 +1330,7 @@ class BluelinkEngine(private val context: Context) {
         pendingStagedFiles.clear()
         if (pending.isNotEmpty()) {
             DiagLogger.log(TAG, "T3 选定目录后补存暂存文件: ${pending.size} 个")
+            persistInFlight.addAndGet(pending.size) // B4：补存计数（与 persistStagedFile 完成递减配对）
             Thread({
                 for (f in pending) persistStagedFile(f, uri)
             }, "localsend-persist").apply { isDaemon = true }.start()
@@ -1256,6 +1344,7 @@ class BluelinkEngine(private val context: Context) {
     private fun handleFileReceived(fileName: String, path: String, mimeType: String) {
         val uri = receiveDirUri
         if (uri != null) {
+            persistInFlight.incrementAndGet() // B4：转存计数（与 persistStagedFile 完成递减配对，判定「全部转存完成」）
             Thread({ persistStagedFile(StagedFile(fileName, path, mimeType), uri) }, "localsend-persist")
                 .apply { isDaemon = true }.start()
         } else {
@@ -1271,8 +1360,11 @@ class BluelinkEngine(private val context: Context) {
     /**
      * 把暂存文件转存到用户 SAF 目录（后台线程）：[DocumentFile.fromTreeUri] → createFile(mimeType, fileName)
      * → 流式拷贝 → 成功后删除暂存原件；失败保留暂存（防断连丢数据）并提示。
+     * B4 温和收尾：每次转存完成（成功）且无进行中转存、无待转存、无活动接收会话 → 「传输完成 ✅」
+     * （接收侧全部转存完成；保留 BLE 会话/广播/扫描，不自动断网/关热点，由用户点「断开网络」手动收尾）。
      */
     private fun persistStagedFile(f: StagedFile, treeUri: Uri) {
+        var saved = false
         try {
             val dir = DocumentFile.fromTreeUri(appContext, treeUri)
             if (dir == null || !dir.canWrite()) throw IOException("目标目录不可写")
@@ -1282,6 +1374,7 @@ class BluelinkEngine(private val context: Context) {
                 File(f.path).inputStream().use { it.copyTo(out, 64 * 1024) }
             } ?: throw IOException("openOutputStream 返回 null")
             File(f.path).delete() // 转存成功 → 删暂存原件
+            saved = true
             mainHandler.post {
                 ui.transferState = "已保存到 ${truncateName(dir.name ?: f.fileName)}"
                 DiagLogger.log(TAG, "T3 文件已转存用户目录: ${f.fileName}")
@@ -1291,6 +1384,24 @@ class BluelinkEngine(private val context: Context) {
                 ui.transferState = "保存失败：${e.javaClass.simpleName}（暂存文件已保留，可重新选择目录后补存）"
             }
             DiagLogger.log(TAG, "T3 转存用户目录失败（暂存保留 ${f.path}）: ${f.fileName} ${e.javaClass.simpleName} ${e.message}")
+        } finally {
+            // B4 温和收尾：接收侧全部转存完成（无进行中转存、无待转存、无活动接收会话）→ 传输完成态；
+            // 保留 BLE 会话/广播/扫描，不自动断网/关热点，由用户手动结束（失败不置完成态）。
+            // 文案按角色区分：本机为热点方（含热点方接收对端文件）→ 「关闭热点」；从机 → 「断开网络」。
+            if (persistInFlight.decrementAndGet() == 0 &&
+                pendingStagedFiles.isEmpty() &&
+                localsendServer.getActiveSessions().isEmpty()
+            ) {
+                mainHandler.post {
+                    if (saved) {
+                        ui.transferState = if (ui.hotspotSideAfterTransfer) {
+                            "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
+                        } else {
+                            "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1412,6 +1523,8 @@ class BluelinkEngine(private val context: Context) {
             return
         }
         peerOfferHandled = true
+        // B4 温和收尾：收到 offer = 本机为从机（非热点方），传输完成后状态卡显示「断开网络」
+        ui.hotspotSideAfterTransfer = false
         takeoverPeerIp = ip.trim() // v0.4.4：记录 offer 携带的 A 端热点 IP（ack 后作 transportPeerIp；未携带为空串）
         DiagLogger.log(
             TAG,

@@ -329,14 +329,27 @@ private fun LocalStatusCard(
                         Text(
                             text = state,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (state.startsWith("发送完成") || state.startsWith("✅")) {
+                            color = if (state.startsWith("发送完成") || state.startsWith("传输完成") || state.startsWith("✅")) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
                             modifier = Modifier.weight(1f),
                         )
-                        TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
+                        // B4 温和收尾：传输完成后状态卡出现对应按钮——热点方「关闭热点」（停热点+停 LocalSend
+                        // 服务，BLE 会话/广播/扫描保留）/ 从机「断开网络」（断开 Specifier 网络+停服务，BLE 保留）；
+                        // 传输进行中仍显示「取消」（取消进行中的发送）；终态（已关闭/已断开）无按钮。
+                        when {
+                            state.startsWith("传输完成") && ui.hotspotSideAfterTransfer ->
+                                TextButton(onClick = { engine.closeHotspotAfterTransfer() }) { Text("关闭热点") }
+
+                            state.startsWith("传输完成") ->
+                                TextButton(onClick = { engine.disconnectNetworkAfterTransfer() }) { Text("断开网络") }
+
+                            state.startsWith("已关闭") || state.startsWith("已断开") -> Unit
+
+                            else -> TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
+                        }
                     }
                 }
                 // ============ v0.4.5 接收保存位置（SAF OpenDocumentTree 目录，不自建文件浏览器） ============

@@ -1640,6 +1640,37 @@ class HotspotManager(
     }
 
     /**
+     * ② 系统预配热点（Binder 直呼）**实际关热点**入口（B4 温和收尾：传输完成后热点方点「关闭热点」调用）：
+     * [stopBinderTetherPending] 仅为待收敛结果清理（pending 清理，不关热点）；实际关热点复用既有
+     * k1/c 按名枚举 stopTethering 关分支——[mdTetherDispatch](turnOn=false) → [invokeStopTetheringCandidates]
+     * （按名枚举 stopTethering invoke(int=0)）→ 失败落 [mdTetherBinder] stopTethering 兜底。
+     * 后台线程 [hotspotExecutor] 执行（关分支含 sleep 等待，不占主线程）；turnWifiOn=false 不改动 Wi-Fi 状态；
+     * 幂等（未开 ② 热点时仅清理 pending，no-op 安全；与 [stopLocalOnly] 同语义）。
+     */
+    fun stopBinderTether() {
+        // pending 清理（幂等；登记框/等待期被中止时释放待收敛结果与异步闸，防后续启动悬挂）
+        stopBinderTetherPending()
+        val ctx = resolveContext()
+        val wm = if (ctx != null) resolveWifiManager(ctx) else null
+        if (ctx == null || wm == null) {
+            DiagLogger.log(tag, "stopBinderTether：Context/WifiManager 不可用（仅清理 pending，无法派发关热点）")
+            return
+        }
+        hotspotExecutor.execute {
+            try {
+                mdTetherDispatch(
+                    ctx, wm,
+                    turnOn = false, forceLegacy = false, turnWifiOn = false,
+                    binderCode = AtomicInteger(CODE_NOT_RECEIVED),
+                )
+                DiagLogger.log(tag, "stopBinderTether：k1/c stopTethering 关热点已派发（后台线程，turnWifiOn=false 不改 Wi-Fi 状态）")
+            } catch (e: Exception) {
+                DiagLogger.log(tag, "stopBinderTether：关热点异常（不吞，已记录）: $e")
+            }
+        }
+    }
+
+    /**
      * ③ L2 本地热点收尾预留入口（B4 正式收尾前：reservation 持有与 close 入口；幂等）：
      * 关闭 [localOnlyReservation]（系统随后回调 onStopped → 释放持有并收敛待定结果），
      * 并清理待收敛的 L2 pending（等待系统回调/密码回填期间被中止时，防止异步闸与回调悬挂

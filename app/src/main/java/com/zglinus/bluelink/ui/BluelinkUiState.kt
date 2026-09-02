@@ -150,8 +150,18 @@ class BluelinkUiState {
     /** 传输状态行文本（null=无传输）：发送侧「发送中 文件名 45%」/「发送完成/失败/已取消：…」；
      * 接收侧「接收中 文件名 45%」（Engine 轮询 LocalSendServer.getActiveSessions 映射）、
      * 「已收到…请选择保存位置」（未选保存目录）与「已保存到 <目录名>」（SAF 转存成功，v0.4.5）。
+     * v0.4.6 B4 温和收尾：发送完成（onAllDone）/ 接收侧全部转存完成 → 「传输完成 ✅（…）」文案
+     * （热点保持/已接入，可继续；不自动拆/不自动断），由用户点「关闭热点」/「断开网络」手动收尾。
      */
     var transferState by mutableStateOf<String?>(null)
+
+    /**
+     * B4 温和收尾：本机在组网中的角色标志（true=热点方 / false=从机），传输完成后状态卡据此显示
+     * 「关闭热点」或「断开网络」按钮。engine 在组网角色确定时写入：startNetworking 仲裁 who==ME
+     * （含手动④ who==null，本机手动开热点）置 true；收到 offer（状态机 onOfferReceived / 接管
+     * handlePeerOffer，本机为从机）置 false。
+     */
+    var hotspotSideAfterTransfer by mutableStateOf(false)
 
     /** 接收保存目录显示名（SAF OpenDocumentTree 选定目录；null=尚未选择，收到文件时提示点选）。 */
     var receiveDirName by mutableStateOf<String?>(null)

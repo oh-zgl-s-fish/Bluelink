@@ -178,6 +178,11 @@ fun MainScreen(
     BluelinkEngine.current()?.let { engine ->
         if (ui.sendDialog) SendConfirmDialog(engine)
     }
+
+    // v0.4.9 PIN 配对验证：对端输入框（被验证方可能未打开设备弹层——握手由对方发起，顶层渲染保证可见）
+    BluelinkEngine.current()?.let { engine ->
+        if (ui.pinInputDialog) PinInputDialog(engine)
+    }
 }
 
 /** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）+ 信令自测 + ③ LocalOnly 自测。 */
@@ -303,6 +308,42 @@ private fun LocalStatusCard(
                 }
             }
 
+            // ============ v0.4.9 PIN 配对验证（设置区：模式三段按钮 + 清除配对列表） ============
+            BluelinkEngine.current()?.let { engine ->
+                HorizontalDivider()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "PIN 验证：${pinModeName(ui.pinMode)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = if (ui.pairedCount > 0) "已配对 ${ui.pairedCount} 台" else "未配对",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    listOf(
+                        0 to "关",
+                        1 to "仅首次",
+                        2 to "每次",
+                    ).forEach { (m, label) ->
+                        OutlinedButton(
+                            onClick = { engine.setPinMode(m) },
+                            enabled = ui.pinMode != m,
+                        ) { Text(label) }
+                        Spacer(Modifier.width(6.dp))
+                    }
+                }
+                Text(
+                    text = "关=不校验；仅首次=首配后按指纹免验；每次=每会话必验（对端输入配对码）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { engine.clearPairedDevices() }) { Text("清除配对列表") }
+            }
+
             // ============ T3 LocalSend 传输（发送入口 / 进度 / 接收保存位置） ============
             BluelinkEngine.current()?.let { engine ->
                 // 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
@@ -340,6 +381,10 @@ private fun LocalStatusCard(
                         // 服务，BLE 会话/广播/扫描保留）/ 从机「断开网络」（断开 Specifier 网络+停服务，BLE 保留）；
                         // 传输进行中仍显示「取消」（取消进行中的发送）；终态（已关闭/已断开）无按钮。
                         when {
+                            // A8 同网直连（免热点）：传输完成 → 「结束直连」（温和收尾，BLE 保留）
+                            state.startsWith("传输完成") && engine.sameLanDirectActive ->
+                                TextButton(onClick = { engine.endNetworking() }) { Text("结束直连") }
+
                             state.startsWith("传输完成") && ui.hotspotSideAfterTransfer ->
                                 TextButton(onClick = { engine.closeHotspotAfterTransfer() }) { Text("关闭热点") }
 
@@ -567,16 +612,30 @@ fun DeviceDetailSheet(
                 val ui = engine.ui
                 if (ui.netBtnVisible) {
                     HorizontalDivider()
-                    Text("临时局域网", style = MaterialTheme.typography.titleSmall)
+                    // A8 同网免热点直连：入口标签/文案区分「同网直连」（免热点秒连）与「热点组网」（异网仲裁+热点）
+                    val sameLanEntry = entry.lanStatus == LanStatus.SAME_LAN
+                    Text(if (sameLanEntry) "同网直连" else "临时局域网", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        text = "本机与对方不在同一网络，可组建临时局域网后直连。",
+                        text = if (sameLanEntry) {
+                            "本机与对方在同一网络（SSID/子网一致），可免热点直连传输（秒连）。"
+                        } else {
+                            "本机与对方不在同一网络，可组建临时局域网后直连。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Button(
                         onClick = { engine.startNetworking() },
+                        enabled = !engine.pinRequired(),
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("组建临时局域网") }
+                    ) { Text(if (sameLanEntry) "同网免热点直连" else "组建临时局域网") }
+                    if (engine.pinRequired()) {
+                        Text(
+                            text = "需先完成 PIN 配对验证（对端输入配对码）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
                 ui.netState?.let { state ->
                     Text(
@@ -594,6 +653,52 @@ fun DeviceDetailSheet(
                         onClick = { engine.endNetworking() },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("结束组网") }
+                }
+            }
+
+            // ============ v0.4.9 PIN 配对验证（握手后：发起方展示配对码 / 对端输入回传 / 状态） ============
+            if (engine != null) {
+                val ui = engine.ui
+                if (ui.pinVerifyActive || ui.pinShow != null || ui.pinVerifyOk || ui.pinStatus != null || ui.pinError != null) {
+                    HorizontalDivider()
+                    Text("PIN 配对验证", style = MaterialTheme.typography.titleSmall)
+                    ui.pinShow?.let { pin ->
+                        Text(
+                            text = pin,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Text(
+                            text = "请对方在 Bluelink 中输入此配对码（自动回传比对，内容不落日志）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (ui.pinVerifyOk) {
+                        Text(
+                            text = "✅ PIN 验证通过，可组建局域网",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    ui.pinStatus?.let {
+                        Text(text = it, style = MaterialTheme.typography.bodySmall)
+                    }
+                    ui.pinError?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    // 对端（非发起方，pinShow==null）：输入框被取消后可重新打开
+                    if (ui.pinVerifyActive && ui.pinShow == null && !ui.pinInputDialog) {
+                        OutlinedButton(onClick = {
+                            ui.pinInput = ""
+                            ui.pinInputDialog = true
+                        }) { Text("输入配对码") }
+                    }
                 }
             }
 
@@ -1000,4 +1105,49 @@ private fun initialReceiveDirUri(): Uri? = try {
     )
 } catch (e: Exception) {
     null
+}
+
+/** v0.4.9 PIN 配对验证：对端输入框（本端为被验证方；输入 → 经信令回传 pin，等待发起方比对确认——对端不自己判）。 */
+@Composable
+private fun PinInputDialog(engine: BluelinkEngine) {
+    val ui = engine.ui
+    AlertDialog(
+        onDismissRequest = { engine.cancelPinInput() },
+        title = { Text("PIN 配对验证") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "对方要求 PIN 配对验证，请输入对方设备展示的配对码：",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = ui.pinInput,
+                    onValueChange = { ui.pinInput = it.filter { c -> c.isDigit() }.take(8) },
+                    label = { Text("配对码（数字）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                ui.pinError?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { engine.confirmPinInput() }) { Text("发送") }
+        },
+        dismissButton = {
+            TextButton(onClick = { engine.cancelPinInput() }) { Text("取消") }
+        },
+    )
+}
+
+/** v0.4.9：PIN 验证模式 → 展示文本。 */
+private fun pinModeName(mode: Int): String = when (mode) {
+    1 -> "仅首次"
+    2 -> "每次"
+    else -> "关"
 }

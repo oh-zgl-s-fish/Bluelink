@@ -9,7 +9,7 @@ import org.json.JSONObject
  *
  * 单条消息（UTF-8，静态上限 500B，与 [Constants.MAX_HANDSHAKE_BYTES] 对齐的安全上限）字段定稿：
  * {
- *   "type": "offer" | "joined" | "abort" | "ack" | "ping" | "pong",
+ *   "type": "offer" | "joined" | "abort" | "ack" | "ping" | "pong" | "pin",
  *   "payload": { ... } | null    // ack 无 payload
  * }
  *
@@ -20,6 +20,10 @@ import org.json.JSONObject
  * - ack:    无 payload（encode 省略 payload 键；decode 对缺失/null 均还原为 null）
  * - ping:   { "seq": <Int 序号>, "t": <Long 毫秒时间戳> }   // 信令自测（验证包）心跳：
  * - pong:   同 ping 的 payload（对端原样回显 seq/t），本端按 seq 匹配记 RTT=now-t
+ * - pin:    v0.4.9 PIN 配对验证（发起方生成配对码 → 对端输入回传 → 发起方比对，同一 type 双向）：
+ *           { "pin": "<对端输入的数字串>" }（对端 → 发起方回传；发起方收 pin 比对）/
+ *           { "ok": true }（发起方 → 对端放行确认，对端据此解锁组网）/
+ *           { "ok": false, "failCount": <Int 已失败次数> }（发起方 → 对端不匹配通知，对端重新弹输入框）
  *
  * 对称性：encode 产出的 JSON 均可被 decode 还原（type 非空、payload 缺失或 NULL 均还原为 null）。
  */
@@ -38,6 +42,9 @@ object SignalProtocol {
     /** 信令自测（验证包）心跳类型：ping 携带 {seq, t}，对端回 pong（同 seq/t）。 */
     const val TYPE_PING = "ping"
     const val TYPE_PONG = "pong"
+
+    /** v0.4.9 PIN 配对验证：PIN 回传 / 放行确认 / 不匹配通知（payload 见类 KDoc）。 */
+    const val TYPE_PIN = "pin"
 
     private const val TAG = "SignalProtocol"
     private const val F_TYPE = "type"

@@ -52,6 +52,7 @@ import com.zglinus.bluelink.networking.NetworkingStateMachine
 import com.zglinus.bluelink.networking.Who
 import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
+import com.zglinus.bluelink.security.PinStore
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -59,6 +60,7 @@ import java.net.Inet4Address
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.random.Random
 
 /**
  * 一期 BLE 链路接线（生命周期由 MainActivity 持有）：
@@ -167,6 +169,8 @@ class BluelinkEngine(private val context: Context) {
     private val gattServer = GattServer(appContext, mainHandler, object : GattServer.Callbacks {
         override fun onRemoteHandshake(deviceAddress: String, handshake: HandshakeMessage) {
             DiagLogger.log(TAG, "Server 收到远端握手: $deviceAddress alias=${handshake.alias}")
+            // v0.4.9 PIN 配对验证：Server 侧 = 对端主动连接本机 → 本端为被验证方（非发起方）
+            iAmInitiator = false
             applyRemoteHandshake(deviceAddress, handshake)
         }
 
@@ -184,6 +188,8 @@ class BluelinkEngine(private val context: Context) {
             ui.handshaking = false
             ui.handshakeError = null
             DiagLogger.log(TAG, "握手完成回调 UI: $deviceAddress alias=${handshake.alias}")
+            // v0.4.9 PIN 配对验证：Client 侧 = 本端主动连接对端 → 本端为发起方（openDevice 已置标记；自动重连保持）
+            iAmInitiator = true
             applyRemoteHandshake(deviceAddress, handshake)
         }
 
@@ -210,6 +216,26 @@ class BluelinkEngine(private val context: Context) {
     private lateinit var signalTest: SignalTest
 
     val ui = BluelinkUiState()
+
+    // ============ v0.4.9 PIN 配对验证 ============
+
+    /** PIN 配对存储（SharedPreferences）：模式 0=关 1=仅首次 2=每次；配对指纹表（仅首次模式记）。 */
+    private val pinStore = PinStore(appContext)
+
+    /** 本端是否握手发起方（openDevice 发起 GATT 连接置 true；收到对端连接为 false）：发起方生成配对码并比对，对端输入回传。 */
+    @Volatile
+    private var iAmInitiator = false
+
+    /** 发起方本次生成的配对码（Int，不回显；对端输入串 toIntOrNull 比对）。 */
+    @Volatile
+    private var pendingPin: Int? = null
+
+    /** 本次待验证对端指纹（deviceAddress；配对表以指纹记）。 */
+    @Volatile
+    private var pendingPinFingerprint: String? = null
+
+    /** 发起方比对失败计数（3 次失败中止会话）。 */
+    private var pinFailCount = 0
 
     // ============ T3 LocalSend 传输（发送/接收） ============
 
@@ -665,6 +691,9 @@ class BluelinkEngine(private val context: Context) {
     }
 
     init {
+        // v0.4.9 PIN 配对验证：启动时同步模式与配对数量（PinStore 持久化）
+        ui.pinMode = pinStore.getMode()
+        ui.pairedCount = pinStore.pairedCount
         instance = this // A5：供详情弹层（MainScreen.kt）读取 engine/ui，保持 BluelinkRoot 零改动
         // 持久信令会话（A2）：engine 作为唯一接线点，把 GattClient/GattServer 的信令与断线
         // 回调统一转发给 SessionManager；SessionManager 上抛的信令（onRemoteSignal）落库到 ui。
@@ -682,6 +711,17 @@ class BluelinkEngine(private val context: Context) {
                 // 信令自测（验证包）：ping/pong 仅用于测通道（ping 回 pong、pong 统计），不进状态机
                 if (msg.type == SignalProtocol.TYPE_PING || msg.type == SignalProtocol.TYPE_PONG) {
                     signalTest.onRemoteSignal(msg)
+                    return
+                }
+                // v0.4.9 PIN 配对验证：pin 信令与 PIN 失败 abort 由 engine 直接消费（不进状态机，与 ping/pong 同层拦截）
+                if (msg.type == SignalProtocol.TYPE_PIN) {
+                    handlePinSignal(msg)
+                    return
+                }
+                if (msg.type == SignalProtocol.TYPE_ABORT &&
+                    (msg.payload?.optString("reason", "") ?: "").contains(PIN_ABORT_REASON)
+                ) {
+                    handlePinAbort()
                     return
                 }
                 ui.lastSignal = peerAddress to msg
@@ -878,6 +918,9 @@ class BluelinkEngine(private val context: Context) {
         }
         ui.handshaking = true
         ui.handshakeError = null
+        // v0.4.9 PIN 配对验证：本端主动发起握手 → 标记为发起方（握手完成时生成配对码）；复位上次会话 PIN 状态
+        iAmInitiator = true
+        resetPinVerifyState()
         DiagLogger.log(TAG, "点设备发起握手 ${device.address}")
         // 新握手前先释放既有持久会话（若附着）：GattClient 单连接槽被会话连接占用时，
         // connect 会以"会话忙"拒绝，故必须先 detach 恢复原 cleanup 再发起新握手
@@ -1139,6 +1182,15 @@ class BluelinkEngine(private val context: Context) {
         }
         val hs = entry.handshake ?: run {
             DiagLogger.log(TAG, "startNetworking：对端尚未握手")
+            return
+        }
+        // v0.4.9 PIN 配对验证：组网/同网直连前置拦截——本会话未通过 PIN 验证且模式非关 → 提示先完成配对验证
+        if (pinRequired()) {
+            DiagLogger.log(
+                TAG,
+                "startNetworking 拦截：PIN 验证未通过（mode=${pinStore.getMode()} pinVerifyOk=${ui.pinVerifyOk}），提示先完成配对验证",
+            )
+            ui.netState = "请先完成 PIN 配对验证（对端输入展示的配对码）后再组建局域网"
             return
         }
         ui.joinFailDialog = false
@@ -1961,6 +2013,254 @@ class BluelinkEngine(private val context: Context) {
         if (instance === this) instance = null
     }
 
+    // ============ v0.4.9 PIN 配对验证（握手 PIN 校验：关/仅首次/每次） ============
+
+    /**
+     * 握手完成 → PIN 校验（组网/同网直连前置拦截点，在 [applyRemoteHandshake] 内调用）：
+     * - mode=0（关）→ 直接放行（pinVerifyOk=true，现状）；
+     * - mode=1（仅首次）且 [PinStore.isPaired]（fp=对端握手指纹 deviceAddress）→ 放行（「已配对免验」）；
+     * - 否则 → 弹 PIN 验证 UI：发起方（本端主动连接）生成 4-6 位数字配对码展示，等待对端 pin 信令回传；
+     *   对端弹输入框，用户输入经信令回发 pin，等待发起方放行/中止（对端不自己判）；
+     * - 自动重连（sessionResume，会话未 detach）且已验 → 保持放行不重验（会话内不再验）。
+     */
+    private fun beginPinVerification(fp: String, sessionResume: Boolean) {
+        // iAmInitiator 由握手入口维护：openDevice（本端发起连接）置 true / Server 收到对端连接置 false（本端为被验证方）
+        if (sessionResume && ui.pinVerifyOk) {
+            // 自动重连恢复会话：PIN 已验（会话内不再验），保持放行状态
+            DiagLogger.log(TAG, "PIN 验证：自动重连恢复会话，保持已验状态（会话内不再验）fp=$fp")
+            return
+        }
+        resetPinVerifyState() // 新会话复位（pinVerifyOk/pinVerifyActive/展示/输入框/计数）
+        val mode = pinStore.getMode()
+        ui.pinMode = mode
+        when {
+            // 模式 0=关：直接放行（现状）
+            mode == PinStore.MODE_OFF -> {
+                ui.pinVerifyOk = true
+                DiagLogger.log(TAG, "PIN 验证：模式=关，直接放行 fp=$fp")
+            }
+            // 模式 1=仅首次 且 已配对：免验放行
+            mode == PinStore.MODE_FIRST && pinStore.isPaired(fp) -> {
+                ui.pinVerifyOk = true
+                ui.pinStatus = "已配对免验（本会话免 PIN）"
+                DiagLogger.log(TAG, "PIN 验证：已配对免验 fp=$fp")
+            }
+            // 需校验：发起方生成配对码展示 / 对端弹输入框回传
+            else -> {
+                ui.pinVerifyOk = false
+                ui.pinVerifyActive = true
+                pendingPinFingerprint = fp
+                pinFailCount = 0
+                if (iAmInitiator) {
+                    val pin = Random.nextInt(PIN_MIN, PIN_MAX) // 4-6 位（1000..999999）
+                    pendingPin = pin
+                    ui.pinShow = "PIN：$pin（请对端输入）"
+                    ui.pinStatus = "等待对端输入配对码…"
+                    DiagLogger.log(TAG, "PIN 验证：本端为发起方，已生成配对码（长度=${pin.toString().length}，内容不回显），等待对端输入")
+                } else {
+                    ui.pinInput = ""
+                    ui.pinInputDialog = true
+                    ui.pinStatus = "对端要求 PIN 配对验证：请输入对方展示的配对码"
+                    DiagLogger.log(TAG, "PIN 验证：本端为对端，弹出输入框等待用户输入回传（PIN 不回显）")
+                }
+            }
+        }
+    }
+
+    /** PIN 会话状态复位（配对表与模式持久保留；会话结束/新握手/中止时调用）。 */
+    private fun resetPinVerifyState() {
+        ui.pinVerifyActive = false
+        ui.pinVerifyOk = false
+        ui.pinShow = null
+        ui.pinInputDialog = false
+        ui.pinInput = ""
+        ui.pinStatus = null
+        ui.pinError = null
+        pendingPin = null
+        pendingPinFingerprint = null
+        pinFailCount = 0
+    }
+
+    /**
+     * 引擎层消费 pin 信令（init 的 onRemoteSignal 拦截点调用，不进状态机）：
+     * - 发起方收到对端回传 pin{pin} → 比对（匹配 → 放行 + 仅首次记配对；不匹配 → 计数，3 次失败中止）；
+     * - 对端收到发起方 pin{ok:true} → 放行解锁（对端不自己判，等待本端确认）；
+     * - 对端收到 pin{ok:false, failCount} → 重新弹输入框（达 3 次由 abort 路径收敛，见 [handlePinAbort]）。
+     */
+    private fun handlePinSignal(msg: SignalMessage) {
+        val payload = msg.payload ?: run {
+            DiagLogger.log(TAG, "PIN 信令：payload 缺失，忽略")
+            return
+        }
+        // 对端 → 发起方：回传输入
+        if (payload.has("pin")) {
+            val input = payload.optString("pin", "")
+            DiagLogger.log(TAG, "PIN 信令：收到对端回传（长度=${input.length}，内容不回显）")
+            val expected = pendingPin
+            if (expected == null) {
+                DiagLogger.log(TAG, "PIN 信令：本端无待验证配对码（非发起方/已复位），忽略")
+                return
+            }
+            if (input.trim().toIntOrNull() == expected) {
+                onPinMatch()
+            } else {
+                onPinMismatch(input)
+            }
+            return
+        }
+        // 发起方 → 对端：放行确认 / 不匹配通知
+        if (payload.has("ok")) {
+            if (payload.optBoolean("ok", false)) {
+                // 放行：对端解锁组网（对端不自己判，等待本端确认）
+                ui.pinVerifyOk = true
+                ui.pinVerifyActive = false
+                ui.pinInputDialog = false
+                ui.pinShow = null
+                pendingPin = null
+                pendingPinFingerprint = null
+                pinFailCount = 0
+                ui.pinStatus = "✅ PIN 验证通过（对端已确认），可组建局域网"
+                DiagLogger.log(TAG, "PIN 验证：收到对端放行确认，本会话已解锁（配对码不回显）")
+            } else {
+                val n = payload.optInt("failCount", 0)
+                if (n >= PIN_MAX_FAILS) {
+                    // 3 次失败（对端已中止）：按中止收敛
+                    handlePinAbort()
+                    return
+                }
+                ui.pinInput = ""
+                ui.pinInputDialog = true
+                ui.pinError = "PIN 不匹配（第 $n/$PIN_MAX_FAILS 次），请重新输入对方展示的配对码"
+                DiagLogger.log(TAG, "PIN 验证：收到不匹配通知（第 $n/$PIN_MAX_FAILS 次），重新弹输入框")
+            }
+        }
+    }
+
+    /** 发起方比对成功：放行 + （仅首次模式）记配对表 + 通知对端放行。 */
+    private fun onPinMatch() {
+        val fp = pendingPinFingerprint
+        DiagLogger.log(TAG, "PIN 比对成功（内容不回显）")
+        // 仅首次模式：匹配后按指纹记入配对表（指纹=对端握手指纹 deviceAddress）
+        if (pinStore.getMode() == PinStore.MODE_FIRST && fp != null && pinStore.addPaired(fp)) {
+            ui.pairedCount = pinStore.pairedCount
+            DiagLogger.log(TAG, "PIN 验证：首次配对已记录 fp=$fp（后续同指纹免验）")
+        }
+        ui.pinVerifyOk = true
+        ui.pinVerifyActive = false
+        ui.pinShow = null
+        ui.pinStatus = "✅ PIN 验证通过，可组建局域网"
+        // 通知对端放行（同一 type pin；对端不自己判，等待本端确认）
+        val ok = sessionManager.sendSignal(SignalMessage(SignalProtocol.TYPE_PIN, JSONObject().put("ok", true)))
+        DiagLogger.log(TAG, "PIN 验证通过：已发送放行通知 ok=$ok")
+        pendingPin = null
+        pendingPinFingerprint = null
+        pinFailCount = 0
+    }
+
+    /** 发起方比对失败：计数，3 次失败中止会话；未达上限通知对端重新输入。 */
+    private fun onPinMismatch(input: String) {
+        pinFailCount++
+        DiagLogger.log(TAG, "PIN 比对失败：第 $pinFailCount/$PIN_MAX_FAILS 次（输入长度=${input.length}，内容不回显）")
+        if (pinFailCount >= PIN_MAX_FAILS) {
+            abortPinSession()
+            return
+        }
+        ui.pinError = "PIN 不匹配（第 $pinFailCount/$PIN_MAX_FAILS 次），请对端重新输入"
+        ui.pinStatus = "PIN 不匹配，等待对端重新输入…"
+        sessionManager.sendSignal(
+            SignalMessage(SignalProtocol.TYPE_PIN, JSONObject().put("ok", false).put("failCount", pinFailCount))
+        )
+    }
+
+    /** 3 次失败：中止会话（复用 abort 协议通知对端 + 断开本端会话 + 收敛组网状态）。 */
+    private fun abortPinSession() {
+        DiagLogger.log(TAG, "PIN 验证失败（$PIN_MAX_FAILS 次）：中止会话")
+        sessionManager.sendSignal(
+            SignalMessage(SignalProtocol.TYPE_ABORT, JSONObject().put("reason", PIN_ABORT_REASON))
+        )
+        netStateMachine?.cancel()
+        netStateMachine = null
+        sessionManager.detach()
+        resetPinVerifyState()
+        ui.pinVerifyOk = false
+        ui.pinError = "PIN 验证失败，会话中止"
+        ui.pinStatus = PIN_ABORT_REASON
+        ui.netState = PIN_ABORT_REASON
+    }
+
+    /** 对端收到 PIN 失败中止（TYPE_ABORT reason 含 [PIN_ABORT_REASON]）：收敛会话与 UI。 */
+    private fun handlePinAbort() {
+        DiagLogger.log(TAG, "PIN 验证：收到对端中止（PIN 验证失败），会话中止")
+        netStateMachine?.cancel()
+        netStateMachine = null
+        sessionManager.detach()
+        resetPinVerifyState()
+        ui.pinVerifyOk = false
+        ui.pinError = "PIN 验证失败，会话中止"
+        ui.pinStatus = "PIN 验证失败，会话中止（对端已断开）"
+        ui.netState = PIN_ABORT_REASON
+    }
+
+    /** 对端输入框「发送」：校验数字 → 经信令回传 pin{...} → 等待发起方比对确认（对端不自己判）。 */
+    fun confirmPinInput() {
+        val input = ui.pinInput.trim()
+        if (input.isEmpty() || input.toIntOrNull() == null) {
+            ui.pinError = "请输入对方展示的数字配对码"
+            DiagLogger.log(TAG, "PIN 回传：输入为空/非数字，保持输入框等待")
+            return
+        }
+        val ok = sessionManager.sendSignal(
+            SignalMessage(SignalProtocol.TYPE_PIN, JSONObject().put("pin", input))
+        )
+        if (!ok) {
+            ui.pinError = "PIN 回传发送失败（无会话通道）"
+            DiagLogger.log(TAG, "PIN 回传发送失败（无会话通道）")
+            return
+        }
+        ui.pinInputDialog = false
+        ui.pinError = null
+        ui.pinStatus = "PIN 已发送，等待对方确认…（内容不回显）"
+        DiagLogger.log(TAG, "PIN 回传已发送（长度=${input.length}，内容不回显），等待对方确认")
+    }
+
+    /** 对端输入框「取消」：关闭输入框（会话保持等待，可重新输入）。 */
+    fun cancelPinInput() {
+        ui.pinInputDialog = false
+        ui.pinStatus = "PIN 输入已取消：可重新输入配对码"
+        DiagLogger.log(TAG, "PIN 输入已取消（对端等待中，可重新输入）")
+    }
+
+    /** 设置区：切换 PIN 验证模式（0=关 1=仅首次 2=每次；PinStore 持久化）。切为「关」时立即放行当前会话。 */
+    fun setPinMode(mode: Int) {
+        val m = mode.coerceIn(PinStore.MODE_OFF, PinStore.MODE_EVERY)
+        pinStore.setMode(m)
+        ui.pinMode = m
+        val name = when (m) {
+            PinStore.MODE_OFF -> "关"
+            PinStore.MODE_FIRST -> "仅首次"
+            else -> "每次"
+        }
+        DiagLogger.log(TAG, "PIN 验证模式已切换：$name（$m）")
+        if (m == PinStore.MODE_OFF) {
+            // 切为「关」：进行中的验证取消并直接放行（无需重新握手）
+            resetPinVerifyState()
+            ui.pinVerifyOk = true
+            DiagLogger.log(TAG, "PIN 验证：模式切为关，当前会话直接放行")
+        }
+    }
+
+    /** 设置区：清除配对列表（PinStore.clearAll；仅首次模式的免验记忆随之清空）。 */
+    fun clearPairedDevices() {
+        val n = pinStore.pairedCount
+        pinStore.clearAll()
+        ui.pairedCount = 0
+        ui.pinStatus = "配对列表已清空（原 $n 条）"
+        DiagLogger.log(TAG, "PIN 配对列表已清空（原 $n 条）")
+    }
+
+    /** 组网/同网直连前置判定：模式非「关」且本会话尚未验证通过 → 需先完成 PIN 验证。 */
+    fun pinRequired(): Boolean = pinStore.getMode() != PinStore.MODE_OFF && !ui.pinVerifyOk
+
     // ---------- 内部 ----------
 
     private fun startBleIfNeeded() {
@@ -2000,6 +2300,9 @@ class BluelinkEngine(private val context: Context) {
         sessionManager.detach() // 会话结束：恢复原 cleanup（内部 gattClient.release()）
         signalTest.stop() // 信令自测随会话停止（防定时器泄漏）
         gattClient.release() // 静默中断进行中的握手（幂等）
+        // v0.4.9 PIN 配对验证：会话结束复位（pinVerifyOk/pinVerifyActive 等；配对表持久保留）
+        resetPinVerifyState()
+        iAmInitiator = false
         ui.advertising = false
         ui.scanning = false
     }
@@ -2024,6 +2327,8 @@ class BluelinkEngine(private val context: Context) {
     }
 
     private fun applyRemoteHandshake(deviceAddress: String, handshake: HandshakeMessage) {
+        // v0.4.9 PIN 配对验证：自动重连（会话未结束、attach 保持）→ 恢复会话而非新会话，PIN 状态保持不重验
+        val sessionResume = sessionManager.isAttached
         val now = System.currentTimeMillis()
         val existing = ui.devices[deviceAddress]
         val entry = (existing ?: DeviceEntry(deviceAddress, 0, now, now))
@@ -2046,6 +2351,8 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         // 信令自测（验证包）：attach 成功后自动开始 120s 心跳收发（每 5s 一条 ping，对端回 pong）
         signalTest.start()
+        // v0.4.9 PIN 配对验证：握手完成即触发校验（组网/同网直连前置拦截点；fingerprint=对端握手指纹 deviceAddress）
+        beginPinVerification(deviceAddress, sessionResume)
     }
 
     private fun refreshAllLanStatus() {
@@ -2168,6 +2475,16 @@ class BluelinkEngine(private val context: Context) {
 
         /** A6 Wi-Fi 监听：命中后取 IP 最长重试次数（~5s，对齐 WifiJoiner IP_POLL_TIMEOUT_MS 语义）。 */
         private const val WIFI_MONITOR_IP_RETRY_MAX = 10
+
+        /** v0.4.9 PIN 配对验证：生成配对码区间（Random.nextInt 半开区间 1000..999999 → 4-6 位数字）。 */
+        private const val PIN_MIN = 1000
+        private const val PIN_MAX = 1000000
+
+        /** v0.4.9 PIN 配对验证：最大失败次数（3 次失败中止会话）。 */
+        private const val PIN_MAX_FAILS = 3
+
+        /** v0.4.9 PIN 配对验证：失败中止 abort 的 reason 标记（对端据此识别 PIN 失败中止并收敛）。 */
+        private const val PIN_ABORT_REASON = "PIN 验证失败，会话中止"
 
         /**
          * A5：当前引擎实例（MainActivity 创建，init 注册 / release 注销）。

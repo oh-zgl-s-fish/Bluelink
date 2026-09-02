@@ -168,4 +168,33 @@ class BluelinkUiState {
 
     /** 收到文件但未选保存目录 → UI 应发起 OpenDocumentTree 目录选择（MainScreen LaunchedEffect 消费后复位）。 */
     var receiveDirPrompt by mutableStateOf(false)
+
+    // ============ v0.4.9 PIN 配对验证 ============
+
+    /** PIN 验证模式（0=关 1=仅首次 2=每次；PinStore 持久化，engine 启动/切换时同步到 UI）。 */
+    var pinMode by mutableStateOf(0)
+
+    /** PIN 验证进行中（握手完成待校验：发起方展示配对码等待 / 对端输入回传等待；会话结束复位）。 */
+    var pinVerifyActive by mutableStateOf(false)
+
+    /** 本会话 PIN 验证已通过（组网/同网直连解锁；会话结束复位 false；仅首次模式配对后本会话不再验）。 */
+    var pinVerifyOk by mutableStateOf(false)
+
+    /** 发起方展示的配对码文案（"PIN：XXXXXX（请对端输入）"；仅本机 UI 展示，不落日志/信令回显）。 */
+    var pinShow by mutableStateOf<String?>(null)
+
+    /** 对端输入框是否可见（本端为被验证方；确认后经信令回传 pin，等待发起方比对确认——对端不自己判）。 */
+    var pinInputDialog by mutableStateOf(false)
+
+    /** 对端输入框内容（数字串；日志仅记长度，不回显内容）。 */
+    var pinInput by mutableStateOf("")
+
+    /** PIN 验证状态行文本（等待输入/已发送/通过/中止等）。 */
+    var pinStatus by mutableStateOf<String?>(null)
+
+    /** PIN 验证错误/提示（不匹配计数、输入非数字、发送失败、中止原因等）。 */
+    var pinError by mutableStateOf<String?>(null)
+
+    /** 已配对指纹数（PinStore 同步；设置区展示「已配对 N 台」）。 */
+    var pairedCount by mutableStateOf(0)
 }

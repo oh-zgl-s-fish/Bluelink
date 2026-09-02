@@ -165,10 +165,10 @@ object MetricTokens {
 
     // ============ v0.5.6b 顶栏广播呼吸圆钮（广播 Switch → 呼吸按钮） ============
 
-    /** 广播圆钮视觉直径（30dp；任务档 28-32dp 取中值，v0.5.6b） */
-    val AdvertiseKnob: Dp = 30.dp
+    /** 广播圆钮视觉基态直径（20dp；v0.5.6f 用户要求钮最小（基态）30dp→20dp——原 30dp 为 v0.5.6b 任务档 28-32dp 取中值；峰值呼吸外扩走 graphicsLayer scale，见 MainScreen.kt BroadcastBreathButton） */
+    val AdvertiseKnob: Dp = 20.dp
 
-    /** 广播圆钮触达命中区边长（48dp ≥48×48 audit；视觉 30dp 圆钮居中于命中区内，v0.5.6b） */
+    /** 广播圆钮触达命中区边长（48dp ≥48×48 audit 保持——v0.5.6f 钮收小不缩命中；视觉 20dp 圆钮居中于命中区内） */
     val AdvertiseKnobTouch: Dp = 48.dp
 
     /** 广播圆钮中心点直径（8dp；语义图形 ≥8dp，audit S6，v0.5.6b） */

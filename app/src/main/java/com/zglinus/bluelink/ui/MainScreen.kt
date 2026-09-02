@@ -357,11 +357,12 @@ private fun MainTopBar(
 }
 
 /**
- * 广播呼吸圆钮（v0.5.6e 幅度清晰档——v0.5.6d 力量感基线 + 实机反馈「呼吸不明显」放大幅度/光晕；
+ * 广播呼吸圆钮（v0.5.6f 基态 20dp 档——v0.5.6e 幅度清晰基线 + 用户要求钮最小（基态）30→20dp；
  * v0.5.6b 开关圆钮化 / v0.5.6c 尺寸呼吸见文末历史）。
  * 视觉四要素（Compose 落地映射）：
- * 1) 幅度清晰（v0.5.6e 实机反馈 1.05 太隐 → 上调）：呼吸 scale 1.0↔1.15——30dp 圆钮峰值直径 30→34.5dp
- *    （Δ4.5dp、双侧各 2.25dp），肉眼清晰；仍远小于 48dp 命中区与顶栏余量；仅向外膨胀、不缩于基态
+ * 1) 幅度清晰（v0.5.6e 实机反馈 1.05 太隐 → 上调；v0.5.6f 基态 30→20dp 后峰值同调）：呼吸 scale 1.0↔1.25——
+ *    20dp 圆钮峰值直径 20→25dp（Δ5dp、双侧各 2.5dp；1.15→23dp Δ3dp 在更小钮上不够明显 → 取 1.25），
+ *    肉眼清晰、幅度量级 ≥v0.5.6e（旧 30→34.5 Δ4.5dp）；仍远小于 48dp 命中区与顶栏余量；仅向外膨胀、不缩于基态
  *    → 无晃动感（区别于 v0.5.6c 曾 0.9↔1.08 双向晃动过大 → 已收窄，勿双向摆动）；
  * 2) 非对称节奏：keyframes + infiniteRepeatable，单周期 ~3.2s——膨胀段 ~1900ms（~60% 周期，
  *    FastOutSlowInEasing 缓出「到顶停住」）→ 收缩段 ~1300ms（~40% 周期，LinearOutSlowInEasing 近 ease-in
@@ -374,8 +375,8 @@ private fun MainTopBar(
  *
  * 节奏/幅度/光晕/点击映射表：
  * | 阶段 | scale | 时长 | easing |
- * | 膨胀（0→~60%） | 1.0→1.15 | ~1900ms | FastOutSlowIn（近 ease-out，缓出停止感） |
- * | 收缩（~60%→100%） | 1.15→1.0 | ~1300ms | LinearOutSlowIn（近 ease-in，干脆回落） |
+ * | 膨胀（0→~60%） | 1.0→1.25 | ~1900ms | FastOutSlowIn（近 ease-out，缓出停止感） |
+ * | 收缩（~60%→100%） | 1.25→1.0 | ~1300ms | LinearOutSlowIn（近 ease-in，干脆回落） |
  * | 按下 | →0.94 瞬压 | ~80ms | FastOutSlowIn |
  * | 松手回弹 | →1.03 再回落 | ~120ms | FastOutSlowIn |
  * | 光晕 | 半径×0.58、alpha 0.45×scale 联动 | 随呼吸 | drawBehind radial |
@@ -385,7 +386,7 @@ private fun MainTopBar(
  * - 开：绿底 extended.success / onSuccess 白点 + 呼吸 + 光晕；减动效（ui.reduceMotion，P2-1/M1）：不创建
  *   呼吸循环 → 静止 1.0（按压手感保留——用户触发的瞬时反馈）；关：surfaceVariant 灰底静止、无光晕；
  * - 语义（audit A2/P2-2 原 Switch）：clickable(role=Role.Switch) + stateDescription「广播开启/广播停止」；
- * - 触达：外命中区 48dp（audit ≥48×48）不缩放；内层 30dp 圆钮 graphicsLayer scale（transformOrigin 中心）。
+ * - 触达：外命中区 48dp（audit ≥48×48）保持不缩放（v0.5.6f 钮 30→20dp 不缩命中）；内层 20dp 圆钮 graphicsLayer scale（transformOrigin 中心）。
  *
  * v0.5.6b：广播 Switch → 圆钮（docs 原「广播/扫描开关」广播侧换控件，扫描随广播联动未动）；
  * v0.5.6c：呼吸由 alpha 0.5↔1 改尺寸缩放 0.9↔1.08（650ms 对称往返 = DurationPulse 1300ms 脉冲档）；
@@ -393,6 +394,12 @@ private fun MainTopBar(
  * v0.5.6e：实机反馈广播呼吸（1.0↔1.05）不够明显 → 幅度上调至 1.15（30dp 圆钮取「肉眼清晰」档：
  *   峰值直径 +4.5dp、双侧各 2.25dp，仍 ≪48dp 命中区；仅外扩无晃动）；径向 glow 同步增强（半径系数
  *   0.47→0.58 更外扩、alpha 系数 0.30→0.45 更饱满）；节奏/时长/点击蓄力回弹（0.94/1.03）保持不动。
+ * v0.5.6f：用户要求钮最小（基态）30dp→20dp——AdvertiseKnob token 30→20dp（主改点，使用处同 token 单点同步）；
+ *   峰值 scale 1.15→1.25（20×1.15=23dp Δ3dp 在更小钮上不明显 → 1.25=25dp Δ5dp、双侧各 2.5dp，
+ *   幅度量级 ≥v0.5.6e 旧 4.5dp，仍 ≪48dp 命中区、不越顶栏；仅外扩无晃动）；48dp 命中区保持；
+ *   glow 系数 0.58/0.45 不动（glowRadius 取 48dp 命中区 size.minDimension，不随钮体变 → 新基态 20dp 钮
+ *   盖住的辉光中心更少、钮缘亮环反而更显饱满；静息 r≈27.8dp、峰值(×1.25) r≈34.8dp 软衰减仍落顶栏内
+ *   不越界）；文字「广播/停止」在命中区左邻，钮变小 → 间距更宽不贴；点击蓄力回弹/关态/减动效保持不动。
  */
 @Composable
 private fun BroadcastBreathButton(
@@ -411,7 +418,7 @@ private fun BroadcastBreathButton(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant // 点置灰
     }
-    // ===== 呼吸循环（v0.5.6e 幅度清晰档：非对称 keyframes 1.0↔1.15、单周期 ~3.2s；节奏/时长同 v0.5.6d）=====
+    // ===== 呼吸循环（v0.5.6f 基态 20dp 幅度清晰档：非对称 keyframes 1.0↔1.25、单周期 ~3.2s；节奏/时长同 v0.5.6d）=====
     // 减动效（ui.reduceMotion，P2-1/M1）或关闭态 → 不创建 rememberInfiniteTransition（无无限动画节点）
     val breathState: State<Float>? = if (advertisingWanted && !reduceMotion) {
         val pulse = rememberInfiniteTransition(label = "broadcastBreath")
@@ -419,12 +426,12 @@ private fun BroadcastBreathButton(
             initialValue = 1.0f,
             targetValue = 1.0f,
             animationSpec = infiniteRepeatable(
-                // keyframes 非对称段：0%:1.0 → ~60%:1.15（~1900ms 膨胀，ease-out 缓出「到顶停住」）
+                // keyframes 非对称段：0%:1.0 → ~60%:1.25（~1900ms 膨胀，ease-out 缓出「到顶停住」）
                 //             → 100%:1.0（~1300ms 收缩，ease-in 类「回落干脆」）；端点同 1.0 → Restart 无缝
                 animation = keyframes {
                     durationMillis = MotionTokens.BreathPeriod // 全周期 ~3200ms
                     1.0f at 0 with LinearEasing
-                    1.15f at MotionTokens.BreathExpand with MotionTokens.EasingBreathExpand // v0.5.6e 峰值 1.15：30dp 钮直径 30→34.5dp（Δ4.5dp）肉眼清晰（1.05 实机太隐；仅外扩不缩于基态 → 无晃动）
+                    1.25f at MotionTokens.BreathExpand with MotionTokens.EasingBreathExpand // v0.5.6f 峰值 1.25：20dp 钮直径 20→25dp（Δ5dp）清晰（1.15→23dp Δ3dp 更小钮上不够明显；仅外扩不缩于基态 → 无晃动）
                     1.0f at MotionTokens.BreathPeriod with MotionTokens.EasingBreathContract
                 },
                 repeatMode = RepeatMode.Restart,
@@ -473,9 +480,10 @@ private fun BroadcastBreathButton(
             // 的厚重阴影暗示（Compose 无 box-shadow，以 glow 模拟阴影/光晕联动）；关闭态不画（无/极弱）
             .drawBehind {
                 if (advertisingWanted && !reduceMotion) { // 减动效/关闭：静止钮无 glow（装饰光晕仅随呼吸出现）
-                    // v0.5.6e 光晕联动增强（随幅度上调同步）：半径系数 0.47→0.58——静息 r≈27.8dp、峰值
-                    // r≈32dp，钮缘外晕圈更外扩饱满（渐变缘 α→0，落在 48dp 命中区/顶栏内不越界）；alpha 系数
-                    // 0.30→0.45——钮缘可见亮环 α≈0.10→0.21+（旧 0.47 半径下亮环大半被钮体盖住 → 肉眼近不可见）
+                    // v0.5.6f 核对（基态钮 30→20dp）：glowRadius 取外层 48dp 命中区 size.minDimension，不随钮体
+                    // 尺寸变 → 0.58/0.45 系数保持即可：静息 r≈27.8dp、峰值(×1.25) r≈34.8dp，渐变缘 α→0 软衰减
+                    // 仍落 48dp 命中区/顶栏内不越界；钮体收小盖住辉光中心更少 → 钮缘亮环更显饱满（钮缘 α≈0.29→
+                    // 峰值 ≈0.36；旧 30dp 钮仅 ≈0.21。系数来源见 v0.5.6e 上调 0.47→0.58 / 0.30→0.45，KDoc 历史）
                     val glowRadius = size.minDimension * 0.58f * displayScale // 半径随 scale 放大（钮缘外推）
                     drawCircle(
                         brush = Brush.radialGradient(
@@ -505,7 +513,7 @@ private fun BroadcastBreathButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 圆钮视觉（30dp）：v0.5.6c 呼吸改走 scale——graphicsLayer 默认 transformOrigin=中心 → 圆钮中心缩放；
+        // 圆钮视觉（20dp，v0.5.6f 基态 30→20dp）：v0.5.6c 呼吸改走 scale——graphicsLayer 默认 transformOrigin=中心 → 圆钮中心缩放；
         // scale 只作用于内层视觉圆钮，外层 48dp 命中区不缩放（触达 audit 恒定）；底色恒不透明（alpha 段已删）
         Box(
             modifier = Modifier

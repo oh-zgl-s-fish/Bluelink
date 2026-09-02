@@ -72,6 +72,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -147,7 +148,12 @@ import java.util.Locale
  *   权限检测并入设置页（后续）；个性化已实现（v0.5.7 UI1b-B），关于为占位页。
  * - v0.5.7 UI1b-B 主页面背景应用：根背景 Box（纯色 background 打底）→ WallpaperBackdrop（壁纸+遮罩，
  *   按当前系统深浅模式取槽）→ ModalNavigationDrawer/Scaffold（containerColor Transparent）；
- *   主页面两态/时间流/配网弹窗不动。
+ * - v0.5.8 UI1b-B2 主页面浮层化（修真机「背景不变」）+ 强调色运行态应用：HOME 内容容器（两态左右卡/
+ *   底部动作行/时间流/横幅）与顶栏改半透明 M3 表面（surfaceContainer 系列 surface copy(alpha≈HOME_FLOAT_ALPHA)，
+ *   以文字可读为准）浮于壁纸之上；壁纸根层 [RootWallpaperLayer] 仅 HOME 渲染（其它页/抽屉保持不透明
+ *   表面，壁纸只垫主页面）；无壁纸（三槽全空）时背景回纯色，浮层化复合结果≈原色无副作用；
+ *   强调色（accent）保存后经 MainActivity 主题 state → BluelinkTheme(accent) 运行态重算
+ *   （个性化页新交互见 ui/personalize/PersonalizePage.kt）。
  * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测移入
  *   抽屉设置页；发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
  *
@@ -155,18 +161,31 @@ import java.util.Locale
  * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
 
-/** v0.5.7 UI1b-B：根背景壁纸层。自订阅 ui.wallpaperTick（槽/遮罩/强调色改动信号），
- * 避免每次改动重排整个 MainScreen——只在此层与个性化页内重读 [WallpaperStore] 刷新。
- * 无壁纸时 WallpaperBackdrop 不绘制，露出外层 Box 纯色 background（现状）。 */
+/** v0.5.8 UI1b-B2：HOME 主页面内容容器/顶栏浮层化 alpha（规格 0.88–0.92 区间取 0.90；文字可读由遮罩+半透明层承担）。 */
+private const val HOME_FLOAT_ALPHA = 0.90f
+
+/** v0.5.7 UI1b-B 起为根背景壁纸层：自订阅 ui.wallpaperTick（槽/遮罩改动信号），避免每次改动重排整个
+ * MainScreen——只在此层与个性化页内重读 [WallpaperStore] 刷新；无壁纸时 WallpaperBackdrop 不绘制，
+ * 露出外层 Box 纯色 background。
+ * v0.5.8 UI1b-B2：壁纸只垫 HOME 主页面——非 HOME（LOG/个性化/设置/关于/抽屉打开）时经 graphicsLayer
+ * alpha=0 隐藏（层保留在组合中，壁纸解码缓存不丢，避免反复进出主页重解码）；HOME 才显示。 */
 @Composable
 private fun RootWallpaperLayer(ui: BluelinkUiState) {
     val context = LocalContext.current
     val wallpaperStore = remember { WallpaperStore(context.applicationContext) }
-    WallpaperBackdrop(
-        store = wallpaperStore,
-        tick = ui.wallpaperTick,
-        modifier = Modifier.fillMaxSize(),
-    )
+    // 当前页（Compose state 读取；currentPage 切换自动重算）：HOME → 可见；其它页隐藏（壁纸只垫主页面）
+    val wallpaperVisible = ui.currentPage == BluelinkUiState.PAGE_HOME
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer { alpha = if (wallpaperVisible) 1f else 0f },
+    ) {
+        WallpaperBackdrop(
+            store = wallpaperStore,
+            tick = ui.wallpaperTick,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -178,6 +197,8 @@ fun MainScreen(
     onDeviceClick: (DeviceEntry) -> Unit,
     onRefreshNetwork: () -> Unit,
     onRequestPermissions: () -> Unit,
+    // v0.5.8 UI1b-B2：个性化页「保存」回调（保存的强调色 ARGB Long？null=清除/未选）→ MainActivity 主题 state
+    onAccentSaved: (Long?) -> Unit = {},
 ) {
     val engine = BluelinkEngine.current()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -219,8 +240,9 @@ fun MainScreen(
     // v0.5.7 UI1b-B 主页面背景应用（App 根背景）：RootWallpaperLayer（自订阅 ui.wallpaperTick）垫在
     // ModalNavigationDrawer/Scaffold 之下；根背景 Box = 纯色 background 打底（无壁纸回纯色现状）→
     // WallpaperBackdrop（壁纸 + surfaceVariant 遮罩，按当前深浅模式取槽：深→深槽/浅→浅槽，槽未设→统一槽兜底）；
-    // Scaffold containerColor 改 Transparent 透出背景（TopAppBar/各内容容器自身仍不透明 M3 表面，
-    // 主页面两态/时间流/配网弹窗不动）。
+    // v0.5.8 UI1b-B2：壁纸层仅 HOME 渲染（RootWallpaperLayer 内按 currentPage 隐藏，壁纸只垫主页面）；
+    // Scaffold containerColor 保持 Transparent 透出背景；HOME 内容容器与顶栏改半透明浮层（HOME_FLOAT_ALPHA），
+    // 其它页（LOG/个性化/设置/关于）内容容器不透明不动；配网弹窗等浮层面板保持不透明。
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -260,6 +282,8 @@ fun MainScreen(
                     reduceMotion = ui.reduceMotion, // v0.5.6b：广播呼吸按钮减动效分支（静止绿）
                     onAdvertisingWantedChange = onAdvertisingWantedChange,
                     onMenuClick = { scope.launch { drawerState.open() } },
+                    // v0.5.8 UI1b-B2：仅 HOME 主页面顶栏浮层化（半透明透壁纸）；其它页保持不透明
+                    floating = ui.currentPage == BluelinkUiState.PAGE_HOME,
                 )
             },
         ) { innerPadding ->
@@ -282,7 +306,8 @@ fun MainScreen(
                     )
 
                     BluelinkUiState.PAGE_LOG -> LogPage(ui)
-                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(ui)
+                    // v0.5.8 UI1b-B2：个性化页整页重做（无滚动一屏 + 右上保存）；保存回调上抛主题强调色
+                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(ui = ui, onSaved = onAccentSaved)
                     BluelinkUiState.PAGE_SETTINGS -> SettingsPage(ui, engine)
                     BluelinkUiState.PAGE_ABOUT -> AboutPage(ui)
                     else -> MainPage(
@@ -351,9 +376,21 @@ private fun MainTopBar(
     reduceMotion: Boolean,
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onMenuClick: () -> Unit,
+    // v0.5.8 UI1b-B2：true=HOME 主页面顶栏浮层化（containerColor 半透明透壁纸）；false=默认不透明 M3 表面
+    floating: Boolean = false,
 ) {
+    // v0.5.8 UI1b-B2：顶栏容器约同档 alpha 浮于壁纸之上（HOME）；其它页（LOG/个性化/设置/关于）不透明不动。
+    // 未使用 scrollBehavior → 顶栏无 scrolled 态，只覆 containerColor 即全态生效（其余颜色走默认）
+    val topBarColors = if (floating) {
+        TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = HOME_FLOAT_ALPHA),
+        )
+    } else {
+        TopAppBarDefaults.topAppBarColors()
+    }
     // v0.5.6d：Row 子项顺序 = [☰] 最左（顶栏左上）→ 标题 → Spacer(weight(1f)) 吸余宽 → 右侧广播组贴右缘
     TopAppBar(
+        colors = topBarColors,
         title = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -690,7 +727,8 @@ private fun SelfDevicePane(
     // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal，theme 接线见 BluelinkTheme.kt）
     Surface(
         modifier = modifier,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        // v0.5.8 UI1b-B2 主页面浮层化：HOME 内容容器半透明浮于壁纸之上（无壁纸时复合≈原色无副作用）
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
     Column(
@@ -793,7 +831,8 @@ private fun ScanListPanel(
     // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = modifier,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        // v0.5.8 UI1b-B2 主页面浮层化：HOME 内容容器半透明浮于壁纸之上（无壁纸时复合≈原色无副作用）
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
     Column(
@@ -1006,7 +1045,8 @@ private fun PeerDevicePane(
     // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = modifier,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        // v0.5.8 UI1b-B2 主页面浮层化：配对后对端卡（强调层）半透明浮于壁纸之上
+        color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
     Column(
@@ -1158,7 +1198,8 @@ private fun BottomActionRow(
     // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        // v0.5.8 UI1b-B2 主页面浮层化：底部动作行半透明浮于壁纸之上
+        color = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
     Column(
@@ -1246,7 +1287,8 @@ private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
     // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = modifier,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        // v0.5.8 UI1b-B2 主页面浮层化：HOME 内容容器半透明浮于壁纸之上（无壁纸时复合≈原色无副作用）
+        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
         Column(
@@ -1692,7 +1734,8 @@ private fun PermissionBanner(onRequestPermissions: () -> Unit) {
     // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        // v0.5.8 UI1b-B2 主页面浮层化：HOME 横幅提示半透明浮于壁纸之上
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
         Row(
@@ -1721,7 +1764,8 @@ private fun BluetoothOffBanner() {
     // 块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainer,
+        // v0.5.8 UI1b-B2 主页面浮层化：HOME 横幅提示半透明浮于壁纸之上
+        color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = HOME_FLOAT_ALPHA),
         shape = MaterialTheme.shapes.large,
     ) {
         Row(

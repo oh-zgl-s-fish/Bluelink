@@ -1,5 +1,6 @@
 package com.zglinus.bluelink.ui.theme
 
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -7,6 +8,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 
 /**
  * Bluelink 语义色 token（docs/md3-audit.md §3 P0-1 初值表落地；种子 = 品牌蓝 #0B57D0）。
@@ -148,3 +151,59 @@ val MaterialTheme.extended: BluelinkExtendedColors
     @Composable
     @ReadOnlyComposable
     get() = LocalExtendedColors.current
+
+// ===================== v0.5.8 UI1b-B2：运行态强调色 → primary 系派生 =====================
+
+/** primary 系派生结果（[ColorScheme.withAccentPrimary] 覆写的四元组）。 */
+private data class AccentPrimaryRoles(
+    val primary: Color,
+    val onPrimary: Color,
+    val primaryContainer: Color,
+    val onPrimaryContainer: Color,
+)
+
+/**
+ * 以运行态强调色覆写 scheme 的 primary 系（浅/深各自派生），其余角色保持默认 scheme 不变。
+ * 无第三方色板库（无 material-color-utilities/coil）——按亮度启发式手写派生，近似 M3 色调映射：
+ * - 浅色：primary 需足够暗（白底正文/按钮白字可读，亮度上限 ~0.18），container 提浅 tint、container 字压深；
+ * - 深色：primary 需足够亮（深底可读，亮度下限 ~0.5），container 压深、container 字提亮；
+ * 极端强调色（白/黑系）经 [clampLuminance] 双向收进可读亮度区间；向黑/白混合保留色相近似。
+ * 接线：MainActivity 持强调色 state（初值读 WallpaperStore.accentColor）→ [BluelinkTheme](accent)
+ * 保存后更新触发本函数重算；null → 调用方直接用默认 scheme（本文件 [LightColorScheme]/[DarkColorScheme]）。
+ */
+fun ColorScheme.withAccentPrimary(accent: Color, dark: Boolean): ColorScheme {
+    val roles = if (dark) deriveAccentPrimaryDark(accent) else deriveAccentPrimaryLight(accent)
+    return copy(
+        primary = roles.primary,
+        onPrimary = roles.onPrimary,
+        primaryContainer = roles.primaryContainer,
+        onPrimaryContainer = roles.onPrimaryContainer,
+    )
+}
+
+/** 浅色 primary 系派生（primary 亮度 ≤0.18 保白字/白底 ≥4.5:1 级；container 提浅、container 字压深）。 */
+private fun deriveAccentPrimaryLight(accent: Color): AccentPrimaryRoles = AccentPrimaryRoles(
+    primary = clampLuminance(accent, minLum = 0f, maxLum = 0.18f),
+    onPrimary = Color.White,
+    primaryContainer = clampLuminance(accent, minLum = 0.72f, maxLum = 0.9f),
+    onPrimaryContainer = clampLuminance(accent, minLum = 0f, maxLum = 0.12f),
+)
+
+/** 深色 primary 系派生（primary 亮度 ≥0.5 提亮；onPrimary 压深、container 压深、container 字提亮）。 */
+private fun deriveAccentPrimaryDark(accent: Color): AccentPrimaryRoles = AccentPrimaryRoles(
+    primary = clampLuminance(accent, minLum = 0.5f, maxLum = 1f),
+    onPrimary = clampLuminance(accent, minLum = 0f, maxLum = 0.05f),
+    primaryContainer = clampLuminance(accent, minLum = 0f, maxLum = 0.16f),
+    onPrimaryContainer = clampLuminance(accent, minLum = 0.6f, maxLum = 1f),
+)
+
+/** 向黑/白 25% 步进混合，把亮度收进 [minLum, maxLum]（上限 16 步收敛；色相近似保留，无精确色调表）。 */
+private fun clampLuminance(accent: Color, minLum: Float, maxLum: Float): Color {
+    var current = accent
+    repeat(16) {
+        val lum = current.luminance()
+        if (lum >= minLum && lum <= maxLum) return current
+        current = if (lum > maxLum) lerp(current, Color.Black, 0.25f) else lerp(current, Color.White, 0.25f)
+    }
+    return current
+}

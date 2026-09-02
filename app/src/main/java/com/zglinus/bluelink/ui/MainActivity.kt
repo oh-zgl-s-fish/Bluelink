@@ -6,8 +6,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color as ComposeColor
 import com.zglinus.bluelink.ui.BluelinkEngine
 import com.zglinus.bluelink.ui.BluelinkRoot
+import com.zglinus.bluelink.ui.personalize.WallpaperStore
 import com.zglinus.bluelink.ui.theme.BluelinkTheme
 
 /**
@@ -20,6 +26,10 @@ import com.zglinus.bluelink.ui.theme.BluelinkTheme
  * 系统栏（状态栏/底部导航条）改为透明，Compose 内容区延伸到其下；状态栏图标/导航按钮明暗自适应
  * 系统深浅色 —— 与 BluelinkTheme 的 darkTheme = isSystemInDarkTheme() 同一判定源（跟随系统 uiMode），
  * 深浅两套 scheme 下图标均与 App surface 背景保持对比。
+ *
+ * v0.5.8 UI1b-B2 强调色运行态接线（theme 层之上）：setContent 内持强调色 state（初值 onCreate 读
+ * WallpaperStore.accentColor）→ BluelinkTheme(accent) 派生 primary 系；个性化页「保存」经
+ * BluelinkRoot.onAccentSaved 更新该 state → MaterialTheme 重算（深浅仍跟随系统，不做手动切换，留 UI1b-C）。
  */
 class MainActivity : ComponentActivity() {
 
@@ -43,10 +53,21 @@ class MainActivity : ComponentActivity() {
         )
 
         engine = BluelinkEngine(applicationContext)
+
+        // v0.5.8 UI1b-B2：强调色初值（启动读 prefs 一次；null=未选 → 主题默认品牌蓝派生不变）
+        val initialAccentArgb = WallpaperStore(applicationContext).accentColor
+
         setContent {
-            // 主题接线（浅/深双 scheme + 语义 token + Shapes）见 ui/theme/BluelinkTheme.kt（docs/md3-audit.md §3 P0-4）
-            BluelinkTheme {
-                BluelinkRoot(engine)
+            // 主题强调色 state（运行态；theme 层之上）：个性化页保存后经 onAccentSaved 更新 → BluelinkTheme 重算
+            var accentArgb by remember { mutableStateOf(initialAccentArgb) }
+            // 主题接线（浅/深双 scheme + 语义 token + Shapes + 运行态 accent）见 ui/theme/BluelinkTheme.kt
+            BluelinkTheme(
+                accent = accentArgb?.let { ComposeColor((it and 0xFFFFFFL) or 0xFF000000L) }, // 归一 alpha FF
+            ) {
+                BluelinkRoot(
+                    engine = engine,
+                    onAccentSaved = { accentArgb = it }, // 保存后主题换强调色；主页面背景刷新走 ui.wallpaperTick
+                )
             }
         }
     }

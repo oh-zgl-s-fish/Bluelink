@@ -3,31 +3,34 @@
 package com.zglinus.bluelink.ui.personalize
 
 import android.app.WallpaperManager
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,76 +43,139 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ui.BluelinkUiState
 import com.zglinus.bluelink.ui.theme.SpacingTokens
 import java.util.Locale
+import android.graphics.Color as AndroidColor
 
 /**
- * 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.7 UI1b-B 由占位页 → 真页：
- * 三壁纸槽 + 遮罩 + 取色 + 预览 + 主页面背景应用）。
+ * 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.8 UI1b-B2 整页重做，覆盖 v0.5.7 UI1b-B
+ * 三槽长表单版——真机反馈 v0.5.7「主页面背景不变」由 MainScreen HOME 浮层化修复（另见
+ * ui/MainScreen.kt RootWallpaperLayer/HOME_FLOAT_ALPHA），本页只管草稿编辑与保存）。
  *
- * 布局（docs/ui-design.md §4.10 外观 + 用户定稿口径）：
- * - 顶部（占内容区约 1/6）取色区 [AccentColorSection]：API27+ 显示「从壁纸取色」
- *   （WallpaperManager.getWallpaperColors 主色；API26 及以下隐藏取色入口，按版本隐藏）+
- *   下方自选基础色板（8 色）+ 选中色 chip（[AccentChip]，仅预览/预留，不全局改 ColorScheme）；
- * - 主体（下滚）：三壁纸槽卡片 [WallpaperSlotCard]（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸；
- *   每槽：当前预览缩略 [SlotThumb] +「跟系统壁纸」/「自选图片(SAF)」选择 + 清除）→
- *   遮罩滑块 [MaskSliderSection]（0–80% 半透明遮罩强度）→ 预览块 [EffectPreviewSection]
- *   （按当前深浅模式选槽渲染效果：壁纸 + 遮罩，与主页面根背景同套 [WallpaperEffect]，所见即所得）。
+ * 布局（docs/ui-design.md §4.1b v0.5.8 定稿；竖屏无上下滚动、一屏放完）：
+ * - 顶部条：左「个性化」标题 / 右上「保存」（保存为最右角按钮；返回主页面入口与同级子页一致
+ *   放标题右侧、保存左侧——规格图仅画 [保存]，本页为抽屉子页（主页面不列抽屉项、无 BackHandler），
+ *   无返回即死胡同，故补 [返回]，保存仍保持右上角）；
+ * - 颜色区（约占标题下内容区高 1/8，BoxWithConstraints 取 12.5% 收 80–128dp）：
+ *   左 1/6「色系入口」窄条（当前色系色块 + 名称；点按展开/收拢色系列表）+ 中间竖分割线 +
+ *   右 5/6「具体颜色」（当前色系 HSV 明暗连续 10 格，LazyRow 可左右滑动，点选即选中——
+ *   选中格即时描边/色块预览）；色系展开态右区切换为横向色系 chips（红橙黄绿青蓝紫品粉棕灰白黑，
+ *   选中后收拢并切换该色系取色）；API27+（O_MR1 门，26 隐藏）「从壁纸取色」入口固定在右区末端，
+ *   取到的壁纸主色同样先入选中态（保存才生效）；
+ * - 壁纸区：场景三按钮（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸，对应 [WallpaperStore]
+ *   SLOT_UNIFIED/SLOT_DARK/SLOT_LIGHT，当前场景高亮）+ 弹性复用预览区：渲染当前场景槽草稿 =
+ *   壁纸图 + 当前遮罩草稿叠加（复用 ui/personalize/WallpaperBackdrop.kt 同套渲染/解码函数
+ *   [rememberSlotBitmap]/[WallpaperEffect]，预览即真实背景效果）；槽未设 → 占位（图标 +
+ *   「点击选择壁纸」）；点预览区 → [WallpaperSourceSheet] 三选项：跟随系统壁纸 / 自选图片（SAF）/
+ *   清除（清除仅已设时显示）；
+ * - SAF 选图后必须 contentResolver.takePersistableUriPermission(uri, READ)（try/catch 包住不崩溃，
+ *   修 v0.5.7 未持久授权导致重启失效问题；见 [persistUriReadPermission]）；
+ * - 遮罩区（底部固定 · 全局共用）：「遮罩」+ Slider 0–80%（显示百分比），拖动即页内预览
+ *   （预览区遮罩同步变）。
  *
- * 存储：全部经 [WallpaperStore]（SharedPreferences）；任何槽/遮罩/强调色改动后
- * `ui.wallpaperTick++`（[BluelinkUiState.wallpaperTick]）——MainScreen 根背景 WallpaperBackdrop
- * 与页面本体重读 store 刷新（遮罩/强调色变化不触发重复解码，解码 key 只含槽内容）。
+ * 保存语义（v0.5.8 新交互）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 / accent 草稿 / 当前场景 /
+ * 色系展开与选中态），进入页面从 [WallpaperStore] 读初值；任何改动只改本地态并即时页内预览
+ * （不写 prefs，保存前主页面背景与主题不变）。右上「保存」一次性写 prefs（三槽 setSlot×3 +
+ * maskAlpha + accentColor）→ `ui.wallpaperTick++`（主页面背景刷新，见 [BluelinkUiState.wallpaperTick]）
+ * → [onSaved] 上抛强调色（MainActivity 主题 state → BluelinkTheme(accent) 重算 primary 系）
+ * → Snackbar「已保存」。离开页面未保存 = 丢弃草稿（remember 随页面出组合失效，重进从 prefs 重读；
+ * 首版不做未保存提示）。强调色未选/null → 主题用默认 M3 品牌蓝派生，不覆写。
  */
 @Composable
-fun PersonalizePage(ui: BluelinkUiState) {
+fun PersonalizePage(
+    ui: BluelinkUiState,
+    // v0.5.8 UI1b-B2：保存回调（保存的强调色 ARGB Long？null=未选/清除）→ MainActivity 主题强调色 state
+    onSaved: (Long?) -> Unit = {},
+) {
     val context = LocalContext.current
-    // tick 为 Compose 状态：改动后自增 → 本页（与 MainScreen 根背景）重读 WallpaperStore 刷新
-    val tick = ui.wallpaperTick
-    val store = remember { WallpaperStore(context) }
-    val dark = isSystemInDarkTheme()
+    val store = remember { WallpaperStore(context.applicationContext) }
 
-    // 自选图片（SAF 系统 picker）：记录目标槽 id → 选中 content:// uri → 写入该槽
-    var pickSlotId by remember { mutableStateOf<Int?>(null) }
-    val imagePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        val slotId = pickSlotId ?: return@rememberLauncherForActivityResult
-        pickSlotId = null
-        if (uri != null) {
-            store.setSlot(slotId, WallpaperSlot(type = WallpaperSlot.TYPE_URI, uri = uri.toString()))
-            ui.wallpaperTick++
-            ui.showSnack("已选用图片壁纸")
+    // ==================== v0.5.8 本地编辑态（草稿；保存才写 prefs） ====================
+    var unifiedDraft by remember { mutableStateOf(store.slot(WallpaperStore.SLOT_UNIFIED)) }
+    var darkDraft by remember { mutableStateOf(store.slot(WallpaperStore.SLOT_DARK)) }
+    var lightDraft by remember { mutableStateOf(store.slot(WallpaperStore.SLOT_LIGHT)) }
+    var maskDraft by remember { mutableStateOf(store.maskAlpha) }
+    var accentDraft by remember { mutableStateOf(store.accentColor) }
+    // 当前场景（场景三按钮高亮 + 预览区渲染该槽草稿）
+    var sceneSlot by remember { mutableStateOf(WallpaperStore.SLOT_UNIFIED) }
+    // 色系展开态：false=右区显示当前色系具体色；true=右区展开色系列表 chips（选中后收拢切换）
+    var familyExpanded by remember { mutableStateOf(false) }
+    // 当前色系（右区取色对象；初值 = 已存强调色所在色系，未选 → 品牌默认蓝系）
+    var currentFamily by remember {
+        mutableStateOf(store.accentColor?.let { accentFamilyOf(it) } ?: FAMILY_BLUE)
+    }
+    // 壁纸来源弹层可见性（点预览区打开；三选项：跟随系统壁纸/自选图片/清除）
+    var sourceSheet by remember { mutableStateOf(false) }
+    // SAF 自选图片：记录目标场景槽 → GetContent 返回后写该槽草稿（捕获值，防止选图期间切场景错位）
+    var pickingSlot by remember { mutableStateOf<Int?>(null) }
+
+    fun slotDraft(slotId: Int): WallpaperSlot = when (slotId) {
+        WallpaperStore.SLOT_DARK -> darkDraft
+        WallpaperStore.SLOT_LIGHT -> lightDraft
+        else -> unifiedDraft
+    }
+
+    fun setSlotDraft(slotId: Int, slot: WallpaperSlot) {
+        when (slotId) {
+            WallpaperStore.SLOT_DARK -> darkDraft = slot
+            WallpaperStore.SLOT_LIGHT -> lightDraft = slot
+            else -> unifiedDraft = slot
         }
     }
 
-    fun pickImage(slotId: Int) {
-        pickSlotId = slotId
-        imagePicker.launch("image/*")
+    // 自选图片（SAF GetContent，image/*）：持久读授权（try/catch 不崩溃）→ 写目标场景槽草稿
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        val slotId = pickingSlot ?: return@rememberLauncherForActivityResult
+        pickingSlot = null
+        if (uri != null) {
+            persistUriReadPermission(context, uri)
+            setSlotDraft(slotId, WallpaperSlot(type = WallpaperSlot.TYPE_URI, uri = uri.toString()))
+        }
     }
 
-    // API27+ 「从壁纸取色」：WallpaperManager.getWallpaperColors 主色（try/catch；失败 Snackbar 提示）
-    fun pickFromWallpaper() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return // API26 无取色入口，双保险
+    // API27+ 「从壁纸取色」（O_MR1 门，26 无此入口；取壁纸主色同样先入选中态、保存生效）
+    fun pickWallpaperPrimary() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return
         try {
-            val colors = WallpaperManager.getInstance(context).getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
+            val colors = WallpaperManager.getInstance(context)
+                .getWallpaperColors(WallpaperManager.FLAG_SYSTEM)
             val primary = colors?.primaryColor
             if (primary != null) {
-                store.accentColor = primary.toArgb().toLong() and 0xFFFFFFFFL
-                ui.wallpaperTick++
-                ui.showSnack("已取壁纸主色")
+                val argb = primary.toArgb().toLong() and 0xFFFFFFFFL
+                accentDraft = argb
+                currentFamily = accentFamilyOf(argb)
+                ui.showSnack("已取壁纸主色（保存后生效）")
             } else {
-                ui.showSnack("未取到壁纸主色，可改用下方色板")
+                ui.showSnack("未取到壁纸主色，可在下方色板中自选")
             }
         } catch (t: Throwable) {
             ui.showSnack("取壁纸主色失败：${t.message ?: "未知错误"}")
         }
+    }
+
+    // 「保存」：一次性写 prefs（三槽 + mask + accent）→ 主页面背景刷新信号 → 主题强调色上抛 → Snackbar
+    fun save() {
+        store.setSlot(WallpaperStore.SLOT_UNIFIED, unifiedDraft)
+        store.setSlot(WallpaperStore.SLOT_DARK, darkDraft)
+        store.setSlot(WallpaperStore.SLOT_LIGHT, lightDraft)
+        store.maskAlpha = maskDraft
+        store.accentColor = accentDraft
+        ui.wallpaperTick++ // 主页面背景（WallpaperBackdrop 自订阅）重读 store 刷新
+        onSaved(accentDraft) // 主题强调色 state 更新 → MaterialTheme 重算（primary 系换色）
+        ui.showSnack("已保存")
     }
 
     Column(
@@ -117,487 +183,754 @@ fun PersonalizePage(ui: BluelinkUiState) {
             .fillMaxSize()
             .padding(horizontal = SpacingTokens.SpaceLg),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // ---- 顶部条：左「个性化」标题 / 右上「保存」 ----
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
                 text = "个性化",
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            // 规格图顶部条只画 [保存]；本页为抽屉子页（主页面不列抽屉项、无 BackHandler）——
+            // 无返回即无法回主页面（死胡同），与 LOG/设置/关于页同款「返回」放保存左侧，保存保持最右上角。
             TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
+            TextButton(onClick = { save() }) { Text("保存") }
         }
-        Column(
+        Spacer(Modifier.height(SpacingTokens.SpaceSm))
+        // ---- 内容区（标题下剩余空间）：颜色区 ~1/8 + 场景行 + 预览弹性大部 + 遮罩底部固定 ----
+        BoxWithConstraints(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd),
+                .fillMaxWidth()
+                .weight(1f),
         ) {
-            // ---- 取色区（页面顶部紧凑取色条 + 8 基础色板 + 选中色 chip；约 1/6 区，主体下滚） ----
-            AccentColorSection(
-                store = store,
-                onPickFromWallpaper = { pickFromWallpaper() },
-                onChanged = { ui.wallpaperTick++ },
-            )
-            // ---- 主体：三壁纸槽（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸） ----
-            WallpaperSlotCard(
-                store = store,
-                slotId = WallpaperStore.SLOT_UNIFIED,
-                title = "统一壁纸",
-                description = "兜底槽：深/浅色槽未设置时使用。",
-                tick = tick,
-                onPickImage = { pickImage(WallpaperStore.SLOT_UNIFIED) },
-                onChanged = { ui.wallpaperTick++ },
-            )
-            WallpaperSlotCard(
-                store = store,
-                slotId = WallpaperStore.SLOT_DARK,
-                title = "深色模式壁纸",
-                description = "系统深色模式（isSystemInDarkTheme）时使用。",
-                tick = tick,
-                onPickImage = { pickImage(WallpaperStore.SLOT_DARK) },
-                onChanged = { ui.wallpaperTick++ },
-            )
-            WallpaperSlotCard(
-                store = store,
-                slotId = WallpaperStore.SLOT_LIGHT,
-                title = "浅色模式壁纸",
-                description = "系统浅色模式时使用。",
-                tick = tick,
-                onPickImage = { pickImage(WallpaperStore.SLOT_LIGHT) },
-                onChanged = { ui.wallpaperTick++ },
-            )
-            // ---- 遮罩滑块（0–80%） ----
-            MaskSliderSection(
-                store = store,
-                onChanged = { ui.wallpaperTick++ },
-            )
-            // ---- 预览块（按当前模式选槽渲染：壁纸 + 遮罩） ----
-            EffectPreviewSection(
-                store = store,
-                dark = dark,
-                tick = tick,
-            )
-        }
-    }
-}
-
-/** 基础色板（8 色，ARGB Long ↔ Compose Color 对；同值即选中态判定依据）。 */
-private val ACCENT_SWATCHES: List<Pair<Long, Color>> = listOf(
-    0xFF0B57D0L to Color(0xFF0B57D0), // 品牌蓝
-    0xFF00639BL to Color(0xFF00639B), // 天蓝
-    0xFF00838FL to Color(0xFF00838F), // 青
-    0xFF2E7D32L to Color(0xFF2E7D32), // 绿
-    0xFFB25E00L to Color(0xFFB25E00), // 琥珀
-    0xFFEF6C00L to Color(0xFFEF6C00), // 橙
-    0xFFC5221FL to Color(0xFFC5221F), // 红
-    0xFF6B5778L to Color(0xFF6B5778), // 紫
-)
-
-/**
- * 取色区（页面顶部约 1/6）：
- * - 右侧「从壁纸取色」入口——API27+（WallpaperManager.getWallpaperColors）才显示；API26 隐藏（按版本隐藏）；
- * - 下方自选基础色板 8 色（点选写 accentColor）；
- * - 选中色显示 chip（[AccentChip]，点 chip 清除）。
- * accentColor 本版仅预览 chip 与后续主题预留——不全局改 ColorScheme（注释声明）。
- */
-@Composable
-private fun AccentColorSection(
-    store: WallpaperStore,
-    onPickFromWallpaper: () -> Unit,
-    onChanged: () -> Unit,
-) {
-    val accent = store.accentColor
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        shape = MaterialTheme.shapes.large,
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "强调色",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                )
-                // API27 门：从壁纸取色（getWallpaperColors 主色）；API26 及以下隐藏此入口
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    TextButton(onClick = onPickFromWallpaper) { Text("从壁纸取色") }
-                }
-            }
-            if (accent != null) {
-                AccentChip(
-                    accent = accent,
-                    onClear = {
-                        store.accentColor = null
-                        onChanged()
+            // 颜色区高度 ≈ 内容区高 1/8（收 80–128dp，防过小/过大；预览区弹性占剩余大部）
+            val colorAreaHeight = (maxHeight * COLOR_AREA_FRACTION).coerceIn(80.dp, 128.dp)
+            Column(modifier = Modifier.fillMaxSize()) {
+                ColorSectionRow(
+                    accentDraft = accentDraft,
+                    currentFamily = currentFamily,
+                    familyExpanded = familyExpanded,
+                    onToggleFamilies = { familyExpanded = !familyExpanded },
+                    onFamilySelected = { family ->
+                        currentFamily = family
+                        familyExpanded = false
                     },
+                    onAccentSelected = { accentDraft = it },
+                    onPickFromWallpaper = { pickWallpaperPrimary() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(colorAreaHeight),
+                )
+                Spacer(Modifier.height(SpacingTokens.SpaceSm))
+                SceneSwitchRow(
+                    sceneSlot = sceneSlot,
+                    onSceneSelected = { sceneSlot = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(SpacingTokens.SpaceSm))
+                PreviewSection(
+                    slot = slotDraft(sceneSlot),
+                    sceneSlot = sceneSlot,
+                    maskAlpha = maskDraft,
+                    onOpenSource = { sourceSheet = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+                Spacer(Modifier.height(SpacingTokens.SpaceSm))
+                MaskRow(
+                    maskAlpha = maskDraft,
+                    onMaskChange = { maskDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-            // 下方自选基础色板（8 色，两行四列）
-            ACCENT_SWATCHES.chunked(4).forEach { rowColors ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    rowColors.forEach { (argb, color) ->
-                        AccentSwatch(
-                            color = color,
-                            selected = accent == argb,
-                            onClick = {
-                                store.accentColor = argb
-                                onChanged()
-                            },
-                        )
-                    }
-                }
-            }
-            Text(
-                text = "强调色本版仅作选中色 chip 预览与后续主题预留，不全局改 ColorScheme。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
-}
 
-/** 选中色显示 chip（色点 + 文字 + ✕；点按清除强调色）。 */
-@Composable
-private fun AccentChip(accent: Long, onClear: () -> Unit) {
-    Surface(
-        onClick = onClear,
-        shape = MaterialTheme.shapes.small,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.semantics { contentDescription = "清除强调色（当前 ${accentHex(accent)}）" },
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceMd, vertical = SpacingTokens.SpaceXs),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(12.dp)
-                    .clip(CircleShape)
-                    .background(Color(accent)),
-            )
-            Text("选中色", style = MaterialTheme.typography.labelMedium)
-            Text(
-                text = accentHex(accent),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = "✕",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/** ARGB Long → "#RRGGBB" 显示串。 */
-private fun accentHex(argb: Long): String = String.format(Locale.US, "#%06X", argb and 0xFFFFFFL)
-
-/** 基础色板单个色块（48dp 触达区内 30dp 色圆；选中描 primary 圈）。 */
-@Composable
-private fun AccentSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(48.dp)
-            .clip(CircleShape)
-            .border(
-                width = if (selected) 3.dp else 0.dp,
-                color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = if (selected) "强调色已选" else "选择强调色" },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(30.dp)
-                .clip(CircleShape)
-                .background(color),
+    // 壁纸来源弹层（点预览区打开；选择作用于当前场景槽草稿，页内即时预览、保存才生效）
+    if (sourceSheet) {
+        WallpaperSourceSheet(
+            sceneSlot = sceneSlot,
+            current = slotDraft(sceneSlot),
+            onDismiss = { sourceSheet = false },
+            onFollowSystem = {
+                setSlotDraft(sceneSlot, WallpaperSlot(type = WallpaperSlot.TYPE_SYSTEM))
+                sourceSheet = false
+            },
+            onPickImage = {
+                pickingSlot = sceneSlot
+                sourceSheet = false
+                imagePicker.launch("image/*")
+            },
+            onClear = {
+                setSlotDraft(sceneSlot, WallpaperSlot.NONE)
+                sourceSheet = false
+            },
         )
     }
 }
 
-/** 壁纸槽来源标签（跟系统壁纸 / 自选图片 / 未设置）。 */
-private fun slotTypeLabel(slot: WallpaperSlot): String = when (slot.type) {
-    WallpaperSlot.TYPE_SYSTEM -> "跟系统壁纸"
-    WallpaperSlot.TYPE_URI -> "自选图片"
-    else -> "未设置"
-}
+/** 颜色区占内容区高度的比例（≈1/8，规格「颜色区占页面内容高约 1/8」）。 */
+private const val COLOR_AREA_FRACTION = 0.125f
 
-/** 单槽设置详情（副文案）。 */
-private fun slotSourceDetail(slot: WallpaperSlot): String = when (slot.type) {
-    WallpaperSlot.TYPE_SYSTEM -> "壁纸来源：系统当前壁纸"
-    WallpaperSlot.TYPE_URI -> "壁纸来源：自选图片"
-    else -> "未设置 → 该模式回退统一槽/纯色"
-}
-
-/**
- * 壁纸槽卡片：槽名 + 状态标签 + 说明 + 当前预览缩略（[SlotThumb]）+
- * 选择（「跟系统壁纸」FilterChip / 「自选图片(SAF)」FilterChip）+ 清除。
- */
+/** 颜色区（占标题下内容区高约 1/8）：左 1/6 色系入口 / 中竖分割线 / 右 5/6 具体颜色（或展开的色系列表）。 */
 @Composable
-private fun WallpaperSlotCard(
-    store: WallpaperStore,
-    slotId: Int,
-    title: String,
-    description: String,
-    tick: Int,
-    onPickImage: () -> Unit,
-    onChanged: () -> Unit,
+private fun ColorSectionRow(
+    accentDraft: Long?,
+    currentFamily: ColorFamily,
+    familyExpanded: Boolean,
+    onToggleFamilies: () -> Unit,
+    onFamilySelected: (ColorFamily) -> Unit,
+    onAccentSelected: (Long) -> Unit,
+    onPickFromWallpaper: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    // 槽读取（重读 prefs；tick 变化驱动 recomposition）
-    val slot = store.slot(slotId)
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        shape = MaterialTheme.shapes.large,
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+        // 左 1/6：色系入口窄条（色块 + 名称；点按展开/收拢色系列表）
+        FamilyEntryStrip(
+            family = currentFamily,
+            accentDraft = accentDraft,
+            expanded = familyExpanded,
+            onClick = onToggleFamilies,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight(),
+        )
+        Spacer(Modifier.width(SpacingTokens.SpaceXs))
+        // 中间竖分割线（左右宽度比固定 1:5）
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .padding(vertical = SpacingTokens.SpaceXs)
+                .background(MaterialTheme.colorScheme.outlineVariant),
+        )
+        Spacer(Modifier.width(SpacingTokens.SpaceXs))
+        // 右 5/6：展开态 = 色系列表 chips（覆盖在右侧区域上层）；收拢态 = 具体颜色滑动条；最右固定「从壁纸取色」
+        Row(
+            modifier = Modifier
+                .weight(5f)
+                .fillMaxHeight(),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = slotTypeLabel(slot),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SlotThumb(
-                    store = store,
-                    slot = slot,
-                    tick = tick,
+            if (familyExpanded) {
+                FamilyChipsOverlay(
+                    currentFamily = currentFamily,
+                    onFamilySelected = onFamilySelected,
                     modifier = Modifier
-                        .width(96.dp)
-                        .height(60.dp),
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
-                Spacer(Modifier.width(SpacingTokens.SpaceMd))
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
-                ) {
-                    // 「跟系统壁纸」（点选切换，再点取消）
-                    FilterChip(
-                        selected = slot.type == WallpaperSlot.TYPE_SYSTEM,
-                        onClick = {
-                            store.setSlot(
-                                slotId,
-                                if (slot.type == WallpaperSlot.TYPE_SYSTEM) WallpaperSlot.NONE
-                                else WallpaperSlot(type = WallpaperSlot.TYPE_SYSTEM),
-                            )
-                            onChanged()
-                        },
-                        label = { Text("跟系统壁纸") },
-                    )
-                    // 「自选图片」→ SAF 系统图片选择器（GetContent image/*；结果写回本槽 uri）
-                    FilterChip(
-                        selected = slot.type == WallpaperSlot.TYPE_URI,
-                        onClick = onPickImage,
-                        label = { Text("自选图片") },
-                    )
-                }
+            } else {
+                ConcreteColorRow(
+                    family = currentFamily,
+                    selected = accentDraft,
+                    onSelected = onAccentSelected,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                )
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = slotSourceDetail(slot),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
+            // API27+（O_MR1 门；26 隐藏）「从壁纸取色」固定在右区末端（两态均保留）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                WallpaperPickEntry(
+                    onClick = onPickFromWallpaper,
+                    modifier = Modifier
+                        .width(46.dp)
+                        .fillMaxHeight(),
                 )
-                TextButton(
-                    onClick = {
-                        store.clearSlot(slotId)
-                        onChanged()
-                    },
-                    enabled = slot.isSet,
-                ) { Text("清除") }
             }
         }
     }
 }
 
-/** 槽当前壁纸缩略预览（异步解码；未设置显示占位文案）。 */
+/** 左 1/6 色系入口窄条：色块（已选强调色属本色系时用选中色，否则用色系代表色）+ 名称；展开态 primary 描边。 */
 @Composable
-private fun SlotThumb(
-    store: WallpaperStore,
+private fun FamilyEntryStrip(
+    family: ColorFamily,
+    accentDraft: Long?,
+    expanded: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val dotArgb = if (accentDraft != null && accentFamilyOf(accentDraft) == family) {
+        accentDraft // 已选色属于本色系 → 色块直接显示选中色（页内色块预览）
+    } else {
+        familySwatch(family)
+    }
+    Column(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.small)
+            .border(
+                width = if (expanded) 2.dp else 1.dp,
+                color = if (expanded) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = MaterialTheme.shapes.small,
+            )
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "色系入口：当前 ${family.name}（点击展开色系列表）" }
+            .padding(horizontal = SpacingTokens.SpaceXs),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        // 色块（18dp 圆）：浅/白系描 outlineVariant 边保证可见
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .clip(CircleShape)
+                .background(Color(dotArgb))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+        )
+        Spacer(Modifier.height(SpacingTokens.SpaceXs))
+        Text(
+            text = family.name,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+        Text(
+            text = "色系",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+/** 色系列表（展开态）：横向滑动 FilterChip（带代表色点）；点击即选该色系并收拢、右区切换取色。 */
+@Composable
+private fun FamilyChipsOverlay(
+    currentFamily: ColorFamily,
+    onFamilySelected: (ColorFamily) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyRow(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
+    ) {
+        items(COLOR_FAMILIES, key = { it.name }) { family ->
+            FilterChip(
+                selected = family == currentFamily,
+                onClick = { onFamilySelected(family) },
+                label = { Text(family.name) },
+                leadingIcon = {
+                    // 色点：白/浅色系带描边环保证可见（10dp 内圆 + 14dp 外环）
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(Color(familySwatch(family))),
+                        )
+                    }
+                },
+            )
+        }
+    }
+}
+
+/** 右 5/6 具体颜色（收拢态）：当前色系 HSV 同 hue 明暗连续格（10 格，可左右滑动）；点选即选中（描边即时预览）。 */
+@Composable
+private fun ConcreteColorRow(
+    family: ColorFamily,
+    selected: Long?,
+    onSelected: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyRow(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
+    ) {
+        items(cellsOf(family), key = { it }) { argb ->
+            AccentSwatch(
+                argb = argb,
+                isSelected = argb == selected,
+                onClick = { onSelected(argb) },
+            )
+        }
+    }
+}
+
+/** 具体颜色格（46dp 触达 / 视觉 34dp 圆角块）：选中 = primary 描边环 + 内容描述「已选 …」；未选细 outlineVariant 描边。 */
+@Composable
+private fun AccentSwatch(
+    argb: Long,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(46.dp)
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = if (isSelected) "已选强调色 ${accentHex(argb)}" else "强调色 ${accentHex(argb)}"
+                selected = isSelected
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isSelected) {
+            // 选中描边环（primary）：即时页内预览「已选中此色」
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .border(2.dp, MaterialTheme.colorScheme.primary, MaterialTheme.shapes.small),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(if (isSelected) 34.dp else 36.dp)
+                .clip(MaterialTheme.shapes.small)
+                .background(Color(argb))
+                .border(
+                    width = if (isSelected) 0.dp else 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    shape = MaterialTheme.shapes.small,
+                ),
+        )
+    }
+}
+
+/** 「从壁纸取色」入口（API27+ 固定在右区末端）：彩虹渐变取色图标 + 「取色」字样；读壁纸主色入选中态。 */
+@Composable
+private fun WallpaperPickEntry(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = "从壁纸取色" },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        // 装饰取色图标：纵向彩虹渐变块（色值取色板代表色，非语义 token）
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .clip(MaterialTheme.shapes.small)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(FAMILY_RED, FAMILY_ORANGE, FAMILY_YELLOW, FAMILY_BLUE, FAMILY_PURPLE)
+                            .map { Color(familySwatch(it)) },
+                    ),
+                ),
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = "取色",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+        )
+    }
+}
+
+/** 场景三按钮（统一壁纸（兜底）/ 深色模式壁纸 / 浅色模式壁纸；对应 WallpaperStore 三槽，当前场景高亮）。 */
+@Composable
+private fun SceneSwitchRow(
+    sceneSlot: Int,
+    onSceneSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+    ) {
+        SceneChip(
+            label = "统一壁纸",
+            isSelected = sceneSlot == WallpaperStore.SLOT_UNIFIED,
+            onClick = { onSceneSelected(WallpaperStore.SLOT_UNIFIED) },
+            modifier = Modifier.weight(1f),
+        )
+        SceneChip(
+            label = "深色模式壁纸",
+            isSelected = sceneSlot == WallpaperStore.SLOT_DARK,
+            onClick = { onSceneSelected(WallpaperStore.SLOT_DARK) },
+            modifier = Modifier.weight(1f),
+        )
+        SceneChip(
+            label = "浅色模式壁纸",
+            isSelected = sceneSlot == WallpaperStore.SLOT_LIGHT,
+            onClick = { onSceneSelected(WallpaperStore.SLOT_LIGHT) },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 场景切换小按钮（小件档 8dp 圆角；选中 = primaryContainer 对，未选 = surfaceContainerLow + outlineVariant 描边）。 */
+@Composable
+private fun SceneChip(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .height(40.dp)
+            .clip(MaterialTheme.shapes.small)
+            .background(
+                if (isSelected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerLow
+                },
+            )
+            .border(
+                width = if (isSelected) 0.dp else 1.dp,
+                color = if (isSelected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = MaterialTheme.shapes.small,
+            )
+            .clickable(onClick = onClick)
+            .semantics {
+                selected = isSelected
+                contentDescription = "场景：$label"
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (isSelected) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩（复用 WallpaperBackdrop 同套
+ *  rememberSlotBitmap/WallpaperEffect，预览即真实背景效果）；槽未设 → 占位「点击选择壁纸」；
+ * 点预览区 → 打开 [WallpaperSourceSheet]。 */
+@Composable
+private fun PreviewSection(
     slot: WallpaperSlot,
-    tick: Int,
+    sceneSlot: Int,
+    maskAlpha: Int,
+    onOpenSource: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val bmp = rememberSlotBitmap(context = context, slot = slot, maxDim = THUMB_MAX_DIM)
-    Box(
-        modifier = modifier
-            .clip(MaterialTheme.shapes.small)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .semantics { contentDescription = "壁纸槽预览" },
-    ) {
-        if (bmp != null) {
-            Image(
-                bitmap = bmp,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-        } else if (!slot.isSet) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "未设置",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/** 遮罩滑块区（0–80% 半透明遮罩强度，即改即存；onChanged → wallpaperTick 重绘预览/背景）。 */
-@Composable
-private fun MaskSliderSection(
-    store: WallpaperStore,
-    onChanged: () -> Unit,
-) {
+    // 同套解码（预览上限 PREVIEW_MAX_DIM=720px）：槽 type+uri 为 key——仅遮罩/场景外改动不重复解码
+    val wallpaper = rememberSlotBitmap(context = context, slot = slot, maxDim = PREVIEW_MAX_DIM)
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        modifier = modifier,
         shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "遮罩强度",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = "${store.maskAlpha}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Slider(
-                value = store.maskAlpha.toFloat(),
-                onValueChange = { value ->
-                    store.maskAlpha = value.toInt()
-                    onChanged()
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(onClick = onOpenSource)
+                .semantics {
+                    role = Role.Button
+                    contentDescription = "壁纸预览：${sceneName(sceneSlot)}，点击选择壁纸来源"
                 },
-                valueRange = 0f..WallpaperStore.MASK_MAX.toFloat(),
-                steps = WallpaperStore.MASK_MAX - 1,
-            )
-            Text(
-                text = "半透明遮罩（surfaceVariant 色）按百分比叠加在壁纸上，0–80% 无保护下限；文字可读性由内容容器承担。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-/**
- * 预览块：按当前深浅模式选槽（[WallpaperStore.effectiveSlot]）渲染真实效果
- * （壁纸 + 遮罩，与主页面根背景同一 [WallpaperEffect]）；无壁纸显示占位说明。
- */
-@Composable
-private fun EffectPreviewSection(
-    store: WallpaperStore,
-    dark: Boolean,
-    tick: Int,
-) {
-    val context = LocalContext.current
-    // 按当前模式取槽（深→深槽 / 浅→浅槽；槽未设→统一槽）
-    val effective = store.effectiveSlot(dark)
-    val bmp = rememberSlotBitmap(context = context, slot = effective, maxDim = PREVIEW_MAX_DIM)
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        shape = MaterialTheme.shapes.large,
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "效果预览",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
+            if (slot.isSet) {
+                // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色）
+                WallpaperEffect(
+                    wallpaper = wallpaper,
+                    maskAlpha = maskAlpha,
+                    modifier = Modifier.fillMaxSize(),
                 )
-                Text(
-                    text = if (dark) "深色模式（跟随系统）" else "浅色模式（跟随系统）",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(150.dp)
-                    .clip(MaterialTheme.shapes.small)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-            ) {
-                if (bmp != null) {
-                    // 壁纸 + 遮罩（同根背景渲染）
-                    WallpaperEffect(
-                        wallpaper = bmp,
-                        maskAlpha = store.maskAlpha,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "无壁纸 → 纯色背景",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Text(
-                                text = "当前深浅槽与统一槽均未设置",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                if (wallpaper == null) {
+                    // 解码中（异步 IO）兜底提示
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "加载壁纸预览…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
+            } else {
+                // 槽未设占位：图标 + 「点击选择壁纸」
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    PicturePlaceholderIcon()
+                    Spacer(Modifier.height(SpacingTokens.SpaceMd))
+                    Text(
+                        text = "点击选择壁纸",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(SpacingTokens.SpaceXs))
+                    Text(
+                        text = "跟随系统壁纸或自选图片",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-            Text(
-                text = effectiveSourceText(dark, store),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }
 
-/** 预览/取槽说明文案（当前模式 → 哪个槽 → 壁纸来源 + 遮罩百分比）。 */
-private fun effectiveSourceText(dark: Boolean, store: WallpaperStore): String {
-    val modeName = if (dark) "深色" else "浅色"
-    val modeSlot = store.slot(if (dark) WallpaperStore.SLOT_DARK else WallpaperStore.SLOT_LIGHT)
-    val effective = store.effectiveSlot(dark)
-    if (!effective.isSet) {
-        return "当前 $modeName 模式：壁纸槽未设置，App 根背景回纯色（现状）。"
+/** 占位「图片」装饰图标（外框 + 内圆，纯装饰不读屏）。 */
+@Composable
+private fun PicturePlaceholderIcon() {
+    val line = MaterialTheme.colorScheme.outlineVariant
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .border(2.dp, line, MaterialTheme.shapes.large),
+        )
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .border(2.dp, line, CircleShape),
+        )
     }
-    val source = if (modeSlot.isSet) "${modeName}槽" else "${modeName}槽未设 → 统一槽兜底"
-    return "当前 $modeName 模式取「$source」：${slotTypeLabel(effective)} + ${store.maskAlpha}% 遮罩。"
 }
+
+/** 遮罩区（底部固定 · 全局共用）：「遮罩」+ Slider 0–80%（5% 步进，显示百分比）；拖动即页内预览。 */
+@Composable
+private fun MaskRow(
+    maskAlpha: Int,
+    onMaskChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "遮罩",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.width(48.dp),
+        )
+        Slider(
+            value = maskAlpha.toFloat(),
+            onValueChange = { onMaskChange(it.toInt()) },
+            valueRange = 0f..WallpaperStore.MASK_MAX.toFloat(),
+            steps = WallpaperStore.MASK_MAX / 5 - 1, // 5% 步进（0/5/…/80）
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = "$maskAlpha%",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(44.dp),
+            maxLines = 1,
+        )
+    }
+}
+
+/** 壁纸来源弹层（ModalBottomSheet 浮层面板，不透明）：跟随系统壁纸 / 自选图片（SAF）/ 清除（仅已设显示）。
+ *  选择直接写当前场景槽草稿（页内即时预览），保存才写 prefs。 */
+@Composable
+private fun WallpaperSourceSheet(
+    sceneSlot: Int,
+    current: WallpaperSlot,
+    onDismiss: () -> Unit,
+    onFollowSystem: () -> Unit,
+    onPickImage: () -> Unit,
+    onClear: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = SpacingTokens.SpaceLg)
+                .padding(bottom = SpacingTokens.SpaceMd),
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
+        ) {
+            Text(
+                text = "${sceneName(sceneSlot)}：选择来源",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Spacer(Modifier.height(SpacingTokens.SpaceXs))
+            SourceSheetOption(
+                title = "跟随系统壁纸",
+                subtitle = "实时使用系统当前壁纸图片",
+                onClick = onFollowSystem,
+            )
+            SourceSheetOption(
+                title = "自选图片",
+                subtitle = "从相册/文件选择（SAF，自动保存授权）",
+                onClick = onPickImage,
+            )
+            if (current.isSet) {
+                SourceSheetOption(
+                    title = "清除",
+                    subtitle = "恢复默认纯色背景",
+                    destructive = true,
+                    onClick = onClear,
+                )
+            }
+        }
+    }
+}
+
+/** 来源弹层选项行（≥48dp 触达；title + subtitle 双行）。 */
+@Composable
+private fun SourceSheetOption(
+    title: String,
+    subtitle: String,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onClick)
+            .semantics { role = Role.Button }
+            .padding(horizontal = SpacingTokens.SpaceSm, vertical = SpacingTokens.SpaceSm),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (destructive) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+    }
+}
+
+/** 场景槽 id → 展示名（场景按钮 / 弹层标题共用）。 */
+private fun sceneName(slotId: Int): String = when (slotId) {
+    WallpaperStore.SLOT_DARK -> "深色模式壁纸"
+    WallpaperStore.SLOT_LIGHT -> "浅色模式壁纸"
+    else -> "统一壁纸"
+}
+
+/** SAF 选图后持久读授权（修 v0.5.7 未持久授权、重启后 uri 失效问题；provider 不支持时忽略不崩溃）。 */
+private fun persistUriReadPermission(context: Context, uri: Uri) {
+    try {
+        context.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+        )
+    } catch (t: Throwable) {
+        // 部分 provider（相册/DocumentsProvider 等）不支持持久授权：忽略（本次会话仍可读，重启后需重选图）
+    }
+}
+
+// ==================== 色系 / HSV 色板（用户可选数据值，非语义 token） ====================
+// 无第三方色板库（无 material-color-utilities/coil）——色系与具体色用 HSV 生成：同 hue 固定饱和、
+// value 明暗连续 10 格（色系内深浅/明暗渐变）；灰/白/黑为低饱和中性系。色值都是用户可选数据值，
+// 与 theme 包的语义 token 不同层（裸 hex 限制不约束本文件色板数据）。
+
+/** 色系定义：hue 基色相 / saturation 饱和 / valueHigh→valueLow 明度连续区间（中性系 sat≈0 忽略 hue）。 */
+private data class ColorFamily(
+    val name: String,
+    val hue: Float,
+    val saturation: Float,
+    val valueHigh: Float,
+    val valueLow: Float,
+)
+
+/** 每色系具体色格数（规格 8–12 格取 10）。 */
+private const val CELL_COUNT = 10
+
+// 13 色系（规格：红橙黄绿青蓝紫品粉棕灰白黑）；棕色 = 低明橙红（v≤0.62 判棕，见 accentFamilyOf）
+private val FAMILY_RED = ColorFamily("红", 355f, 0.85f, 0.96f, 0.30f)
+private val FAMILY_ORANGE = ColorFamily("橙", 30f, 0.90f, 0.96f, 0.30f)
+private val FAMILY_YELLOW = ColorFamily("黄", 58f, 0.90f, 0.95f, 0.28f)
+private val FAMILY_GREEN = ColorFamily("绿", 130f, 0.85f, 0.90f, 0.24f)
+private val FAMILY_CYAN = ColorFamily("青", 180f, 0.85f, 0.93f, 0.28f)
+private val FAMILY_BLUE = ColorFamily("蓝", 220f, 0.90f, 0.93f, 0.30f)
+private val FAMILY_PURPLE = ColorFamily("紫", 268f, 0.80f, 0.94f, 0.28f)
+private val FAMILY_MAGENTA = ColorFamily("品", 305f, 0.90f, 0.96f, 0.32f)
+private val FAMILY_PINK = ColorFamily("粉", 338f, 0.55f, 0.98f, 0.55f)
+private val FAMILY_BROWN = ColorFamily("棕", 28f, 0.75f, 0.72f, 0.20f)
+// 中性系（s 近 0）：白（略冷 tint 保证渐变格可见）/ 灰 / 黑
+private val FAMILY_WHITE = ColorFamily("白", 220f, 0.05f, 0.98f, 0.87f)
+private val FAMILY_GRAY = ColorFamily("灰", 0f, 0f, 0.84f, 0.32f)
+private val FAMILY_BLACK = ColorFamily("黑", 0f, 0f, 0.29f, 0.02f)
+
+/** chips 展示顺序（规格序：红橙黄绿青蓝紫品粉棕灰白黑）。 */
+private val COLOR_FAMILIES: List<ColorFamily> = listOf(
+    FAMILY_RED, FAMILY_ORANGE, FAMILY_YELLOW, FAMILY_GREEN, FAMILY_CYAN, FAMILY_BLUE,
+    FAMILY_PURPLE, FAMILY_MAGENTA, FAMILY_PINK, FAMILY_BROWN,
+    FAMILY_GRAY, FAMILY_WHITE, FAMILY_BLACK,
+)
+
+/** HSV → ARGB Long（alpha FF；中性系 sat=0 忽略 hue）。 */
+private fun hsvToArgb(hue: Float, saturation: Float, value: Float): Long =
+    (AndroidColor.HSVToColor(floatArrayOf(hue, saturation, value)).toLong() and 0xFFFFFFFFL)
+
+/** 某色系的明暗连续格（valueHigh→valueLow 等差 10 格；色调由色系 hue+sat 固定）。 */
+private fun cellsOf(family: ColorFamily): List<Long> = List(CELL_COUNT) { i ->
+    val t = i.toFloat() / (CELL_COUNT - 1)
+    hsvToArgb(
+        hue = family.hue,
+        saturation = family.saturation,
+        value = family.valueHigh + (family.valueLow - family.valueHigh) * t,
+    )
+}
+
+/** 色系代表色（供色块/色点/取色图标；取第 5 格——亮度居中偏暗，深浅主题下都可见）。 */
+private fun familySwatch(family: ColorFamily): Long = cellsOf(family)[4]
+
+/** ARGB Long → 色系归类（进入页面初值用；HSV 色相分段 + 中性/棕特判）。 */
+private fun accentFamilyOf(argb: Long): ColorFamily {
+    val hsv = FloatArray(3)
+    AndroidColor.colorToHSV((argb and 0xFFFFFFFFL).toInt(), hsv)
+    val h = hsv[0]
+    val s = hsv[1]
+    val v = hsv[2]
+    if (s < 0.08f) {
+        // 中性系（灰/白/黑）：按明度分档
+        return when {
+            v >= 0.85f -> FAMILY_WHITE
+            v <= 0.30f -> FAMILY_BLACK
+            else -> FAMILY_GRAY
+        }
+    }
+    if (v <= 0.62f && h in 8f..48f) return FAMILY_BROWN // 低明橙红 = 棕
+    return when (h) {
+        in 348f..360f, in 0f..14f -> FAMILY_RED
+        in 14f..52f -> FAMILY_ORANGE
+        in 52f..80f -> FAMILY_YELLOW
+        in 80f..165f -> FAMILY_GREEN
+        in 165f..205f -> FAMILY_CYAN
+        in 205f..252f -> FAMILY_BLUE
+        in 252f..288f -> FAMILY_PURPLE
+        in 288f..320f -> FAMILY_MAGENTA
+        in 320f..348f -> FAMILY_PINK
+        else -> FAMILY_BLUE // 兜底（品牌默认蓝系）
+    }
+}
+
+/** ARGB Long → #RRGGBB（无障碍内容描述用）。 */
+private fun accentHex(argb: Long): String =
+    String.format(Locale.US, "#%06X", (argb and 0xFFFFFFL))

@@ -35,9 +35,16 @@ fun neededRuntimePermissions(): Array<String> =
 /**
  * 根 Composable：启动时权限请求 + 生命周期接线 + 主界面 + 设备详情弹层。
  * 唯一跨配置变更保存的状态是广播开关（rememberSaveable 最小化）。
+ *
+ * v0.5.8 UI1b-B2：新增 [onAccentSaved]——个性化页「保存」回调（保存的强调色 ARGB Long？null=清除/未选）。
+ * MainActivity 持主题强调色 state（theme 层之上）：保存后经此更新 → BluelinkTheme(accent) 重算；
+ * 主页面背景刷新走既有 ui.wallpaperTick（本层不处理）。
  */
 @Composable
-fun BluelinkRoot(engine: BluelinkEngine) {
+fun BluelinkRoot(
+    engine: BluelinkEngine,
+    onAccentSaved: (Long?) -> Unit = {},
+) {
     val context = LocalContext.current
     var advertisingWanted by rememberSaveable { mutableStateOf(true) }
 
@@ -89,6 +96,8 @@ fun BluelinkRoot(engine: BluelinkEngine) {
         onDeviceClick = { engine.openDevice(it) },
         onRefreshNetwork = { engine.refreshNetwork() },
         onRequestPermissions = { permissionLauncher.launch(neededRuntimePermissions()) },
+        // v0.5.8 UI1b-B2：个性化页保存 → MainActivity 主题强调色 state
+        onAccentSaved = onAccentSaved,
     )
 
     engine.ui.detailDevice?.let { selected ->

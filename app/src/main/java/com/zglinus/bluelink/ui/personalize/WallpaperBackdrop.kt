@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -68,11 +69,17 @@ fun WallpaperBackdrop(
     val context = LocalContext.current
     // isSystemInDarkTheme() 为 Compose 状态：系统深浅切换自动重取槽（本版无手动模式开关）
     val dark = isSystemInDarkTheme()
-    // 每次 recomposition 重读 prefs（tick 变化驱动本层重绘；遮罩/强调色变化走同路径）
-    val slot = store.effectiveSlot(dark)
-    val wallpaper = rememberSlotBitmap(context = context, slot = slot, maxDim = BACKDROP_MAX_DIM)
+    // v0.5.8c：tick 显式参与 remember 与解码 key——保存（wallpaperTick++）后强制重读 store 重取槽并重启解码，
+    // 消除「保存后主页面背景不同步」的 Compose 跳过歧义（tick 曾仅作参数未在函数体生效）
+    val slot = remember(tick, dark) { store.effectiveSlot(dark) }
+    val dec = rememberSlotDecode(
+        context = context,
+        slot = slot,
+        maxDim = BACKDROP_MAX_DIM,
+        tick = tick,
+    )
     WallpaperEffect(
-        wallpaper = wallpaper,
+        wallpaper = dec.bitmap,
         maskAlpha = store.maskAlpha,
         modifier = modifier,
     )
@@ -130,8 +137,13 @@ internal fun rememberSlotDecode(
     context: Context,
     slot: WallpaperSlot,
     maxDim: Int,
+    tick: Int = 0,
 ): SlotDecode {
-    return produceState<SlotDecode>(initialValue = SlotDecode(bitmap = null, failed = false), key1 = slot) {
+    return produceState<SlotDecode>(
+        initialValue = SlotDecode(bitmap = null, failed = false),
+        key1 = slot,
+        key2 = tick,
+    ) {
         val old = value
         if (!slot.isSet) {
             value = SlotDecode(bitmap = null, failed = false)

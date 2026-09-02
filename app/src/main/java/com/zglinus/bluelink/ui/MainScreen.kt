@@ -1,10 +1,12 @@
 package com.zglinus.bluelink.ui
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,9 +23,11 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,7 +42,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -46,6 +49,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +57,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
@@ -62,6 +67,7 @@ import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -78,11 +84,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.HandshakeProtocol
@@ -252,7 +263,13 @@ private fun MainTopBar(
     TopAppBar(
         title = { Text(if (ui.currentPage == 0) "Bluelink" else pageTitle(ui.currentPage)) },
         navigationIcon = {
-            IconButton(onClick = onMenuClick) { Text("☰") }
+            IconButton(onClick = onMenuClick) {
+                // 图标控件须具名（audit A1/K3）：☰ 字形 + contentDescription，避免读屏读裸字形
+                Text(
+                    text = "☰",
+                    modifier = Modifier.semantics { contentDescription = "打开菜单" },
+                )
+            }
         },
         actions = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -468,102 +485,112 @@ private fun ScanListPanel(
             }
         }
         Text(
-            text = "点击设备握手 · 长按或 × 清除失效设备",
+            text = "点击设备握手 · 移除失效设备",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (ui.devices.isEmpty()) {
-            EmptyState()
+            EmptyState(ui)
         } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
-            ) {
-                items(
+            // 列表连续项（audit K1/P1-2）：去卡片化，行间 HorizontalDivider 分隔（M3 列表规范）
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                itemsIndexed(
                     ui.devices.values.sortedBy { it.firstSeen },
-                    key = { it.address },
-                ) { entry ->
+                    key = { _, entry -> entry.address },
+                ) { index, entry ->
                     DeviceRow(
                         entry = entry,
                         onClick = { onDeviceClick(entry) },
                         onRemove = { BluelinkEngine.current()?.removeDevice(entry.address) },
                     )
+                    if (index < ui.devices.size - 1) {
+                        HorizontalDivider()
+                    }
                 }
             }
         }
     }
 }
 
-/** 设备行：握手后显示别名/型号/MAC/RSSI/网络徽标/同网标记；握手前显示 MAC+RSSI。尾「×」或长按清除失效设备。 */
+/**
+ * 设备行（列表连续项语义，audit K1/P1-2）：ListItem headline=别名、supporting=型号·MAC·RSSI·同网状态
+ * （icon+label+token，P1-4）、leading=连接状态点（信号）、trailing=IconButton「×」（contentDescription 移除设备）；
+ * 行点击=握手/详情不变，长按仍可清除（audit A5：× 为主入口、长按保留）。
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> Unit) {
-    OutlinedCard(
+    val hs = entry.handshake
+    val alias = hs?.alias?.takeIf { it.isNotBlank() } ?: "未知设备"
+    val modelMac = if (hs != null) {
+        listOfNotNull(
+            hs.model.takeIf { it.isNotBlank() },
+            entry.displayMac,
+            "${entry.rssi} dBm",
+        ).joinToString(" · ")
+    } else {
+        "${entry.displayMac} · ${entry.rssi} dBm"
+    }
+    ListItem(
+        // leading：连接/扫描状态点（已握手=primary 可进详情；扫描中=中性）
+        leadingContent = {
+            StatusDot(
+                color = if (hs != null) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        },
+        headlineContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = alias,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (hs != null) {
+                    NetworkBadge(hs)
+                } else {
+                    Text(
+                        text = "扫描中…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        supportingContent = {
+            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs)) {
+                Text(
+                    text = modelMac,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // 同网状态：icon（点）+ label + token（audit P1-4：色不单独表达状态）
+                LanStatusLine(entry.lanStatus)
+            }
+        },
+        trailingContent = {
+            // 图标删除（audit K2/A1）：× TextButton → IconButton + contentDescription
+            IconButton(onClick = onRemove) {
+                Text(
+                    text = "×",
+                    modifier = Modifier.semantics { contentDescription = "移除设备" },
+                )
+            }
+        },
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onRemove),
-    ) {
-        Row(
-            modifier = Modifier.padding(start = SpacingTokens.SpaceMd, top = SpacingTokens.SpaceSm, bottom = SpacingTokens.SpaceSm, end = SpacingTokens.SpaceXs),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs), // 行内距 2→4（audit S5）
-            ) {
-                val hs = entry.handshake
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = hs?.alias?.takeIf { it.isNotBlank() } ?: "未知设备",
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (hs != null) {
-                        NetworkBadge(hs)
-                    } else {
-                        Text(
-                            text = "扫描中…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                if (hs != null) {
-                    Text(
-                        text = listOfNotNull(
-                            hs.model.takeIf { it.isNotBlank() },
-                            entry.displayMac,
-                            "${entry.rssi} dBm",
-                        ).joinToString(" · "),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                } else {
-                    Text(
-                        text = "${entry.displayMac} · ${entry.rssi} dBm",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(
-                    text = when (entry.lanStatus) {
-                        LanStatus.SAME_LAN -> "✅ 同网"
-                        LanStatus.DIFFERENT_NETWORK -> "🌐 异网"
-                        LanStatus.UNKNOWN -> "❔ 未知"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-            TextButton(onClick = onRemove) { Text("×") }
-        }
-    }
+    )
 }
 
-/** 网络徽标：同Wi-Fi / 蜂窝 / 未知（取自对方握手 net 字段）。 */
+/** 网络徽标：同Wi-Fi / 蜂窝 / 未知（取自对方握手 net 字段）；icon（点）+ label + token 容器对（audit P1-4）。 */
 @Composable
 private fun NetworkBadge(hs: HandshakeMessage) {
     // 徽章容器/文字对（audit P0-2/P1-4）：同Wi-Fi=successContainer 对；蜂窝/未知=中性 surfaceVariant 对（蜂窝非警告，中性化）
@@ -588,11 +615,46 @@ private fun NetworkBadge(hs: HandshakeMessage) {
         shape = MaterialTheme.shapes.small,
         color = containerColor,
     ) {
+        Row(
+            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusDot(color = contentColor)
+            Spacer(Modifier.width(SpacingTokens.SpaceXs))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = contentColor,
+            )
+        }
+    }
+}
+
+/** 语义状态点（≥8dp，audit S6）：与 label/text 双通道表达状态，色不单独使用（audit P1-4）。 */
+@Composable
+private fun StatusDot(color: Color, modifier: Modifier = Modifier, size: Dp = MetricTokens.EventDot) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .background(color, CircleShape),
+    )
+}
+
+/** 同网判定行（icon+label+token）：同网=success / 异网/未知=中性（异网非警告，中性化，audit P0-2/P1-4）。 */
+@Composable
+private fun LanStatusLine(lanStatus: LanStatus, modifier: Modifier = Modifier) {
+    val (label, color) = when (lanStatus) {
+        LanStatus.SAME_LAN -> "同网" to MaterialTheme.extended.success
+        LanStatus.DIFFERENT_NETWORK -> "异网" to MaterialTheme.colorScheme.onSurfaceVariant
+        LanStatus.UNKNOWN -> "未知" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        StatusDot(color)
+        Spacer(Modifier.width(SpacingTokens.SpaceXs))
         Text(
-            text = text,
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外（P1 徽章化时随样式调整）
-            style = MaterialTheme.typography.labelSmall,
-            color = contentColor,
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = color,
         )
     }
 }
@@ -620,7 +682,8 @@ private fun PeerDeviceCard(
                     modifier = Modifier.weight(1f),
                 )
                 val status = peer?.statusText ?: "未连接"
-                // 状态徽标三档容器对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant
+                // 状态徽标三档容器对（audit P1-4）：接入=successContainer / 已连接=primaryContainer / 其他=surfaceVariant；
+                // icon（点）+ label + token 双通道，不以色 alone 表达状态
                 val (statusContainer, statusContent) = when (status) {
                     "接入" -> MaterialTheme.extended.successContainer to MaterialTheme.extended.onSuccessContainer
                     "已连接" -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
@@ -630,12 +693,18 @@ private fun PeerDeviceCard(
                     shape = MaterialTheme.shapes.small,
                     color = statusContainer,
                 ) {
-                    Text(
-                        text = status,
+                    Row(
                         modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp), // 徽章内部留白例外
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusContent,
-                    )
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StatusDot(color = statusContent)
+                        Spacer(Modifier.width(SpacingTokens.SpaceXs))
+                        Text(
+                            text = status,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = statusContent,
+                        )
+                    }
                 }
             }
             Text(
@@ -713,9 +782,18 @@ private fun FlowAnimationArea(ui: BluelinkUiState) {
                 if (busy) {
                     PulseRing()
                 } else {
-                    Text(
-                        text = if (ui.netState?.startsWith("✅") == true) "✅" else "●",
-                        style = MaterialTheme.typography.titleMedium,
+                    // 静态状态点（audit P1-4/C7：emoji/字形 → 8dp 语义点，icon+label+token；右侧文案双通道）：
+                    // 失败=error、传输就绪(✅)=success、其余进行中/已就绪=primary
+                    StatusDot(
+                        color = when {
+                            ui.netState?.contains("失败") == true ||
+                                ui.netState?.contains("中止") == true ||
+                                ui.netState?.contains("超时") == true ->
+                                MaterialTheme.colorScheme.error
+                            ui.netState?.startsWith("✅") == true -> MaterialTheme.extended.success
+                            else -> MaterialTheme.colorScheme.primary
+                        },
+                        size = MetricTokens.PulseRingDot,
                     )
                 }
                 Spacer(Modifier.width(SpacingTokens.SpaceMd))
@@ -1016,6 +1094,8 @@ private fun LogPage(ui: BluelinkUiState) {
 /** 设置页（抽屉 4）：PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此）。 */
 @Composable
 private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
+    // 破坏性动作显式确认（audit K12/P1-1）：清除配对列表先弹确认框，确认后才执行
+    var showClearPairedDialog by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1055,17 +1135,29 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            listOf(
-                0 to "关",
-                1 to "仅首次",
-                2 to "每次",
-            ).forEach { (m, label) ->
-                OutlinedButton(
-                    onClick = { engine.setPinMode(m) },
-                    enabled = ui.pinMode != m,
-                ) { Text(label) }
+        // 单选互斥（audit K4/P1-1）：3×OutlinedButton → RadioButton 组（selected 语义 + 整行 48dp 触达）
+        listOf(
+            0 to "关",
+            1 to "仅首次",
+            2 to "每次",
+        ).forEach { (m, label) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = ui.pinMode == m,
+                        role = Role.RadioButton,
+                        onClick = { engine.setPinMode(m) },
+                    )
+                    .padding(vertical = SpacingTokens.SpaceXs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = ui.pinMode == m, onClick = null)
                 Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
         Text(
@@ -1083,7 +1175,14 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
                 color = MaterialTheme.colorScheme.error,
             )
         }
-        TextButton(onClick = { engine.clearPairedDevices() }) { Text("清除配对列表") }
+        // 破坏性动作（audit P1-1/K12）：TextButton → OutlinedButton error 色系；执行须经确认框（见文件尾）
+        OutlinedButton(
+            onClick = { showClearPairedDialog = true },
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
+            ),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+        ) { Text("清除配对列表") }
         HorizontalDivider()
 
         // ============ 信令自测（验证包） ============
@@ -1130,21 +1229,58 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
             }
         }
         ui.localOnlyTestInfo?.let { info ->
-            Text(
-                text = if (ui.localOnlyTestPasswordSet) "✅ $info" else info,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (ui.localOnlyTestRunning) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
+            // 状态行 icon+label（audit P1-4）：密码已登记(✅)加 success 语义点；色不单独表达状态
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (ui.localOnlyTestPasswordSet) {
+                    StatusDot(color = MaterialTheme.extended.success)
+                    Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                }
+                Text(
+                    text = info,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (ui.localOnlyTestRunning) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
         HorizontalDivider()
 
         // ============ 诊断 ============
         Text("诊断", style = MaterialTheme.typography.titleSmall)
         TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
+    }
+
+    // 清除配对列表确认框（audit K12/P1-1）：破坏性操作显式、防误触；确认才执行 engine.clearPairedDevices()
+    if (showClearPairedDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearPairedDialog = false },
+            title = { Text("清除配对列表？") },
+            text = {
+                Text(
+                    text = if (ui.pairedCount > 0) {
+                        "将清除已配对的 ${ui.pairedCount} 台设备（含仅首次免验记忆），此操作不可撤销。"
+                    } else {
+                        "将清除全部配对记录（含仅首次免验记忆），此操作不可撤销。"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        engine?.clearPairedDevices()
+                        showClearPairedDialog = false
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("清除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearPairedDialog = false }) { Text("取消") }
+            },
+        )
     }
 }
 
@@ -1256,9 +1392,55 @@ private fun BluetoothOffBanner() {
     }
 }
 
-/** 无设备空态。 */
+/** 空态规格（文案 + 下一步动作；audit K10/P1-1 可操作空态）。 */
+private data class EmptyStateSpec(
+    val title: String,
+    val body: String,
+    val actionLabel: String,
+    val onAction: () -> Unit,
+)
+
+/** 无设备空态（可操作引导，audit K10/P1-1）：按阻塞原因给文案 + 下一步按钮；不再只有纯文案。 */
 @Composable
-private fun EmptyState() {
+private fun EmptyState(ui: BluelinkUiState) {
+    val context = LocalContext.current
+    val engine = BluelinkEngine.current()
+    val spec = when {
+        // 权限未授：去授权 → 跳系统应用设置（可操作恢复路径）
+        !ui.permissionsGranted -> EmptyStateSpec(
+            "未授予扫描权限",
+            "需要蓝牙 + 位置权限才能发现附近设备",
+            "去授权",
+            { openAppSettings(context) },
+        )
+        // 蓝牙未开：去开蓝牙 → 跳系统蓝牙设置（引擎无主动开蓝牙入口）
+        !ui.btEnabled -> EmptyStateSpec(
+            "蓝牙未开启",
+            "开启蓝牙后即可扫描附近设备",
+            "去开蓝牙",
+            { openBluetoothSettings(context) },
+        )
+        // 扫描中但无设备：重扫重试（engine.rescan 重启扫描器）
+        ui.scanning -> EmptyStateSpec(
+            "等待周围设备…",
+            "确保对方已打开 Bluelink 广播；仍无结果可重新扫描",
+            "重新扫描",
+            {
+                engine?.setAdvertisingWanted(true)
+                engine?.rescan()
+            },
+        )
+        // 扫描已停：开启扫描（对应引擎开关 + rescan）
+        else -> EmptyStateSpec(
+            "扫描已停止",
+            "开启扫描以发现附近设备",
+            "开启扫描",
+            {
+                engine?.setAdvertisingWanted(true)
+                engine?.rescan()
+            },
+        )
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1266,16 +1448,18 @@ private fun EmptyState() {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = "等待周围设备…",
+            text = spec.title,
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(SpacingTokens.SpaceXs))
         Text(
-            text = "确保对方已打开 Bluelink 广播",
+            text = spec.body,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(SpacingTokens.SpaceLg))
+        OutlinedButton(onClick = spec.onAction) { Text(spec.actionLabel) }
     }
 }
 
@@ -1317,14 +1501,21 @@ fun DeviceDetailSheet(
             HorizontalDivider()
 
             Text("同网判定", style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = when (entry.lanStatus) {
-                    LanStatus.SAME_LAN -> "✅ 同网（同一子网，可直连传输）"
-                    LanStatus.DIFFERENT_NETWORK -> "🌐 异网（可组建临时局域网）"
-                    LanStatus.UNKNOWN -> "❔ 未知（信息不足）"
-                },
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            // 同网判定：icon（点）+ label + token（audit P1-4/C7：emoji 字形 → 语义点；色不单独表状态）
+            val (lanLabel, lanDetail, lanColor) = when (entry.lanStatus) {
+                LanStatus.SAME_LAN -> Triple("同网", "（同一子网，可直连传输）", MaterialTheme.extended.success)
+                LanStatus.DIFFERENT_NETWORK -> Triple("异网", "（可组建临时局域网）", MaterialTheme.colorScheme.onSurfaceVariant)
+                LanStatus.UNKNOWN -> Triple("未知", "（信息不足）", MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusDot(lanColor)
+                Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                Text(
+                    text = "$lanLabel $lanDetail",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = lanColor,
+                )
+            }
 
             // ============ A5 组网：入口 / 阶段 / 结束 ============
             if (engine != null) {
@@ -1395,11 +1586,16 @@ fun DeviceDetailSheet(
                         )
                     }
                     if (ui.pinVerifyOk) {
-                        Text(
-                            text = "✅ PIN 验证通过，可组建局域网",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                        // 状态行 icon+label（audit P1-4）：✅ → success 语义点 + 文字双通道
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            StatusDot(color = MaterialTheme.extended.success)
+                            Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                            Text(
+                                text = "PIN 验证通过，可组建局域网",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                     ui.pinStatus?.let {
                         Text(text = it, style = MaterialTheme.typography.bodySmall)
@@ -1765,6 +1961,20 @@ private fun exportDiagnosticFile(context: Context, text: String) {
     } catch (e: Exception) {
         Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
     }
+}
+
+/** 跳系统应用设置页（空态「去授权」：权限未授的恢复路径，audit P1-1）。 */
+private fun openAppSettings(context: Context) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", context.packageName, null),
+    )
+    context.startActivity(intent)
+}
+
+/** 跳系统蓝牙设置页（空态「去开蓝牙」；引擎无主动开启蓝牙入口，按系统设置引导）。 */
+private fun openBluetoothSettings(context: Context) {
+    context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
 }
 
 /** T3 LocalSend 发送确认框：SAF 选文件后展示文件名/大小/目标；确认 → engine.confirmSend()（后台发送），取消 → engine.dismissSendDialog()。 */

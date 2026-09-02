@@ -91,7 +91,7 @@ fun BluelinkRoot(engine: BluelinkEngine) {
         onRequestPermissions = { permissionLauncher.launch(neededRuntimePermissions()) },
     )
 
-    engine.ui.selectedDevice?.let { selected ->
+    engine.ui.detailDevice?.let { selected ->
         DeviceDetailSheet(
             entry = selected,
             handshaking = engine.ui.handshaking,

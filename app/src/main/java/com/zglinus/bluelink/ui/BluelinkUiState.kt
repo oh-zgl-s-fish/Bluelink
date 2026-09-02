@@ -9,6 +9,34 @@ import com.zglinus.bluelink.ble.SignalMessage
 import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.net.NetworkSummary
 
+// ============ v0.5.0 UI-1：事件时间流 / 两态配对视图 / 抽屉路由 ============
+
+/** 事件时间流条目（主页面最下「时间流」LazyColumn 用；engine [BluelinkEngine.logUiEvent] 追加）。 */
+data class EventItem(
+    val ts: String, // HH:mm:ss
+    val text: String,
+    val kind: Int, // 0=信息 1=握手 2=组网 3=传输 4=错误 5=收尾
+)
+
+/** 本端设备卡数据（engine 握手/刷新时填；alias/model 取 Build.MODEL，电量/网络实时采集）。 */
+data class SelfInfo(
+    val alias: String = "",
+    val model: String = "",
+    val batteryPct: Int? = null,
+    val netText: String = "",
+)
+
+/** 对端设备卡数据（配对后右侧卡：握手对端 alias/model/battery/net + 连接状态字串 + 同网标记）。 */
+data class DeviceInfo(
+    val address: String = "",
+    val alias: String = "",
+    val model: String = "",
+    val batteryPct: Int? = null,
+    val netText: String = "",
+    val statusText: String = "", // 已连接 / 接入 / 未连接
+    val sameLan: Boolean = false, // 同网直连按钮标签用（entry.lanStatus == SAME_LAN）
+)
+
 /**
  * 附近设备条目。
  * 扫描阶段只有 MAC + RSSI；握手成功后补齐别名/型号/网络信息/同网判定。
@@ -55,8 +83,8 @@ class BluelinkUiState {
     /** 附近设备（按蓝牙 MAC 索引）。 */
     val devices = mutableStateMapOf<String, DeviceEntry>()
 
-    /** 弹层当前选中的设备。 */
-    var selectedDevice by mutableStateOf<DeviceEntry?>(null)
+    /** 弹层当前选中的设备（openDevice 置；DeviceDetailSheet 渲染依据）。 */
+    var detailDevice by mutableStateOf<DeviceEntry?>(null)
 
     /** GATT 客户端握手进行中（弹层展示“正在握手…”）。 */
     var handshaking by mutableStateOf(false)
@@ -197,4 +225,26 @@ class BluelinkUiState {
 
     /** 已配对指纹数（PinStore 同步；设置区展示「已配对 N 台」）。 */
     var pairedCount by mutableStateOf(0)
+
+    // ============ v0.5.0 UI-1：事件时间流 / 两态配对视图 / 本机信息 / 抽屉路由 ============
+
+    /** 事件时间流（engine [BluelinkEngine.logUiEvent] 追加；上限 [EVENT_LOG_MAX] 条滚动）。 */
+    var eventLog by mutableStateOf(listOf<EventItem>())
+
+    /** 配对后视图（会话建立且 PIN 关/已验 → true，主页面切换对端卡视图；复位点随会话 detach/stopAllBle）。 */
+    var pairedView by mutableStateOf(false)
+
+    /** 本端设备卡数据（engine 握手/刷新时填）。 */
+    var selfCard by mutableStateOf(SelfInfo())
+
+    /** 对端设备卡数据（配对后右侧卡；引擎握手/PIN 验毕后填，会话结束清空）。 */
+    var selectedDevice by mutableStateOf<DeviceInfo?>(null)
+
+    /** 抽屉路由当前页：0=主页面 1=发送 2=接收 3=记录 4=设置 5=权限 6=关于。 */
+    var currentPage by mutableStateOf(0)
+
+    companion object {
+        /** 事件时间流上限（超出丢弃最旧）。 */
+        const val EVENT_LOG_MAX = 200
+    }
 }

@@ -8,11 +8,28 @@ import android.provider.DocumentsContract
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,17 +39,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -41,8 +67,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,23 +83,34 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.HandshakeProtocol
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * 主页面（docs/ui-design.md §4.1 一期最简版）：
- * 权限/蓝牙引导卡 → 本机状态卡（广播开关 + 网络摘要）→ 附近设备列表 → 空态文案。
+ * 主页面（docs/ui-design.md §4.1 两态左右布局，v0.5.0 UI-1）：
+ * - 开屏（配对前）：顶部左右两栏——左「本端设备卡」1/3、右「对端扫描列表」2/3（LazyColumn
+ *   上下滑动；长按或 × 清除失效设备）→ 其下「流程动画区」（配对/组网进行中显示：环形进度/脉冲 +
+ *   阶段文案；无进行中流程收起——高度动画）→ 最下「时间流」（事件时间线：倒序 + 自动滚顶 + 上下滚动）。
+ * - 配对/会话建立后：顶部等宽两栏（本端 1/2 | 对端 1/2 设备卡：alias/电量/网络 + 状态
+ *   「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮）；宽度 1/3→1/2 切换用 Compose 动画
+ *   （[animateFloatAsState] 驱动 Row weight，[animateDpAsState] 用于流程区脉冲环）。
+ * - 抽屉（[ModalNavigationDrawer]）：头部（应用名/本机 alias）+ 入口（主页面/发送/接收/记录/
+ *   设置/权限/关于）→ 设 [BluelinkUiState.currentPage]；非主页面先放骨架占位（「UI-2+ 实现」）。
+ * - 控件搬迁：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测
+ *   移入抽屉设置页；发送/接收 SAF launcher、诊断/组网/PIN/发送确认弹层与设备详情弹层原样保留。
  *
- * v0.3.9：本机状态卡新增「LocalOnly 自测」独立入口（不经过组网/状态机）——
- * running 时按钮变「关闭 LocalOnly」，下方展示 [BluelinkUiState.localOnlyTestInfo] 状态行；
- * sdk 33+ 密码登记框（[LoTestPwdDialog]）在 MainScreen 顶层渲染（不依赖设备详情弹层）。
+ * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页；
+ * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,6 +122,10 @@ fun MainScreen(
     onRefreshNetwork: () -> Unit,
     onRequestPermissions: () -> Unit,
 ) {
+    val engine = BluelinkEngine.current()
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
     // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）
     val sendFileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -102,51 +150,51 @@ fun MainScreen(
         }
     }
 
-    Scaffold { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-        ) {
-            if (!ui.permissionsGranted) {
-                PermissionBanner(onRequestPermissions)
-            } else if (!ui.btEnabled) {
-                BluetoothOffBanner()
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            Text("Bluelink", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(12.dp))
-
-            LocalStatusCard(
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            AppDrawer(
                 ui = ui,
-                advertisingWanted = advertisingWanted,
-                onAdvertisingWantedChange = onAdvertisingWantedChange,
-                onRefreshNetwork = onRefreshNetwork,
-                onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
-                onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
+                onNavigate = { page ->
+                    ui.currentPage = page
+                    scope.launch { drawerState.close() }
+                },
             )
+        },
+    ) {
+        Scaffold(
+            topBar = {
+                MainTopBar(
+                    ui = ui,
+                    advertisingWanted = advertisingWanted,
+                    onAdvertisingWantedChange = onAdvertisingWantedChange,
+                    onMenuClick = { scope.launch { drawerState.open() } },
+                )
+            },
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+            ) {
+                // 抽屉路由：currentPage 0=主页面 1=发送 2=接收 3=记录 4=设置 5=权限 6=关于
+                when (ui.currentPage) {
+                    0 -> MainPage(
+                        ui = ui,
+                        onDeviceClick = onDeviceClick,
+                        onRefreshNetwork = onRefreshNetwork,
+                        onRequestPermissions = onRequestPermissions,
+                        onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
+                        onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
+                    )
 
-            Spacer(Modifier.height(8.dp))
-
-            if (ui.devices.isEmpty()) {
-                EmptyState()
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    item {
-                        Text("附近的设备", style = MaterialTheme.typography.titleMedium)
-                    }
-                    items(
-                        ui.devices.values.sortedBy { it.firstSeen },
-                        key = { it.address },
-                    ) { entry ->
-                        DeviceRow(entry = entry, onClick = { onDeviceClick(entry) })
-                    }
+                    1 -> PlaceholderPage("发送", ui)
+                    2 -> PlaceholderPage("接收", ui)
+                    3 -> LogPage(ui)
+                    4 -> SettingsPage(ui, engine)
+                    5 -> PlaceholderPage("权限", ui, onRequestPermissions)
+                    6 -> PlaceholderPage("关于", ui)
+                    else -> PlaceholderPage("未知页面", ui)
                 }
             }
         }
@@ -169,79 +217,202 @@ fun MainScreen(
         )
     }
 
-    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（主界面独立入口，经 BluelinkEngine.current() 取引擎，与设备详情弹层无关）
-    BluelinkEngine.current()?.let { engine ->
-        if (ui.loTestPwdDialog) LoTestPwdDialog(engine)
+    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（入口已移至抽屉设置页；登记框仍在顶层渲染，
+    // 经 BluelinkEngine.current() 取引擎，与设备详情弹层无关）
+    engine?.let {
+        if (ui.loTestPwdDialog) LoTestPwdDialog(it)
     }
 
     // T3 LocalSend：发送确认框（SAF 选文件后展示文件名/大小/目标；确认后后台发送）
-    BluelinkEngine.current()?.let { engine ->
-        if (ui.sendDialog) SendConfirmDialog(engine)
+    engine?.let {
+        if (ui.sendDialog) SendConfirmDialog(it)
     }
 
     // v0.4.9 PIN 配对验证：对端输入框（被验证方可能未打开设备弹层——握手由对方发起，顶层渲染保证可见）
-    BluelinkEngine.current()?.let { engine ->
-        if (ui.pinInputDialog) PinInputDialog(engine)
+    engine?.let {
+        if (ui.pinInputDialog) PinInputDialog(it)
     }
 }
 
-/** 本机状态卡：广播开关（Switch）+ 本机网络摘要（Wi-Fi/蜂窝/IP/子网）+ 信令自测 + ③ LocalOnly 自测。 */
+/** 顶栏：菜单（☰ 开抽屉）+ 标题 + 广播/扫描开关（置顶栏）。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalStatusCard(
+private fun MainTopBar(
     ui: BluelinkUiState,
     advertisingWanted: Boolean,
     onAdvertisingWantedChange: (Boolean) -> Unit,
-    onRefreshNetwork: () -> Unit,
-    onSendFileClick: () -> Unit,
-    onChooseReceiveDir: () -> Unit,
+    onMenuClick: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+    TopAppBar(
+        title = { Text(if (ui.currentPage == 0) "Bluelink" else pageTitle(ui.currentPage)) },
+        navigationIcon = {
+            IconButton(onClick = onMenuClick) { Text("☰") }
+        },
+        actions = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("本机", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = Build.MODEL,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                TextButton(onClick = { ui.diagVisible = true }) { Text("诊断") }
+                Text(
+                    text = if (advertisingWanted) "广播" else "停止",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Switch(
                     checked = advertisingWanted,
                     onCheckedChange = onAdvertisingWantedChange,
                 )
             }
-            HorizontalDivider()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = ui.localNetwork.describe(),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onRefreshNetwork) { Text("刷新") }
+        },
+    )
+}
+
+private fun pageTitle(page: Int): String = when (page) {
+    1 -> "发送"
+    2 -> "接收"
+    3 -> "记录"
+    4 -> "设置"
+    5 -> "权限"
+    6 -> "关于"
+    else -> "Bluelink"
+}
+
+/** 主页面（两态左右布局）：横幅 → 两栏（1/3|2/3 ⇄ 1/2|1/2，weight 动画）→ 流程动画区 → 底部动作行 → 时间流。 */
+@Composable
+private fun MainPage(
+    ui: BluelinkUiState,
+    onDeviceClick: (DeviceEntry) -> Unit,
+    onRefreshNetwork: () -> Unit,
+    onRequestPermissions: () -> Unit,
+    onSendFileClick: () -> Unit,
+    onChooseReceiveDir: () -> Unit,
+) {
+    val engine = BluelinkEngine.current()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+    ) {
+        if (!ui.permissionsGranted) {
+            PermissionBanner(onRequestPermissions)
+        } else if (!ui.btEnabled) {
+            BluetoothOffBanner()
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // ---- 两态左右栏：开屏 1/3 | 2/3；配对后 1/2 | 1/2（Row weight 动画，宽度平滑切换） ----
+        val selfWeight by animateFloatAsState(
+            targetValue = if (ui.pairedView) 0.5f else 1f / 3f,
+            label = "selfWeight",
+        )
+        Row(modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)
+        ) {
+            SelfDeviceCard(
+                ui = ui,
+                onRefreshNetwork = onRefreshNetwork,
+                modifier = Modifier
+                    .weight(selfWeight)
+                    .fillMaxHeight(),
+            )
+            Spacer(Modifier.width(8.dp))
+            Crossfade(
+                targetState = ui.pairedView,
+                modifier = Modifier
+                    .weight(1f - selfWeight)
+                    .fillMaxHeight(),
+                label = "peerPanel",
+            ) { paired ->
+                if (paired) {
+                    PeerDeviceCard(ui = ui, engine = engine)
+                } else {
+                    ScanListPanel(ui = ui, onDeviceClick = onDeviceClick)
+                }
             }
-            if (ui.advertising) {
-                Text(
-                    text = "广播中 · 扫描中",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            } else {
-                Text(
-                    text = "广播已停止",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        }
+
+        // ---- 流程动画区：配对/组网进行中显示（环形进度/脉冲 + 阶段文案）；无则收起（高度动画） ----
+        FlowAnimationArea(ui)
+
+        Spacer(Modifier.height(8.dp))
+
+        // ---- 底部动作行：发送文件 / 收尾（结束组网·结束直连·关闭热点·断开网络）/ 接收保存位置 ----
+        BottomActionRow(
+            ui = ui,
+            engine = engine,
+            onSendFileClick = onSendFileClick,
+            onChooseReceiveDir = onChooseReceiveDir,
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // ---- 时间流（事件时间线：倒序 + 自动滚顶 + 上下滚动） ----
+        TimeFlowPanel(
+            ui = ui,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(160.dp),
+        )
+    }
+}
+
+/** 本端设备卡（左栏；配对前 1/3、配对后 1/2，宽度由外层 Row weight 动画驱动）。 */
+@Composable
+private fun SelfDeviceCard(
+    ui: BluelinkUiState,
+    onRefreshNetwork: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedCard(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = "本端设备",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = ui.selfCard.alias.ifBlank { "本机" },
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = ui.selfCard.model,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            ui.selfCard.batteryPct?.let {
+                Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
             }
+            Text(
+                text = ui.selfCard.netText.ifBlank { "未连接网络" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = if (ui.advertising) "广播中 · 扫描中" else "广播已停止",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (ui.advertising) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
             ui.advertiserError?.let {
                 Text(
                     text = "广播异常: $it",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             ui.scanError?.let {
@@ -249,229 +420,133 @@ private fun LocalStatusCard(
                     text = "扫描异常: $it",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = onRefreshNetwork,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("刷新网络") }
+        }
+    }
+}
 
-            // ============ 信令自测（验证包）：状态行 + 开/关按钮 ============
-            ui.signalTestStatus?.let { status ->
+/** 对端扫描列表（右栏，配对前 2/3）：LazyColumn 上下滑动；点击设备握手；长按/× 清除失效设备。 */
+@Composable
+private fun ScanListPanel(
+    ui: BluelinkUiState,
+    onDeviceClick: (DeviceEntry) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "对端扫描",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            if (ui.scanning) {
                 Text(
-                    text = status,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (ui.signalTestRunning) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    text = "扫描中…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
-            BluelinkEngine.current()?.let { engine ->
-                TextButton(
-                    onClick = {
-                        if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
-                    },
-                ) {
-                    Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测")
-                }
-            }
-
-            // ============ ③ LocalOnly 自测（v0.3.9 独立入口，不经过组网/状态机） ============
-            BluelinkEngine.current()?.let { engine ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = {
-                            if (ui.localOnlyTestRunning) {
-                                engine.closeLocalOnlySelfTest()
-                            } else {
-                                engine.localOnlySelfTest()
-                            }
-                        },
-                    ) {
-                        Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测")
-                    }
-                    if (ui.localOnlyTestRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    }
-                }
-                ui.localOnlyTestInfo?.let { info ->
-                    Text(
-                        text = if (ui.localOnlyTestPasswordSet) "✅ $info" else info,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (ui.localOnlyTestRunning) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
+        }
+        Text(
+            text = "点击设备握手 · 长按或 × 清除失效设备",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (ui.devices.isEmpty()) {
+            EmptyState()
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(
+                    ui.devices.values.sortedBy { it.firstSeen },
+                    key = { it.address },
+                ) { entry ->
+                    DeviceRow(
+                        entry = entry,
+                        onClick = { onDeviceClick(entry) },
+                        onRemove = { BluelinkEngine.current()?.removeDevice(entry.address) },
                     )
-                }
-            }
-
-            // ============ v0.4.9 PIN 配对验证（设置区：模式三段按钮 + 清除配对列表） ============
-            BluelinkEngine.current()?.let { engine ->
-                HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "PIN 验证：${pinModeName(ui.pinMode)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = if (ui.pairedCount > 0) "已配对 ${ui.pairedCount} 台" else "未配对",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    listOf(
-                        0 to "关",
-                        1 to "仅首次",
-                        2 to "每次",
-                    ).forEach { (m, label) ->
-                        OutlinedButton(
-                            onClick = { engine.setPinMode(m) },
-                            enabled = ui.pinMode != m,
-                        ) { Text(label) }
-                        Spacer(Modifier.width(6.dp))
-                    }
-                }
-                Text(
-                    text = "关=不校验；仅首次=首配后按指纹免验；每次=每会话必验（对端输入配对码）",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = { engine.clearPairedDevices() }) { Text("清除配对列表") }
-            }
-
-            // ============ T3 LocalSend 传输（发送入口 / 进度 / 接收保存位置） ============
-            BluelinkEngine.current()?.let { engine ->
-                // 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
-                val canSend = engine.transportPeerIp.isNotBlank() ||
-                    ui.devices.values.any { it.handshake != null }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(
-                        onClick = onSendFileClick,
-                        enabled = canSend,
-                    ) { Text("发送文件") }
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = if (engine.transportPeerIp.isNotBlank()) {
-                            "目标: ${engine.transportPeerIp}"
-                        } else {
-                            "组网就绪后可发送"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                ui.transferState?.let { state ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = state,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (state.startsWith("发送完成") || state.startsWith("传输完成") || state.startsWith("✅")) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                        // B4 温和收尾：传输完成后状态卡出现对应按钮——热点方「关闭热点」（停热点+停 LocalSend
-                        // 服务，BLE 会话/广播/扫描保留）/ 从机「断开网络」（断开 Specifier 网络+停服务，BLE 保留）；
-                        // 传输进行中仍显示「取消」（取消进行中的发送）；终态（已关闭/已断开）无按钮。
-                        when {
-                            // A8 同网直连（免热点）：传输完成 → 「结束直连」（温和收尾，BLE 保留）
-                            state.startsWith("传输完成") && engine.sameLanDirectActive ->
-                                TextButton(onClick = { engine.endNetworking() }) { Text("结束直连") }
-
-                            state.startsWith("传输完成") && ui.hotspotSideAfterTransfer ->
-                                TextButton(onClick = { engine.closeHotspotAfterTransfer() }) { Text("关闭热点") }
-
-                            state.startsWith("传输完成") ->
-                                TextButton(onClick = { engine.disconnectNetworkAfterTransfer() }) { Text("断开网络") }
-
-                            state.startsWith("已关闭") || state.startsWith("已断开") -> Unit
-
-                            else -> TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
-                        }
-                    }
-                }
-                // ============ v0.4.5 接收保存位置（SAF OpenDocumentTree 目录，不自建文件浏览器） ============
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "接收保存至：${ui.receiveDirName ?: "未选择（点选）"}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (ui.receiveDirName != null) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (ui.receiveDirName == null) {
-                        OutlinedButton(onClick = onChooseReceiveDir) { Text("选择保存目录") }
-                    }
                 }
             }
         }
     }
 }
 
-/** 设备行：握手后显示别名/型号/MAC/RSSI/网络徽标/同网标记；握手前显示 MAC+RSSI。 */
+/** 设备行：握手后显示别名/型号/MAC/RSSI/网络徽标/同网标记；握手前显示 MAC+RSSI。尾「×」或长按清除失效设备。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit) {
+private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> Unit) {
     OutlinedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onRemove),
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            val hs = entry.handshake
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = hs?.alias?.takeIf { it.isNotBlank() } ?: "未知设备",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                val hs = entry.handshake
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = hs?.alias?.takeIf { it.isNotBlank() } ?: "未知设备",
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (hs != null) {
+                        NetworkBadge(hs)
+                    } else {
+                        Text(
+                            text = "扫描中…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 if (hs != null) {
-                    NetworkBadge(hs)
+                    Text(
+                        text = listOfNotNull(
+                            hs.model.takeIf { it.isNotBlank() },
+                            entry.displayMac,
+                            "${entry.rssi} dBm",
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 } else {
                     Text(
-                        text = "扫描中…",
-                        style = MaterialTheme.typography.labelSmall,
+                        text = "${entry.displayMac} · ${entry.rssi} dBm",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            }
-            if (hs != null) {
                 Text(
-                    text = listOfNotNull(
-                        hs.model.takeIf { it.isNotBlank() },
-                        entry.displayMac,
-                        "${entry.rssi} dBm",
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    text = "${entry.displayMac} · ${entry.rssi} dBm",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = when (entry.lanStatus) {
+                        LanStatus.SAME_LAN -> "✅ 同网"
+                        LanStatus.DIFFERENT_NETWORK -> "🌐 异网"
+                        LanStatus.UNKNOWN -> "❔ 未知"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
                 )
             }
-            Text(
-                text = when (entry.lanStatus) {
-                    LanStatus.SAME_LAN -> "✅ 同网"
-                    LanStatus.DIFFERENT_NETWORK -> "🌐 异网"
-                    LanStatus.UNKNOWN -> "❔ 未知"
-                },
-                style = MaterialTheme.typography.labelMedium,
-            )
+            TextButton(onClick = onRemove) { Text("×") }
         }
     }
 }
@@ -494,6 +569,576 @@ private fun NetworkBadge(hs: HandshakeMessage) {
             style = MaterialTheme.typography.labelSmall,
             color = color,
         )
+    }
+}
+
+/** 对端设备卡（配对后右栏 1/2）：alias/电量/网络 + 状态「已连接/接入/未连接」+ 重新扫描 + 组网/同网直连按钮。 */
+@Composable
+private fun PeerDeviceCard(
+    ui: BluelinkUiState,
+    engine: BluelinkEngine?,
+    modifier: Modifier = Modifier,
+) {
+    val peer = ui.selectedDevice
+    OutlinedCard(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "对端设备",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f),
+                )
+                val status = peer?.statusText ?: "未连接"
+                val statusColor = when (status) {
+                    "接入" -> Color(0xFF2E7D32)
+                    "已连接" -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = statusColor.copy(alpha = 0.15f),
+                ) {
+                    Text(
+                        text = status,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusColor,
+                    )
+                }
+            }
+            Text(
+                text = peer?.alias ?: "未知设备",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = peer?.model ?: "—",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            peer?.batteryPct?.let {
+                Text("电量 $it%", style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                text = peer?.netText ?: "网络未知",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.weight(1f))
+            OutlinedButton(
+                onClick = { engine?.rescan() },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("重新扫描") }
+            Spacer(Modifier.height(4.dp))
+            val sameLan = peer?.sameLan == true
+            Button(
+                onClick = { engine?.startNetworking() },
+                enabled = engine != null && !engine.pinRequired(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (sameLan) "同网免热点直连" else "组建临时局域网") }
+            if (engine?.pinRequired() == true) {
+                Text(
+                    text = "需先完成 PIN 配对验证（对端输入配对码）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 流程动画区：ui.netState / 组网阶段 / PIN 验证驱动——有进行中流程才显示
+ * （环形进度 + 脉冲 + 阶段文案），无则收起（AnimatedVisibility 高度动画）。
+ */
+@Composable
+private fun FlowAnimationArea(ui: BluelinkUiState) {
+    // 有进行中流程（组网阶段/阶段文案/PIN 验证中）才显示；无则收起（高度动画）
+    val visible = ui.netState != null || ui.pinVerifyActive
+    AnimatedVisibility(
+        visible = visible,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut(),
+    ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val busy = ui.netActive || ui.pinVerifyActive
+                if (busy) {
+                    PulseRing()
+                } else {
+                    Text(
+                        text = if (ui.netState?.startsWith("✅") == true) "✅" else "●",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "流程",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = ui.netState ?: flowFallbackText(ui),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (ui.netState?.startsWith("✅") == true || ui.pinVerifyOk) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 无 netState 时的流程文案兜底（PIN 验证进行中/已通过）。 */
+private fun flowFallbackText(ui: BluelinkUiState): String = when {
+    ui.pinVerifyActive -> "PIN 配对验证进行中…"
+    ui.pinVerifyOk -> "PIN 验证已通过"
+    else -> ""
+}
+
+/** 环形进度 + 脉冲：animateDpAsState 呼吸环 + 无限 alpha 脉冲内点。 */
+@Composable
+private fun PulseRing() {
+    val transition = rememberInfiniteTransition(label = "pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.25f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+        label = "pulseAlpha",
+    )
+    var big by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(600)
+            big = !big
+        }
+    }
+    val ringSize by animateDpAsState(
+        targetValue = if (big) 30.dp else 24.dp,
+        animationSpec = tween(600),
+        label = "ringSize",
+    )
+    Box(contentAlignment = Alignment.Center) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(ringSize),
+            strokeWidth = 3.dp,
+        )
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha), CircleShape),
+        )
+    }
+}
+
+/** 底部动作行：发送文件（入口）/ 收尾按钮（结束组网/结束直连/关闭热点/断开网络/取消）/ 接收保存位置。 */
+@Composable
+private fun BottomActionRow(
+    ui: BluelinkUiState,
+    engine: BluelinkEngine?,
+    onSendFileClick: () -> Unit,
+    onChooseReceiveDir: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // T3 发送入口：TRANSPORT（transportPeerIp 已记录）或已有握手对端时可点（同网直连场景 A8 落地后生效）
+        val canSend = engine != null &&
+            (engine.transportPeerIp.isNotBlank() || ui.devices.values.any { it.handshake != null })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(
+                onClick = onSendFileClick,
+                enabled = canSend,
+            ) { Text("发送文件") }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = if (engine != null && engine.transportPeerIp.isNotBlank()) {
+                    "目标: ${engine.transportPeerIp}"
+                } else {
+                    "组网就绪后可发送"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            // 收尾按钮（B4 温和收尾 / 组网进行中 / 传输进行中取消）
+            when {
+                engine != null && ui.netActive ->
+                    TextButton(onClick = { engine.endNetworking() }) { Text("结束组网") }
+
+                engine != null && ui.transferState?.startsWith("传输完成") == true && engine.sameLanDirectActive ->
+                    TextButton(onClick = { engine.endSameLanDirect() }) { Text("结束直连") }
+
+                engine != null && ui.transferState?.startsWith("传输完成") == true && ui.hotspotSideAfterTransfer ->
+                    TextButton(onClick = { engine.closeHotspotAfterTransfer() }) { Text("关闭热点") }
+
+                engine != null && ui.transferState?.startsWith("传输完成") == true ->
+                    TextButton(onClick = { engine.disconnectNetworkAfterTransfer() }) { Text("断开网络") }
+
+                engine != null && (ui.transferState?.startsWith("发送中") == true || ui.transferState?.startsWith("接收中") == true) ->
+                    TextButton(onClick = { engine.cancelSend() }) { Text("取消") }
+
+                else -> Unit
+            }
+        }
+        ui.transferState?.let { state ->
+            Text(
+                text = state,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (state.startsWith("发送完成") || state.startsWith("传输完成") || state.startsWith("✅")) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        // v0.4.5 接收保存位置（SAF OpenDocumentTree 目录，不自建文件浏览器）
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "接收保存至：${ui.receiveDirName ?: "未选择（点选）"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (ui.receiveDirName != null) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (ui.receiveDirName == null) {
+                OutlinedButton(onClick = onChooseReceiveDir) { Text("选择保存目录") }
+            }
+        }
+    }
+}
+
+/** 时间流面板（主页面最下）：标题 + 条数 + [TimeFlowList]。 */
+@Composable
+private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "时间流",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "${ui.eventLog.size} 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        TimeFlowList(ui, Modifier.fillMaxSize())
+    }
+}
+
+/** 时间流列表：倒序（最新在顶）+ 自动滚顶；LazyColumn 上下滚动。 */
+@Composable
+private fun TimeFlowList(ui: BluelinkUiState, modifier: Modifier = Modifier) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(ui.eventLog.size) {
+        if (ui.eventLog.isNotEmpty()) listState.scrollToItem(0)
+    }
+    if (ui.eventLog.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text(
+                text = "暂无事件记录",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else {
+        LazyColumn(
+            state = listState,
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            itemsIndexed(ui.eventLog.asReversed()) { _, ev ->
+                EventRow(ev)
+            }
+        }
+    }
+}
+
+/** 事件行：时间（等宽）+ 色点（按 kind）+ 文案。 */
+@Composable
+private fun EventRow(ev: EventItem) {
+    val color = when (ev.kind) {
+        BluelinkEngine.EVT_HANDSHAKE -> MaterialTheme.colorScheme.primary
+        BluelinkEngine.EVT_NETWORK -> Color(0xFF2E7D32)
+        BluelinkEngine.EVT_TRANSFER -> Color(0xFF1565C0)
+        BluelinkEngine.EVT_ERROR -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant // EVT_INFO / EVT_TEARDOWN
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = ev.ts,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(58.dp),
+        )
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .background(color, CircleShape),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = ev.text,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 记录页（抽屉 3）：全屏时间流（复用 [TimeFlowList]）。 */
+@Composable
+private fun LogPage(ui: BluelinkUiState) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "记录",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
+        }
+        Spacer(Modifier.height(8.dp))
+        TimeFlowList(ui, Modifier.fillMaxSize())
+    }
+}
+
+/** 设置页（抽屉 4）：PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此）。 */
+@Composable
+private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "设置",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
+        }
+        HorizontalDivider()
+        if (engine == null) {
+            Text(
+                text = "引擎未就绪",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@Column
+        }
+
+        // ============ v0.4.9 PIN 配对验证（从原本机状态卡移入抽屉设置页） ============
+        Text("PIN 配对验证", style = MaterialTheme.typography.titleSmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "模式：${pinModeName(ui.pinMode)}",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = if (ui.pairedCount > 0) "已配对 ${ui.pairedCount} 台" else "未配对",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            listOf(
+                0 to "关",
+                1 to "仅首次",
+                2 to "每次",
+            ).forEach { (m, label) ->
+                OutlinedButton(
+                    onClick = { engine.setPinMode(m) },
+                    enabled = ui.pinMode != m,
+                ) { Text(label) }
+                Spacer(Modifier.width(6.dp))
+            }
+        }
+        Text(
+            text = "关=不校验；仅首次=首配后按指纹免验；每次=每会话必验（对端输入配对码）",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ui.pinStatus?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall)
+        }
+        ui.pinError?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        TextButton(onClick = { engine.clearPairedDevices() }) { Text("清除配对列表") }
+        HorizontalDivider()
+
+        // ============ 信令自测（验证包） ============
+        Text("信令自测（验证包）", style = MaterialTheme.typography.titleSmall)
+        ui.signalTestStatus?.let { status ->
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (ui.signalTestRunning) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        TextButton(
+            onClick = {
+                if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
+            },
+        ) {
+            Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测")
+        }
+        HorizontalDivider()
+
+        // ============ ③ LocalOnly 自测（v0.3.9 独立入口） ============
+        Text("LocalOnly 自测（③）", style = MaterialTheme.typography.titleSmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = {
+                    if (ui.localOnlyTestRunning) {
+                        engine.closeLocalOnlySelfTest()
+                    } else {
+                        engine.localOnlySelfTest()
+                    }
+                },
+            ) {
+                Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测")
+            }
+            if (ui.localOnlyTestRunning) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 2.dp,
+                )
+            }
+        }
+        ui.localOnlyTestInfo?.let { info ->
+            Text(
+                text = if (ui.localOnlyTestPasswordSet) "✅ $info" else info,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (ui.localOnlyTestRunning) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        HorizontalDivider()
+
+        // ============ 诊断 ============
+        Text("诊断", style = MaterialTheme.typography.titleSmall)
+        TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
+    }
+}
+
+/** 骨架占位页（发送/接收/权限/关于等 UI-2+ 实现）：「UI-2+ 实现」文案 + 返回。 */
+@Composable
+private fun PlaceholderPage(
+    title: String,
+    ui: BluelinkUiState,
+    extraAction: (() -> Unit)? = null,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "UI-2+ 实现（骨架先行）",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        extraAction?.let {
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = it) { Text("去授权") }
+        }
+        Spacer(Modifier.height(24.dp))
+        OutlinedButton(onClick = { ui.currentPage = 0 }) { Text("返回主页面") }
+    }
+}
+
+/** 抽屉：头部（应用名/本机 alias）+ 入口列表（主页面/发送/接收/记录/设置/权限/关于）→ 设 currentPage。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
+    ModalDrawerSheet {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 20.dp),
+        ) {
+            Text("Bluelink", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                text = "本机：${ui.selfCard.alias.ifBlank { Build.MODEL }}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        HorizontalDivider()
+        val entries = listOf(
+            0 to "主页面",
+            1 to "发送",
+            2 to "接收",
+            3 to "记录",
+            4 to "设置",
+            5 to "权限",
+            6 to "关于",
+        )
+        entries.forEach { (page, label) ->
+            NavigationDrawerItem(
+                label = { Text(label) },
+                selected = ui.currentPage == page,
+                onClick = { onNavigate(page) },
+                modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
+            )
+        }
     }
 }
 
@@ -543,7 +1188,7 @@ private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 64.dp),
+            .padding(top = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(

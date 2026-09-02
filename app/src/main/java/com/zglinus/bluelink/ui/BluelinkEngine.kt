@@ -39,6 +39,7 @@ import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.transport.LocalSendClient
 import com.zglinus.bluelink.transport.LocalSendServer
 import com.zglinus.bluelink.transport.SendFile
+import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.NetworkSummary
 import com.zglinus.bluelink.net.SameLanChecker
@@ -57,6 +58,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.Inet4Address
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -152,6 +156,7 @@ class BluelinkEngine(private val context: Context) {
             ui.advertising = false
             ui.advertiserError = reason
             DiagLogger.log(TAG, "广播启动失败回调 UI: $reason")
+            logUiEvent(EVT_ERROR, "广播异常：$reason")
         }
     })
 
@@ -163,6 +168,7 @@ class BluelinkEngine(private val context: Context) {
         override fun onScanFailed(reason: String) {
             ui.scanError = reason
             DiagLogger.log(TAG, "扫描失败回调 UI: $reason")
+            logUiEvent(EVT_ERROR, "扫描异常：$reason")
         }
     })
 
@@ -197,6 +203,7 @@ class BluelinkEngine(private val context: Context) {
             ui.handshaking = false
             ui.handshakeError = reason
             DiagLogger.log(TAG, "握手失败回调 UI: $deviceAddress reason=$reason")
+            logUiEvent(EVT_ERROR, "握手失败：$reason（…${deviceAddress.takeLast(8)}）")
             sessionManager.onHandshakeFailed(deviceAddress) // 自动重连握手失败时收敛会话状态
         }
 
@@ -570,6 +577,7 @@ class BluelinkEngine(private val context: Context) {
     private val netCallbacks = object : NetworkingStateMachine.Callbacks {
         override fun onOfferReceived(ssid: String, pwd: String?) {
             DiagLogger.log(TAG, "收到对端 offer：ssid=$ssid pwdLen=${pwd?.length ?: 0}，WifiJoiner 接入")
+            logUiEvent(EVT_NETWORK, "收到组网邀请（SSID=$ssid），接入热点…")
             // B4 温和收尾：收到 offer = 本机为从机（非热点方），传输完成后状态卡显示「断开网络」
             ui.hotspotSideAfterTransfer = false
             pendingJoinSsid = ssid
@@ -580,6 +588,7 @@ class BluelinkEngine(private val context: Context) {
         }
 
         override fun onTransportReady(peerIp: String) {
+            logUiEvent(EVT_NETWORK, "组网转移：传输就绪（peerIp=${peerIp.ifEmpty { "<空>" }}）")
             // T3：传输就绪（peerIp 可为占位 ""）→ 记录对端 IP + 自动启动 LocalSend 服务（alias=Build.MODEL），
             // 对端即可经 53317 发送文件到本机；同时扫描 filesDir/localsend 初始化接收列表
             DiagLogger.log(TAG, "组网传输就绪 peerIp=${peerIp.ifEmpty { "<空>" }}")
@@ -588,6 +597,7 @@ class BluelinkEngine(private val context: Context) {
 
         override fun onAbort(reason: String) {
             DiagLogger.log(TAG, "组网中止: $reason")
+            logUiEvent(EVT_TEARDOWN, "组网已中止：$reason")
             netStateMachine = null // 允许再次「组建临时局域网」（下次 start 新建机器）
             mainHandler.removeCallbacks(netPoller)
             stopWifiJoinMonitor() // A6：组网中止 → offer 会话结束，注销 Wi-Fi 变化监听（幂等；监听仅 offer 会话内有效）
@@ -900,11 +910,12 @@ class BluelinkEngine(private val context: Context) {
     fun refreshNetwork() {
         ui.localNetwork = NetworkInfoProvider.collect(appContext)
         refreshAllLanStatus()
+        refreshSelfCard() // v0.5.0 UI-1：本机设备卡网络/电量随刷新更新
     }
 
     /** 点击设备：先展示弹层；无握手时发起 GATT 客户端握手。 */
     fun openDevice(entry: DeviceEntry) {
-        ui.selectedDevice = entry
+        ui.detailDevice = entry
         updateNetBtnVisibility() // A5：按选中设备握手/异网情况刷新「组建临时局域网」入口
         if (entry.handshake != null) return // 已有握手，直接展示详情
         val a = adapter
@@ -929,6 +940,7 @@ class BluelinkEngine(private val context: Context) {
             sessionManager.detach()
             signalTest.stop() // 信令自测随会话结束停止（防定时器泄漏）
         }
+        refreshPairedView() // v0.5.0 UI-1：旧会话 detach → 配对视图复位（新握手期间不显示对端卡）
         // 握手连接仲裁：若本机 Server 已与该设备建立反连接，先断开对端反连，
         // 避免同一设备 Client→对端 + 对端 Client→本机 Server 双 GATT 连接并发（蓝牙栈写入挂起根因）；
         // 断开后延迟 200ms 等栈稳定再发起 Client 连接。
@@ -942,7 +954,7 @@ class BluelinkEngine(private val context: Context) {
     }
 
     fun dismissSheet() {
-        ui.selectedDevice = null
+        ui.detailDevice = null
         updateNetBtnVisibility()
     }
 
@@ -1176,7 +1188,7 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "startNetworking 忽略：组网/同网直连已在进程中（machine=${netStateMachine != null} sameLanDirect=$sameLanDirectActive）")
             return
         }
-        val entry = ui.selectedDevice ?: run {
+        val entry = ui.detailDevice ?: run {
             DiagLogger.log(TAG, "startNetworking：无选中设备")
             return
         }
@@ -1221,6 +1233,7 @@ class BluelinkEngine(private val context: Context) {
         )
         val decision = decide(mine, peer)
         DiagLogger.log(TAG, "组网仲裁：who=${decision.who} level=${decision.level} reason=${decision.reason}")
+        logUiEvent(EVT_NETWORK, "组网仲裁：who=${decision.who} level=${decision.level}（${decision.reason}）")
         // B4 温和收尾：角色标志——本机仲裁为热点方（who==ME）或手动④（who==null，本机手动开热点）置 true
         // （传输完成后状态卡显示「关闭热点」）；who==PEER 置 false（对端开热点，本机为从机）
         ui.hotspotSideAfterTransfer = decision.who == Who.ME || decision.who == null
@@ -1271,6 +1284,7 @@ class BluelinkEngine(private val context: Context) {
      */
     private fun startSameLanDirect(hs: HandshakeMessage) {
         val peerIp = hs.net.ip?.trim()?.takeIf { it.isNotBlank() } ?: ""
+        logUiEvent(EVT_NETWORK, "同网判定：免热点直连（对端 ${hs.alias.ifBlank { "<未知>" }}）")
         sameLanDirectActive = true
         ui.hotspotSideAfterTransfer = false
         ui.netActive = true
@@ -1328,6 +1342,7 @@ class BluelinkEngine(private val context: Context) {
      */
     fun endSameLanDirect() {
         DiagLogger.log(TAG, "A8 同网直连收尾（温和，对齐 B4）：停 LocalSend 服务 + 状态复位；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        logUiEvent(EVT_TEARDOWN, "已结束同网直连（BLE 保留）")
         mainHandler.removeCallbacks(receivePoller)
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
@@ -1356,6 +1371,7 @@ class BluelinkEngine(private val context: Context) {
      */
     fun closeHotspotAfterTransfer() {
         DiagLogger.log(TAG, "B4 温和收尾：热点方点「关闭热点」——停热点 + 停 LocalSend 服务 + 组网回 IDLE；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        logUiEvent(EVT_TEARDOWN, "已关闭热点，传输结束（BLE 通信保留）")
         // ③ L2 本地热点：close reservation（幂等 no-op 安全）
         hotspotManager.stopLocalOnly()
         // ②' Binder 直呼系统热点：实际关热点入口（k1/c stopTethering 关分支，后台线程执行）
@@ -1390,6 +1406,7 @@ class BluelinkEngine(private val context: Context) {
      */
     fun disconnectNetworkAfterTransfer() {
         DiagLogger.log(TAG, "B4 温和收尾：从机点「断开网络」——断开 Specifier 网络 + 停 LocalSend 服务；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        logUiEvent(EVT_TEARDOWN, "已断开热点网络（BLE 保留）")
         // 从机断网：WifiJoiner.cancel()（注销保留的 NetworkCallback → 系统断开 on-demand 网络；幂等）
         wifiJoiner.cancel()
         // 组网状态回 IDLE：调用既有收尾方法（状态机路径 cancel → onAbort；接管路径机器为 null，仅停 server + 状态复位）
@@ -1510,6 +1527,7 @@ class BluelinkEngine(private val context: Context) {
         }
         client.onAllDone = { total ->
             mainHandler.post {
+                logUiEvent(EVT_TRANSFER, "传输完成：$name（共 ${total}B）")
                 // B4 温和收尾：发送全部完成 → 传输完成态（按角色区分文案；热点保持/已接入/同网直连可继续，
                 // 或点「关闭热点」/「断开网络」/「结束直连」手动收尾；BLE 会话/广播/扫描全程保留，不自动拆）
                 ui.transferState = when {
@@ -1636,6 +1654,7 @@ class BluelinkEngine(private val context: Context) {
             mainHandler.post {
                 ui.transferState = "已保存到 ${truncateName(dir.name ?: f.fileName)}"
                 DiagLogger.log(TAG, "T3 文件已转存用户目录: ${f.fileName}")
+                logUiEvent(EVT_TRANSFER, "已保存 ${f.fileName} 至用户目录")
             }
         } catch (e: Exception) {
             mainHandler.post {
@@ -1789,6 +1808,7 @@ class BluelinkEngine(private val context: Context) {
             return
         }
         peerOfferHandled = true
+        logUiEvent(EVT_NETWORK, "收到组网邀请（接管路径），接入热点…")
         // B4 温和收尾：收到 offer = 本机为从机（非热点方），传输完成后状态卡显示「断开网络」
         ui.hotspotSideAfterTransfer = false
         takeoverPeerIp = ip.trim() // v0.4.4：记录 offer 携带的 A 端热点 IP（ack 后作 transportPeerIp；未携带为空串）
@@ -1962,6 +1982,7 @@ class BluelinkEngine(private val context: Context) {
         )
         onTransportReadyInternal(takeoverPeerIp)
         ui.netState = "✅ 组网完成，传输就绪"
+        logUiEvent(EVT_NETWORK, "接管路径确认：组网完成，传输就绪")
     }
 
     /** 接管路径 ack 超时（v0.4.4，120s）：热点方未确认传输就绪 → 明确提示（不中止已接入的热点 Wi-Fi）。 */
@@ -2121,6 +2142,8 @@ class BluelinkEngine(private val context: Context) {
                 pinFailCount = 0
                 ui.pinStatus = "✅ PIN 验证通过（对端已确认），可组建局域网"
                 DiagLogger.log(TAG, "PIN 验证：收到对端放行确认，本会话已解锁（配对码不回显）")
+                logUiEvent(EVT_HANDSHAKE, "对端确认 PIN 验证通过（可组建局域网）")
+                refreshPairedView() // v0.5.0 UI-1：PIN 验毕 → 切对端卡视图
             } else {
                 val n = payload.optInt("failCount", 0)
                 if (n >= PIN_MAX_FAILS) {
@@ -2149,6 +2172,8 @@ class BluelinkEngine(private val context: Context) {
         ui.pinVerifyActive = false
         ui.pinShow = null
         ui.pinStatus = "✅ PIN 验证通过，可组建局域网"
+        logUiEvent(EVT_HANDSHAKE, "PIN 配对验证通过（可组建局域网）")
+        refreshPairedView() // v0.5.0 UI-1：PIN 验毕 → 切对端卡视图
         // 通知对端放行（同一 type pin；对端不自己判，等待本端确认）
         val ok = sessionManager.sendSignal(SignalMessage(SignalProtocol.TYPE_PIN, JSONObject().put("ok", true)))
         DiagLogger.log(TAG, "PIN 验证通过：已发送放行通知 ok=$ok")
@@ -2161,6 +2186,7 @@ class BluelinkEngine(private val context: Context) {
     private fun onPinMismatch(input: String) {
         pinFailCount++
         DiagLogger.log(TAG, "PIN 比对失败：第 $pinFailCount/$PIN_MAX_FAILS 次（输入长度=${input.length}，内容不回显）")
+        logUiEvent(EVT_ERROR, "PIN 不匹配（第 $pinFailCount/$PIN_MAX_FAILS 次）")
         if (pinFailCount >= PIN_MAX_FAILS) {
             abortPinSession()
             return
@@ -2186,6 +2212,8 @@ class BluelinkEngine(private val context: Context) {
         ui.pinError = "PIN 验证失败，会话中止"
         ui.pinStatus = PIN_ABORT_REASON
         ui.netState = PIN_ABORT_REASON
+        logUiEvent(EVT_ERROR, "PIN 验证失败（$PIN_MAX_FAILS 次），会话中止")
+        refreshPairedView() // v0.5.0 UI-1：会话中止 → 配对视图复位
     }
 
     /** 对端收到 PIN 失败中止（TYPE_ABORT reason 含 [PIN_ABORT_REASON]）：收敛会话与 UI。 */
@@ -2199,6 +2227,8 @@ class BluelinkEngine(private val context: Context) {
         ui.pinError = "PIN 验证失败，会话中止"
         ui.pinStatus = "PIN 验证失败，会话中止（对端已断开）"
         ui.netState = PIN_ABORT_REASON
+        logUiEvent(EVT_ERROR, "PIN 验证中止（对端已断开）")
+        refreshPairedView() // v0.5.0 UI-1：会话中止 → 配对视图复位
     }
 
     /** 对端输入框「发送」：校验数字 → 经信令回传 pin{...} → 等待发起方比对确认（对端不自己判）。 */
@@ -2246,6 +2276,8 @@ class BluelinkEngine(private val context: Context) {
             resetPinVerifyState()
             ui.pinVerifyOk = true
             DiagLogger.log(TAG, "PIN 验证：模式切为关，当前会话直接放行")
+            logUiEvent(EVT_INFO, "PIN 验证模式切为关，当前会话直接放行")
+            refreshPairedView() // v0.5.0 UI-1：PIN 关 → 切对端卡视图
         }
     }
 
@@ -2305,6 +2337,9 @@ class BluelinkEngine(private val context: Context) {
         iAmInitiator = false
         ui.advertising = false
         ui.scanning = false
+        // v0.5.0 UI-1：会话 detach/停止 → 配对视图与对端卡复位（复位点随会话）
+        ui.pairedView = false
+        ui.selectedDevice = null
     }
 
     private fun handleScanResult(result: android.bluetooth.le.ScanResult) {
@@ -2336,8 +2371,8 @@ class BluelinkEngine(private val context: Context) {
         ui.devices[deviceAddress] = entry.copy(
             lanStatus = SameLanChecker.check(ui.localNetwork, handshake.net)
         )
-        if (ui.selectedDevice?.address == deviceAddress) {
-            ui.selectedDevice = ui.devices[deviceAddress]
+        if (ui.detailDevice?.address == deviceAddress) {
+            ui.detailDevice = ui.devices[deviceAddress]
             updateNetBtnVisibility() // A5：握手完成/刷新后重算「组建临时局域网」入口
         }
         // 持久信令会话：握手成功（Client 或 Server 任一通道）即 attach；
@@ -2353,6 +2388,10 @@ class BluelinkEngine(private val context: Context) {
         signalTest.start()
         // v0.4.9 PIN 配对验证：握手完成即触发校验（组网/同网直连前置拦截点；fingerprint=对端握手指纹 deviceAddress）
         beginPinVerification(deviceAddress, sessionResume)
+        // v0.5.0 UI-1：握手后刷新本机卡 + 配对视图（PIN 关/已验 → 对端卡视图）+ 事件时间流
+        refreshSelfCard()
+        refreshPairedView()
+        logUiEvent(EVT_HANDSHAKE, "与 ${handshake.alias.ifBlank { "未知设备" }} 握手完成（…${deviceAddress.takeLast(8)}）")
     }
 
     private fun refreshAllLanStatus() {
@@ -2362,6 +2401,103 @@ class BluelinkEngine(private val context: Context) {
             ui.devices[addr] = e.copy(lanStatus = SameLanChecker.check(ui.localNetwork, hs.net))
         }
         updateNetBtnVisibility()
+    }
+
+    // ============ v0.5.0 UI-1：事件时间流 / 两态配对视图 / 本机信息 / 移除设备 ============
+
+    /**
+     * 事件时间流追加（主线程）：时间 HH:mm:ss + 文案入 [BluelinkUiState.eventLog]，
+     * 上限 [BluelinkUiState.EVENT_LOG_MAX] 条滚动（丢弃最旧）。kind 见 [EVT_INFO]…[EVT_TEARDOWN]。
+     */
+    fun logUiEvent(kind: Int, text: String) {
+        val ts = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val next = ui.eventLog + EventItem(ts, text, kind)
+        ui.eventLog = if (next.size > BluelinkUiState.EVENT_LOG_MAX) {
+            next.takeLast(BluelinkUiState.EVENT_LOG_MAX)
+        } else {
+            next
+        }
+    }
+
+    /** 从扫描列表移除设备（清除失效设备；同时清关联弹层/对端卡并重算组网入口）。 */
+    fun removeDevice(address: String) {
+        ui.devices.remove(address)
+        if (ui.detailDevice?.address == address) {
+            ui.detailDevice = null
+            updateNetBtnVisibility()
+        }
+        if (ui.selectedDevice?.address == address) {
+            ui.selectedDevice = null
+            refreshPairedView()
+        }
+        DiagLogger.log(TAG, "移除失效设备: $address")
+        logUiEvent(EVT_INFO, "已清除设备 …${address.takeLast(8)}")
+    }
+
+    /** 重新扫描（对端卡「重新扫描」按钮）：重启扫描器；权限/蓝牙/开关未就绪时提示不启动。 */
+    fun rescan() {
+        val a = adapter
+        if (!ui.permissionsGranted || !ui.btEnabled || !ui.advertisingWanted || a == null || !a.isEnabled) {
+            logUiEvent(EVT_INFO, "重新扫描：广播/扫描未开启，无法扫描")
+            return
+        }
+        scanner.stop()
+        scanner.start(a)
+        ui.scanning = true
+        logUiEvent(EVT_INFO, "重新扫描已触发")
+    }
+
+    /** 按地址打开设备（便捷入口；查无此设备 no-op）。 */
+    fun openDevice(address: String) {
+        val entry = ui.devices[address] ?: run {
+            DiagLogger.log(TAG, "openDevice(address) 查无设备: $address")
+            return
+        }
+        openDevice(entry)
+    }
+
+    /** 刷新本机设备卡（alias/model=Build.MODEL；电量 [readBattery]；网络 describe）。 */
+    private fun refreshSelfCard() {
+        ui.selfCard = SelfInfo(
+            alias = Build.MODEL,
+            model = Build.MODEL,
+            batteryPct = readBattery(),
+            netText = ui.localNetwork.describe(),
+        )
+    }
+
+    /**
+     * 配对后视图刷新（两态切换判定）：会话已 attach 且 PIN 关/已验（[pinRequired] 为 false）→
+     * [BluelinkUiState.pairedView]=true + 填对端卡 [BluelinkUiState.selectedDevice]；否则复位
+     * （会话 detach/新握手/PIN 未验时对端卡视图不显示）。
+     */
+    private fun refreshPairedView() {
+        val peer = sessionManager.currentPeer()
+        val entry = peer?.let { ui.devices[it] }
+            ?: ui.devices.values.firstOrNull { it.handshake != null }
+        val paired = sessionManager.isAttached && !pinRequired()
+        ui.pairedView = paired
+        val hs = entry?.handshake
+        if (paired && entry != null && hs != null) {
+            ui.selectedDevice = DeviceInfo(
+                address = entry.address,
+                alias = hs.alias.ifBlank { "未知设备" },
+                model = hs.model.ifBlank { entry.displayMac },
+                batteryPct = hs.battery,
+                netText = hs.net.describe(),
+                statusText = peerStatusText(),
+                sameLan = entry.lanStatus == LanStatus.SAME_LAN,
+            )
+        } else {
+            ui.selectedDevice = null
+        }
+    }
+
+    /** 对端卡连接状态字串：传输就绪=「接入」；会话保持=「已连接」；否则「未连接」。 */
+    private fun peerStatusText(): String = when {
+        transportPeerIp.isNotBlank() || sameLanDirectActive -> "接入"
+        sessionManager.isAttached -> "已连接"
+        else -> "未连接"
     }
 
     // ---------- A5 内部：异网判定 / 阶段映射 / 工具 ----------
@@ -2417,7 +2553,7 @@ class BluelinkEngine(private val context: Context) {
      * 同网 → 免热点直连入口；异网 → 仲裁+热点组网入口；入口标签按 entry.lanStatus 区分）。
      */
     private fun updateNetBtnVisibility() {
-        val entry = ui.selectedDevice ?: run {
+        val entry = ui.detailDevice ?: run {
             ui.netBtnVisible = false
             return
         }
@@ -2450,6 +2586,14 @@ class BluelinkEngine(private val context: Context) {
     }
 
     companion object {
+        // v0.5.0 UI-1：事件时间流 kind 常量（0=信息 1=握手 2=组网 3=传输 4=错误 5=收尾）
+        const val EVT_INFO = 0
+        const val EVT_HANDSHAKE = 1
+        const val EVT_NETWORK = 2
+        const val EVT_TRANSFER = 3
+        const val EVT_ERROR = 4
+        const val EVT_TEARDOWN = 5
+
         private const val TAG = "BluelinkEngine"
 
         /** 组网阶段轮询间隔。 */

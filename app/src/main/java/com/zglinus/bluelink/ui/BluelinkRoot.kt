@@ -94,8 +94,6 @@ fun BluelinkRoot(engine: BluelinkEngine) {
     engine.ui.detailDevice?.let { selected ->
         DeviceDetailSheet(
             entry = selected,
-            handshaking = engine.ui.handshaking,
-            handshakeError = engine.ui.handshakeError,
             onDismiss = { engine.dismissSheet() },
         )
     }

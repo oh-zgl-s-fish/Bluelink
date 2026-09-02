@@ -84,7 +84,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ble.HandshakeMessage
-import com.zglinus.bluelink.ble.HandshakeProtocol
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.ui.theme.MetricTokens
@@ -1432,18 +1431,18 @@ private fun EmptyState(ui: BluelinkUiState) {
 }
 
 /**
- * 设备详情弹层：握手详情 JSON 渲染 + 同网判定结果 + A5 组网入口/阶段/结束（v0.5.4b：弹层正文用
- * surfaceContainerLowest 分组容器分层；浮层面板本体由系统 ModalBottomSheet surface 提供，不动）。
+ * 设备详情弹层：同网判定结果 + A5 组网入口/阶段/结束（v0.5.4b：弹层正文用
+ * surfaceContainerLowest 分组容器分层；浮层面板本体由系统 ModalBottomSheet surface 提供，不动；
+ * v0.5.4c：移除「握手详情」字段块——握手信息明细（网络/型号/协议/电量等）不再在弹层展示，
+ * 握手→PIN→组网进度一律在顶层极简弹窗 NetPairingDialog）。
  *
- * A5 组网状态经 [BluelinkEngine.current()]（companion 单例，init 注册 / release 注销）读取：
- * 保持 BluelinkRoot 零改动以符合「3 文件」改动范围，engine 与 UI 同包无需 import。
+ * A5 组网状态经 [BluelinkEngine.current()]（companion 单例，init 注册 / release 注销）读取；
+ * engine 与 UI 同包无需 import。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceDetailSheet(
     entry: DeviceEntry,
-    handshaking: Boolean,
-    handshakeError: String?,
     onDismiss: () -> Unit,
 ) {
     val engine = BluelinkEngine.current()
@@ -1467,8 +1466,8 @@ fun DeviceDetailSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // v0.5.4b 映射：设备详情弹层正文（同网判定 / A5 组网 / 握手详情分节）＝弹层内页级常规内容块
-            // → surfaceContainerLowest；无 elevation（不设阴影）、无边框；块级圆角 10
+            // v0.5.4b 映射：设备详情弹层正文（同网判定 / A5 组网分节；v0.5.4c 已移除握手详情分节）
+            // ＝弹层内页级常规内容块 → surfaceContainerLowest；无 elevation（不设阴影）、无边框；块级圆角 10
             //（MaterialTheme.shapes.large = ShapeTokens.Modal）；浮层面板本体由系统 ModalBottomSheet surface 提供（不动）
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1549,35 +1548,7 @@ fun DeviceDetailSheet(
 
             // v0.5.4a：PIN 配对验证阶段已并入顶层极简弹窗 NetPairingDialog（beginPinVerification 置
             // ui.pairingDialog，发起方大号码字 / 对端内嵌单行输入），详情弹层不再重复展示 PIN 面板
-
-            HorizontalDivider()
-
-            Text("握手详情", style = MaterialTheme.typography.titleSmall)
-            when {
-                hs != null -> Text(
-                    text = HandshakeProtocol.prettyJson(hs),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-                handshaking -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(Modifier.width(SpacingTokens.SpaceSm))
-                    Text("正在握手…", style = MaterialTheme.typography.bodyMedium)
-                }
-                handshakeError != null -> Text(
-                    text = "握手失败: $handshakeError",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                else -> Text(
-                    text = "点击设备后发起 GATT 握手",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            // v0.5.4c：弹层不再展示握手信息明细（原「握手详情」分节已移除）；弹层只留设备名/状态/操作入口
             }
             }
 

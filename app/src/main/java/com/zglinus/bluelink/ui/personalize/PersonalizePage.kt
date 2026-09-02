@@ -28,7 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
@@ -52,6 +52,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ui.BluelinkUiState
@@ -82,17 +83,29 @@ import kotlinx.coroutines.withContext
  *   入口 → **彩虹 sweepGradient 圆钮**（无文字）；场景三按钮 → **无字圆形按钮**（统一=半灰分半 /
  *   深=深灰 / 浅=浅灰，选中 = primary 外环），按钮行与预览区之间加当前场景说明句 [sceneHint]。
  *
- * 布局（docs/ui-design.md §4.1b v0.5.8 定稿 + v0.5.8b 收尾；竖屏无上下滚动、一屏放完）：
+ * v0.5.8d 本版改动（色系交互区视觉定稿，按 HTML 预览用户确认的最终交互落地；其余区保持 v0.5.8b 不动）：
+ * - 色系入口去文字：左 1/6 窄条（色块+名称）→ **圆形按钮**，填充当前色系代表色双色半彩示意（代表色 +
+ *   其加深半彩各半，无文字）；展开态 = primary 外环高亮（同具体色点选中态样式，见 [FamilyEntryStrip]）；
+ * - 色系选择改「右侧同款切换」（取代 v0.5.8「点入口向右展开 chips 行」）：点左圆钮展开态下右 5/6 切为
+ *   **色系大圆点横滑行**——圆点 = 各色系代表色、与具体色点同 40dp 视觉（无卡片/无边框容器/无文字，
+ *   LazyRow 可左右滑动，选中环 = 当前色系，见 [FamilyDotsRow]）；色系列表点选某色系 → 右区**无缝切回**
+ *   该色系具体色横滑行（同款切换，无过渡动画，简单状态切换）；左圆钮再点（toggle）在色系行/具体色行间
+ *   切换（展开=色系行，入口钮高亮）；两行的容器同位置同样式（右区同一块 if/else 分支，仅内容数组与选中
+ *   回调不同，无覆盖层/卡片/边框/阴影）；
+ * - 颜色区与壁纸区（场景钮/预览区）之间加 1px 水平细分隔线（outlineVariant，左右约 16dp 边距）；
+ * - 提示文案居中核对：场景说明句与壁纸预览占位文案显式 TextAlign.Center（保持一致居中）；
+ *
+ * 布局（docs/ui-design.md §4.1b v0.5.8 定稿 + v0.5.8b 收尾 + v0.5.8d 色系区改版；竖屏无上下滚动、一屏放完）：
  * - 顶部条：左「个性化」标题 / 右上「保存」（保存为最右角按钮；返回主页面入口与同级子页一致
  *   放标题右侧、保存左侧——规格图仅画 [保存]，本页为抽屉子页（主页面不列抽屉项、无 BackHandler），
  *   无返回即死胡同，故补 [返回]，保存仍保持右上角）；
  * - 颜色区（约占标题下内容区高 1/8，BoxWithConstraints 取 12.5% 收 80–128dp）：
- *   左 1/6「色系入口」窄条（当前色系色块 + 名称；点按展开/收拢色系列表）+ 中间竖分割线 +
- *   右 5/6「具体颜色」：当前色系 HSV 明暗连续 10 个**大圆色点**（直径 40dp，LazyRow 可左右滑动，
- *   点选即选中——选中态 = 2dp primary 圆环，色点纯色无文字）；色系展开态右区切换为横向色系 chips
- *   （红橙黄绿青蓝紫品粉棕灰白黑，选中后收拢并切换该色系取色，交互保持 v0.5.8 不变）；API27+
- *   （O_MR1 门，26 隐藏）「从壁纸取色」**彩虹 sweepGradient 圆钮**固定在右区末端，取到的壁纸主色
- *   同样先入选中态（保存才生效）；
+ *   左 1/6「色系入口」**圆形按钮**（v0.5.8d 无文字：当前色系代表色双色半彩示意，展开态 primary 外环）+
+ *   中间竖分割线 + 右 5/6：收拢态 = 当前色系 HSV 明暗连续 10 个**大圆色点**（直径 40dp，LazyRow 可左右
+ *   滑动，点选即选中——选中态 = 2dp primary 圆环，色点纯色无文字）；展开态 = **色系代表色大圆点行**
+ *   （v0.5.8d 同款切换：红橙黄绿青蓝紫品粉棕灰白黑 13 色系，选中环 = 当前色系，点选收拢并切该色系取色）；
+ *   API27+（O_MR1 门，26 隐藏）「从壁纸取色」**彩虹 sweepGradient 圆钮**固定在右区末端，取到的壁纸主色
+ *   同样先入选中态（保存才生效）；颜色区与壁纸区之间 1px 水平细分隔线（v0.5.8d）；
  * - 壁纸区：场景三**无字圆钮**（统一壁纸（兜底）= 半深灰半浅灰圆、深色模式壁纸 = 深灰圆、
  *   浅色模式壁纸 = 浅灰圆，对应 [WallpaperStore] SLOT_UNIFIED/SLOT_DARK/SLOT_LIGHT，当前场景 =
  *   primary 2dp 外环高亮）+ 其下一行当前场景说明句 [sceneHint] + 弹性复用预览区：渲染当前场景槽草稿 =
@@ -132,7 +145,8 @@ fun PersonalizePage(
     var accentDraft by remember { mutableStateOf(store.accentColor) }
     // 当前场景（场景三按钮高亮 + 预览区渲染该槽草稿）
     var sceneSlot by remember { mutableStateOf(WallpaperStore.SLOT_UNIFIED) }
-    // 色系展开态：false=右区显示当前色系具体色；true=右区展开色系列表 chips（选中后收拢切换）
+    // 色系展开态：false=右区显示当前色系具体色行；true=右区展开色系列表大圆点行（v0.5.8d 同款切换，
+    // 点选某色系后收拢并切到该色系具体色行；左入口圆钮 toggle 同此态）
     var familyExpanded by remember { mutableStateOf(false) }
     // 当前色系（右区取色对象；初值 = 已存强调色所在色系，未选 → 品牌默认蓝系）
     var currentFamily by remember {
@@ -261,6 +275,11 @@ fun PersonalizePage(
                         .fillMaxWidth()
                         .height(colorAreaHeight),
                 )
+                Spacer(Modifier.height(SpacingTokens.SpaceXs))
+                // v0.5.8d：颜色区与壁纸区（场景钮/预览）之间 1px 水平细分隔线——M3 HorizontalDivider
+                // （色 = outlineVariant，同颜色区竖分割线 token；厚 1dp 默认；内容列自带左右 16dp 页边距 →
+                // 分割线两端距屏边约 16dp，视觉同 HTML 预览 divider）
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Spacer(Modifier.height(SpacingTokens.SpaceSm))
                 SceneSwitchRow(
                     sceneSlot = sceneSlot,
@@ -268,12 +287,14 @@ fun PersonalizePage(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(SpacingTokens.SpaceXs))
-                // v0.5.8b：场景说明句（无字圆钮行与预览区之间；当前场景切换文案，正文按规格原文）
+                // v0.5.8b/v0.5.8d：场景说明句（无字圆钮行与预览区之间；v0.5.8d 居中核对——按钮行本身组居中，
+                // 说明句显式 TextAlign.Center 行内居中，与壁纸预览占位文案保持一致居中；正文按规格原文）
                 Text(
                     text = sceneHint(sceneSlot),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -329,7 +350,12 @@ fun PersonalizePage(
 /** 颜色区占内容区高度的比例（≈1/8，规格「颜色区占页面内容高约 1/8」）。 */
 private const val COLOR_AREA_FRACTION = 0.125f
 
-/** 颜色区（占标题下内容区高约 1/8）：左 1/6 色系入口 / 中竖分割线 / 右 5/6 具体颜色（或展开的色系列表）。 */
+/**
+ * 颜色区（占标题下内容区高约 1/8）：左 1/6 色系入口圆钮 / 中竖分割线 / 右 5/6（收拢 = 当前色系具体色
+ * 大圆点行；展开 = 色系代表色大圆点行）。v0.5.8d：两种右区行**同款切换**——同一位置同一容器（同一块
+ * if/else 分支的 fillMaxHeight Row，无覆盖层/卡片/边框/阴影），差异仅为内容数组与选中回调；色系入口
+ * 去文字改圆形按钮（展开态 primary 外环高亮）。
+ */
 @Composable
 private fun ColorSectionRow(
     accentDraft: Long?,
@@ -345,10 +371,10 @@ private fun ColorSectionRow(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 左 1/6：色系入口窄条（色块 + 名称；点按展开/收拢色系列表）
+        // 左 1/6：色系入口圆形按钮（无文字；当前色系双色半彩；展开 = 色系列表模式，primary 外环高亮；
+        // 点按 toggle 色系行/具体色行）
         FamilyEntryStrip(
             family = currentFamily,
-            accentDraft = accentDraft,
             expanded = familyExpanded,
             onClick = onToggleFamilies,
             modifier = Modifier
@@ -365,8 +391,9 @@ private fun ColorSectionRow(
                 .background(MaterialTheme.colorScheme.outlineVariant),
         )
         Spacer(Modifier.width(SpacingTokens.SpaceXs))
-        // 右 5/6：展开态 = 色系列表 chips（覆盖在右侧区域上层）；收拢态 = 具体颜色大圆色点横滑条；
-        // 最右固定「从壁纸取色」彩虹圆钮（API27+）
+        // 右 5/6（v0.5.8d 同款切换）：展开态 = 色系代表色大圆点行 [FamilyDotsRow]；收拢态 = 当前色系具体
+        // 颜色大圆色点横滑条。两态同一容器同一套样式（if/else 分支同构 fillMaxHeight），仅内容数组与选中
+        // 回调不同——无覆盖层；最右固定「从壁纸取色」彩虹圆钮（API27+，两态均保留，v0.5.8b 不变）
         Row(
             modifier = Modifier
                 .weight(5f)
@@ -374,7 +401,7 @@ private fun ColorSectionRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (familyExpanded) {
-                FamilyChipsOverlay(
+                FamilyDotsRow(
                     currentFamily = currentFamily,
                     onFamilySelected = onFamilySelected,
                     modifier = Modifier
@@ -402,65 +429,81 @@ private fun ColorSectionRow(
     }
 }
 
-/** 左 1/6 色系入口窄条：色块（已选强调色属本色系时用选中色，否则用色系代表色）+ 名称；展开态 primary 描边。 */
+/**
+ * 左 1/6 色系入口**圆形按钮**（v0.5.8d 去文字定稿）：填充当前色系的代表色**双色半彩示意**（左半 =
+ * 代表色 [familySwatch] / 右半 = 其加深半彩 [familyEntryDuo]，左右分半同场景「统一壁纸」圆钮语言），
+ * 无任何文字；展开态（右区 = 色系列表模式）= primary 2dp 外环高亮（同具体色点选中态样式 [AccentSwatch]），
+ * 收拢态 = outlineVariant 1dp 细环（浅/白系色面可见描边）。触达 48dp / 视觉 40dp 圆 + 外环。
+ * 读屏 contentDescription 带色系名（视觉无字，无障碍仍可辨）；点按 = 色系行/具体色行 toggle。
+ */
 @Composable
 private fun FamilyEntryStrip(
     family: ColorFamily,
-    accentDraft: Long?,
     expanded: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val dotArgb = if (accentDraft != null && accentFamilyOf(accentDraft) == family) {
-        accentDraft // 已选色属于本色系 → 色块直接显示选中色（页内色块预览）
-    } else {
-        familySwatch(family)
-    }
-    Column(
-        modifier = modifier
-            .clip(MaterialTheme.shapes.small)
-            .border(
-                width = if (expanded) 2.dp else 1.dp,
-                color = if (expanded) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant
-                },
-                shape = MaterialTheme.shapes.small,
-            )
-            .clickable(onClick = onClick)
-            .semantics { contentDescription = "色系入口：当前 ${family.name}（点击展开色系列表）" }
-            .padding(horizontal = SpacingTokens.SpaceXs),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+    val duo = familyEntryDuo(family)
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
     ) {
-        // 色块（18dp 圆）：浅/白系描 outlineVariant 边保证可见
         Box(
             modifier = Modifier
-                .size(18.dp)
+                .size(48.dp)
                 .clip(CircleShape)
-                .background(Color(dotArgb))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
-        )
-        Spacer(Modifier.height(SpacingTokens.SpaceXs))
-        Text(
-            text = family.name,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
-        Text(
-            text = "色系",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
+                .clickable(onClick = onClick)
+                .semantics {
+                    selected = expanded
+                    contentDescription = "色系入口：当前${family.name}色系（点按切换色系列表/具体色列表）"
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            // 外环底衬（先画，被半彩圆盖住中心、露外圈环）：展开 primary 2dp / 收拢 outlineVariant 1dp
+            Box(
+                modifier = Modifier
+                    .size(if (expanded) 44.dp else 42.dp)
+                    .background(
+                        color = if (expanded) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        },
+                        shape = CircleShape,
+                    ),
+            )
+            // 40dp 双色半彩圆（左=代表色 / 右=加深半彩；无文字）
+            Row(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape),
+            ) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(Color(duo.first)),
+                )
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(Color(duo.second)),
+                )
+            }
+        }
     }
 }
 
-/** 色系列表（展开态）：横向滑动 FilterChip（带代表色点）；点击即选该色系并收拢、右区切换取色。 */
+/**
+ * 色系列表（展开态，v0.5.8d 同款切换）：一排**色系代表色大圆点**横滑行——圆点视觉/触达与具体色点
+ * [AccentSwatch] 完全同款（40dp 视觉圆点 + 选中 2dp primary 环 / 未选 1dp outlineVariant 细环，无卡片、
+ * 无边框容器、无文字，LazyRow 可左右滑动），圆点色 = 各色系代表色 [familySwatch]，选中环高亮 = 当前
+ * 色系；点选某色系 → 收拢并切回该色系的具体色横滑行（[onFamilySelected]；同款切换，无过渡动画，简单
+ * 状态切换）。取代 v0.5.8「点左入口向右展开 FilterChip 行」交互。
+ */
 @Composable
-private fun FamilyChipsOverlay(
+private fun FamilyDotsRow(
     currentFamily: ColorFamily,
     onFamilySelected: (ColorFamily) -> Unit,
     modifier: Modifier = Modifier,
@@ -471,26 +514,12 @@ private fun FamilyChipsOverlay(
         horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
     ) {
         items(COLOR_FAMILIES, key = { it.name }) { family ->
-            FilterChip(
-                selected = family == currentFamily,
+            AccentSwatch(
+                argb = familySwatch(family),
+                isSelected = family == currentFamily,
                 onClick = { onFamilySelected(family) },
-                label = { Text(family.name) },
-                leadingIcon = {
-                    // 色点：白/浅色系带描边环保证可见（10dp 内圆 + 14dp 外环）
-                    Box(
-                        modifier = Modifier
-                            .size(14.dp)
-                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(Color(familySwatch(family))),
-                        )
-                    }
-                },
+                // 读屏用色系名（视觉同具体色点：纯色圆点无文字）
+                semanticLabel = "色系：${family.name}",
             )
         }
     }
@@ -524,12 +553,17 @@ private fun ConcreteColorRow(
  * 具体颜色**大圆色点**（v0.5.8b：视觉 40dp / 触达 48dp，纯色无文字）：选中态 = 2dp primary 圆环描边；
  * 未选 = 1dp outlineVariant 细环（浅/白系色点在浅表面上的可见描边）。环以「大圆底衬 + 色点覆盖中心」
  * 实现——色点外缘正好露环宽，无需描边半宽换算。
+ *
+ * v0.5.8d：色系代表色圆点行 [FamilyDotsRow] 复用本件（保证与具体色点同尺寸同视觉）——仅读屏文案可经
+ * [semanticLabel] 换色系名；具体色调用不传 → 默认 hex 文案（v0.5.8b 不变）。
  */
 @Composable
 private fun AccentSwatch(
     argb: Long,
     isSelected: Boolean,
     onClick: () -> Unit,
+    // v0.5.8d：色系行圆点 [FamilyDotsRow] 复用同款视觉时传色系读屏文案（如「色系：红」）；null = 具体色 hex 默认
+    semanticLabel: String? = null,
 ) {
     Box(
         modifier = Modifier
@@ -537,7 +571,11 @@ private fun AccentSwatch(
             .clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
-                contentDescription = if (isSelected) "已选强调色 ${accentHex(argb)}" else "强调色 ${accentHex(argb)}"
+                contentDescription = semanticLabel ?: if (isSelected) {
+                    "已选强调色 ${accentHex(argb)}"
+                } else {
+                    "强调色 ${accentHex(argb)}"
+                }
                 selected = isSelected
             },
         contentAlignment = Alignment.Center,
@@ -761,7 +799,8 @@ private fun PreviewSection(
                     }
                 }
             } else {
-                // 槽未设占位：图标 + 「点击选择壁纸」
+                // 槽未设占位：图标 + 「点击选择壁纸」（v0.5.8d 文案居中核对：Column 水平居中排列 + 文案显式
+                // TextAlign.Center，与场景说明句一致居中；解码失败文案同在此 Column 居中布局内）
                 Column(
                     modifier = Modifier.fillMaxSize(),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -773,12 +812,14 @@ private fun PreviewSection(
                         text = "点击选择壁纸",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(SpacingTokens.SpaceXs))
                     Text(
                         text = "跟随系统壁纸或自选图片",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
                     )
                 }
             }
@@ -1034,7 +1075,7 @@ private val FAMILY_WHITE = ColorFamily("白", 220f, 0.05f, 0.98f, 0.87f)
 private val FAMILY_GRAY = ColorFamily("灰", 0f, 0f, 0.84f, 0.32f)
 private val FAMILY_BLACK = ColorFamily("黑", 0f, 0f, 0.29f, 0.02f)
 
-/** chips 展示顺序（规格序：红橙黄绿青蓝紫品粉棕灰白黑）。 */
+/** 色系展示顺序（规格序：红橙黄绿青蓝紫品粉棕灰白黑）。 */
 private val COLOR_FAMILIES: List<ColorFamily> = listOf(
     FAMILY_RED, FAMILY_ORANGE, FAMILY_YELLOW, FAMILY_GREEN, FAMILY_CYAN, FAMILY_BLUE,
     FAMILY_PURPLE, FAMILY_MAGENTA, FAMILY_PINK, FAMILY_BROWN,
@@ -1057,6 +1098,15 @@ private fun cellsOf(family: ColorFamily): List<Long> = List(CELL_COUNT) { i ->
 
 /** 色系代表色（供色块/色点/取色图标；取第 5 格——亮度居中偏暗，深浅主题下都可见）。 */
 private fun familySwatch(family: ColorFamily): Long = cellsOf(family)[4]
+
+/** 色系入口圆钮双色半彩（v0.5.8d）：代表色 + 其加深半彩（同 hue/sat、value×0.5——两半示意色系深浅跨度；
+ *  中性系 sat≈0 同样加深明度）。 */
+private fun familyEntryDuo(family: ColorFamily): Pair<Long, Long> {
+    val swatch = familySwatch(family)
+    val hsv = FloatArray(3)
+    AndroidColor.colorToHSV((swatch and 0xFFFFFFFFL).toInt(), hsv)
+    return swatch to hsvToArgb(hsv[0], hsv[1], hsv[2] * 0.5f)
+}
 
 /** ARGB Long → 色系归类（进入页面初值用；HSV 色相分段 + 中性/棕特判）。 */
 private fun accentFamilyOf(argb: Long): ColorFamily {

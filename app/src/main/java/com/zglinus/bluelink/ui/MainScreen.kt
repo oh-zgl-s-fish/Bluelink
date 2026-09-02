@@ -161,8 +161,8 @@ import java.util.Locale
  * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
 
-/** v0.5.8 UI1b-B2：HOME 主页面内容容器/顶栏浮层化 alpha（规格 0.88–0.92 区间取 0.90；文字可读由遮罩+半透明层承担）。 */
-private const val HOME_FLOAT_ALPHA = 0.90f
+/** v0.5.8 UI1b-B2：HOME 主页面内容容器/顶栏浮层化 alpha（规格 0.80，壁纸更透出；文字可读由遮罩+半透明层承担）。 */
+private const val HOME_FLOAT_ALPHA = 0.80f
 
 /** v0.5.7 UI1b-B 起为根背景壁纸层：自订阅 ui.wallpaperTick（槽/遮罩改动信号），避免每次改动重排整个
  * MainScreen——只在此层与个性化页内重读 [WallpaperStore] 刷新；无壁纸时 WallpaperBackdrop 不绘制，

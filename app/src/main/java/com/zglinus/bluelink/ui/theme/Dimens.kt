@@ -34,22 +34,25 @@ object SpacingTokens {
     val SpaceXxl: Dp = 32.dp
 }
 
-/** 圆角 token：M3 默认 scale，显式接 Shapes（audit S7/P0-3；xl=28 为 M3 默认值）。 */
+/** 圆角 token：显式接 Shapes（audit S7/P0-3）。
+ *
+ * v0.5.4a 扁平化定稿（10/8 两档）：保留浮层（sheet/dialog/抽屉容器）圆角归 10dp（[Modal]）——
+ * M3 组件默认槽位 large=导航抽屉容器(原 16)、extraLarge=AlertDialog/ModalBottomSheet(原 28)，
+ * 本 App 这两个槽位仅浮层消费，故 theme 将 large/extraLarge 一并接 [Modal]（见 BluelinkTheme.kt）；
+ * 小件（badge/按钮/输入框）保持 8dp（[Small]）。原 Large(16)/ExtraLarge(28) 常量随 v0.5.4a 移除（无消费点）。
+ */
 object ShapeTokens {
     /** xs=4dp */
     val ExtraSmall: Dp = 4.dp
 
-    /** sm=8dp —— badge / 徽章（现状沿用默认） */
+    /** sm=8dp —— badge / 徽章 / 按钮 / 输入框（小件档，v0.5.4a 保持 8） */
     val Small: Dp = 8.dp
 
-    /** md=12dp —— Card / 弹层 / 时间列底 */
+    /** md=12dp —— M3 medium 槽位（Card 已去容器化，无当前视觉消费点，保留槽位接线） */
     val Medium: Dp = 12.dp
 
-    /** lg=16dp */
-    val Large: Dp = 16.dp
-
-    /** xl=28dp —— M3 默认 extraLarge（审计文档 M3 scale 为准） */
-    val ExtraLarge: Dp = 28.dp
+    /** modal=10dp（v0.5.4a 新增）—— 浮层（sheet/dialog/抽屉容器）圆角 */
+    val Modal: Dp = 10.dp
 }
 
 /** 动效 token：时长(ms)/缓动。值 = v0.5.1a 实机档，仅收归 token（audit P0-3/M5）。 */

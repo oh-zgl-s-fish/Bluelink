@@ -248,8 +248,14 @@ class BluelinkUiState {
     /** 对端设备卡数据（配对后右侧卡；引擎握手/PIN 验毕后填，会话结束清空）。 */
     var selectedDevice by mutableStateOf<DeviceInfo?>(null)
 
-    /** 抽屉路由当前页：0=主页面 1=发送 2=接收 3=记录 4=设置 5=权限 6=关于。 */
-    var currentPage by mutableStateOf(0)
+    /**
+     * 抽屉路由当前页（v0.5.6 UI1b-A 导航重排后取值见 companion PAGE_* 常量，调用处勿再写数字字面量）：
+     * [PAGE_HOME]=主页面（默认页，不列抽屉项）/ [PAGE_LOG]=文件传输记录（记录页/全屏事件流）/
+     * [PAGE_PERSONAL]=个性化（占位，UI1b-B 实现中）/ [PAGE_SETTINGS]=设置（后续扩展设备项）/
+     * [PAGE_ABOUT]=关于（占位页：App 名/版本/README 摘要）。旧 1=发送 2=接收 5=权限 已移除——
+     * 发送/接收已并入主页面操作与设置页、权限并入设置页（后续）。
+     */
+    var currentPage by mutableStateOf(PAGE_HOME)
 
     // ============ v0.5.5 P2：动效 / 无障碍 / 反馈 ============
 
@@ -271,5 +277,22 @@ class BluelinkUiState {
     companion object {
         /** 事件时间流上限（超出丢弃最旧）。 */
         const val EVENT_LOG_MAX = 200
+
+        // ============ v0.5.6 UI1b-A：抽屉路由重排（主页面默认 + 4 栏，抽屉项见 MainScreen.kt AppDrawer） ============
+
+        /** 抽屉路由：主页面（默认页；不列抽屉项，各子页「返回」回此页）。 */
+        const val PAGE_HOME = 0
+
+        /** 抽屉路由：文件传输记录（记录页 LogPage / 全屏事件流，复用 [com.zglinus.bluelink.ui.MainScreen] LogPage）。 */
+        const val PAGE_LOG = 1
+
+        /** 抽屉路由：个性化（新占位页，UI1b-B 实现中）。 */
+        const val PAGE_PERSONAL = 2
+
+        /** 抽屉路由：设置（SettingsPage，后续扩展设备项）。 */
+        const val PAGE_SETTINGS = 3
+
+        /** 抽屉路由：关于（新占位页：App 名「蓝鲸·X」/版本/README 摘要）。 */
+        const val PAGE_ABOUT = 4
     }
 }

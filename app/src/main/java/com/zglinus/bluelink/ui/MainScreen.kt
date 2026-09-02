@@ -100,7 +100,10 @@ import java.util.Locale
 
 /**
  * 主页面（docs/ui-design.md §4.1 两态左右布局；v0.5.0 UI-1；v0.5.1a 实机微调；v0.5.4a 扁平化定稿；
- * v0.5.4b 去阴影 + surfaceContainer 容器分层；v0.5.5c edge-to-edge 沉浸（Scaffold 背景铺满 + insets 归 Scaffold，见下方 Scaffold 注释））：
+ * v0.5.4b 去阴影 + surfaceContainer 容器分层；v0.5.5c edge-to-edge 沉浸（Scaffold 背景铺满 + insets 归 Scaffold，见下方 Scaffold 注释）；
+ * v0.5.6 UI1b-A 导航重排：顶栏左侧应用名「蓝鲸·X」/右侧 ☰（原左 ☰ 位移）；抽屉改 4 栏
+ * （文件传输记录/个性化/设置/关于，PAGE_* 常量路由）；个性化与关于为新占位页（UI1b-B 实现中 /
+ * App 名+版本+README 摘要）；主页面仍为默认页（不列抽屉项））:
  * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
  * v0.5.4b 保持「无 elevation（不设阴影）/无边框」的扁平观感，改以 surfaceContainer 系列容器分层表达各内容区：
  * - surfaceContainerLowest（最贴近背景、弱层次）：设置分组容器、设备详情弹层正文、底部动作行/流程信息行（页内常规内容块）；
@@ -117,8 +120,10 @@ import java.util.Locale
  * - 配网（v0.5.4a）：握手→PIN→组网进度一律在极简弹窗 [NetPairingDialog]（主页流程动画区已移除）；
  *   点设备/组网/PIN 校验触发 ui.pairingDialog；配对完成（pairedView 置位）或传输就绪自动关，
  *   中止/失败保留弹窗显错误态 + 关闭；时间流仍记录全部事件。
- * - 抽屉（[ModalNavigationDrawer]）：头部（应用名/本机 alias）+ 入口（主页面/发送/接收/记录/
- *   设置/权限/关于）→ 设 [BluelinkUiState.currentPage]；非主页面先放骨架占位（「UI-2+ 实现」）。
+ * - 抽屉（[ModalNavigationDrawer]，v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+
+ *   入口（文件传输记录/个性化/设置/关于）→ 设 [BluelinkUiState.currentPage]（companion PAGE_* 常量，勿写数字）；
+ *   主页面为默认页不列项（子页「返回」回主页面）；发送/接收入口已并入主页面操作行与设置页、
+ *   权限检测并入设置页（后续）；个性化/关于为新占位页。
  * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测移入
  *   抽屉设置页；发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
  *
@@ -200,7 +205,6 @@ fun MainScreen(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 MainTopBar(
-                    ui = ui,
                     advertisingWanted = advertisingWanted,
                     onAdvertisingWantedChange = onAdvertisingWantedChange,
                     onMenuClick = { scope.launch { drawerState.open() } },
@@ -212,9 +216,11 @@ fun MainScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
-                // 抽屉路由：currentPage 0=主页面 1=发送 2=接收 3=记录 4=设置 5=权限 6=关于
+                // 抽屉路由（v0.5.6 UI1b-A 4 栏重排；取值 BluelinkUiState.PAGE_*，勿写数字）：
+                // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（占位）
+                // PAGE_SETTINGS=设置 PAGE_ABOUT=关于（占位）
                 when (ui.currentPage) {
-                    0 -> MainPage(
+                    BluelinkUiState.PAGE_HOME -> MainPage(
                         ui = ui,
                         onDeviceClick = onDeviceClick,
                         onRefreshNetwork = onRefreshNetwork,
@@ -223,13 +229,18 @@ fun MainScreen(
                         onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
                     )
 
-                    1 -> PlaceholderPage("发送", ui)
-                    2 -> PlaceholderPage("接收", ui)
-                    3 -> LogPage(ui)
-                    4 -> SettingsPage(ui, engine)
-                    5 -> PlaceholderPage("权限", ui, onRequestPermissions)
-                    6 -> PlaceholderPage("关于", ui)
-                    else -> PlaceholderPage("未知页面", ui)
+                    BluelinkUiState.PAGE_LOG -> LogPage(ui)
+                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(ui)
+                    BluelinkUiState.PAGE_SETTINGS -> SettingsPage(ui, engine)
+                    BluelinkUiState.PAGE_ABOUT -> AboutPage(ui)
+                    else -> MainPage(
+                        ui = ui,
+                        onDeviceClick = onDeviceClick,
+                        onRefreshNetwork = onRefreshNetwork,
+                        onRequestPermissions = onRequestPermissions,
+                        onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
+                        onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
+                    )
                 }
             }
         }
@@ -272,25 +283,24 @@ fun MainScreen(
     }
 }
 
-/** 顶栏：菜单（☰ 开抽屉）+ 标题 + 广播/扫描开关（置顶栏）。 */
+/** 顶栏（v0.5.6 UI1b-A）：左侧 Text 应用名「蓝鲸·X」（titleLarge/语义色 primary）；右侧 ☰（开抽屉，
+ *  contentDescription「打开菜单」已备——由导航槽位移至此）+ 广播/扫描开关（置顶栏）。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTopBar(
-    ui: BluelinkUiState,
     advertisingWanted: Boolean,
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onMenuClick: () -> Unit,
 ) {
     TopAppBar(
-        title = { Text(if (ui.currentPage == 0) "Bluelink" else pageTitle(ui.currentPage)) },
-        navigationIcon = {
-            IconButton(onClick = onMenuClick) {
-                // 图标控件须具名（audit A1/K3）：☰ 字形 + contentDescription，避免读屏读裸字形
-                Text(
-                    text = "☰",
-                    modifier = Modifier.semantics { contentDescription = "打开菜单" },
-                )
-            }
+        title = {
+            Text(
+                text = "蓝鲸·X",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         },
         actions = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -307,19 +317,16 @@ private fun MainTopBar(
                         stateDescription = if (advertisingWanted) "广播开启" else "广播停止"
                     },
                 )
+                // v0.5.6 UI1b-A：☰ 自导航槽位移至右侧（左侧让位应用名）；字形 + contentDescription 保持具名（audit A1/K3）
+                IconButton(onClick = onMenuClick) {
+                    Text(
+                        text = "☰",
+                        modifier = Modifier.semantics { contentDescription = "打开菜单" },
+                    )
+                }
             }
         },
     )
-}
-
-private fun pageTitle(page: Int): String = when (page) {
-    1 -> "发送"
-    2 -> "接收"
-    3 -> "记录"
-    4 -> "设置"
-    5 -> "权限"
-    6 -> "关于"
-    else -> "Bluelink"
 }
 
 /** 主页面（两态左右布局）：横幅 → 两栏（1/3|2/3 ⇄ 1/2|1/2，weight 动画）→ 底部动作行 → 时间流；配网进度在 [NetPairingDialog]（v0.5.4a）。 */
@@ -1071,7 +1078,8 @@ private fun EventRow(ev: EventItem) {
     }
 }
 
-/** 记录页（抽屉 3）：全屏时间流（复用 [TimeFlowList]；v0.5.4b surfaceContainerLow 列表容器分层）。 */
+/** 文件传输记录页（抽屉 1 / BluelinkUiState.PAGE_LOG；v0.5.6 UI1b-A 由「记录」改名对齐抽屉标签）：
+ *  全屏时间流（复用 [TimeFlowList]；v0.5.4b surfaceContainerLow 列表容器分层）。 */
 @Composable
 private fun LogPage(ui: BluelinkUiState) {
     Column(
@@ -1081,11 +1089,11 @@ private fun LogPage(ui: BluelinkUiState) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = "记录",
+                text = "文件传输记录",
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
+            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
         Spacer(Modifier.height(SpacingTokens.SpaceSm))
         // v0.5.4b 映射：记录列表＝列表容器（主层次） → surfaceContainerLow；无 elevation（不设阴影）、无边框；
@@ -1105,7 +1113,8 @@ private fun LogPage(ui: BluelinkUiState) {
     }
 }
 
-/** 设置页（抽屉 4；v0.5.4b 设置分组容器＝surfaceContainerLowest）：PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此）。 */
+/** 设置页（抽屉 3 / BluelinkUiState.PAGE_SETTINGS，v0.5.6 UI1b-A 重排后位次（原 4）；v0.5.4b 设置分组容器＝surfaceContainerLowest）：
+ *  PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此；后续扩展设备项）。 */
 @Composable
 private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
     // 破坏性动作显式确认（audit K12/P1-1）：清除配对列表先弹确认框，确认后才执行
@@ -1123,7 +1132,7 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = { ui.currentPage = 0 }) { Text("返回") }
+            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
         Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.4b：页面标题与分组容器间距（区块 ≥12dp）
         // v0.5.4b 映射：设置分组容器＝页内常规内容块 → surfaceContainerLowest；
@@ -1312,37 +1321,104 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
     }
 }
 
-/** 骨架占位页（发送/接收/权限/关于等 UI-2+ 实现）：「UI-2+ 实现」文案 + 返回。 */
+/** 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.6 UI1b-A 新占位页）：主题/字号/减动效等
+ *  个性化项 UI1b-B 实现中——先放「UI1b-B 实现中」文案 + 返回（回主页面）。 */
 @Composable
-private fun PlaceholderPage(
-    title: String,
-    ui: BluelinkUiState,
-    extraAction: (() -> Unit)? = null,
-) {
+private fun PersonalizePage(ui: BluelinkUiState) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(SpacingTokens.SpaceXl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+            .padding(SpacingTokens.SpaceLg),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(SpacingTokens.SpaceSm))
-        Text(
-            text = "UI-2+ 实现（骨架先行）",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        extraAction?.let {
-            Spacer(Modifier.height(SpacingTokens.SpaceLg))
-            Button(onClick = it) { Text("去授权") }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "个性化",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
-        Spacer(Modifier.height(SpacingTokens.SpaceXl))
-        OutlinedButton(onClick = { ui.currentPage = 0 }) { Text("返回主页面") }
+        Spacer(Modifier.height(SpacingTokens.SpaceMd))
+        // v0.5.4b 映射：占位内容块＝主层次 → surfaceContainerLow；无 elevation（不设阴影）、无边框；块级圆角 10
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "个性化设置 UI1b-B 实现中",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
-/** 抽屉：头部（应用名/本机 alias）+ 入口列表（主页面/发送/接收/记录/设置/权限/关于）→ 设 currentPage。 */
+// v0.5.6 UI1b-A 关于页版本号：buildConfig 未开启（app/build.gradle.kts buildFeatures 无 buildConfig=true），
+// BuildConfig.VERSION_NAME 不可引 → 以常量同步 versionName（0.1.0）；升级 versionName 时一并更新
+//（或后续开启 buildConfig 后改引 BuildConfig.VERSION_NAME）。
+private const val APP_VERSION_NAME = "0.1.0"
+
+/** 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT；v0.5.6 UI1b-A 新占位页）：App 名「蓝鲸·X」+
+ *  版本（[APP_VERSION_NAME]，BuildConfig 不可引 → 常量）+ 一句简介（README 摘要文案）+ 返回。 */
+@Composable
+private fun AboutPage(ui: BluelinkUiState) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(SpacingTokens.SpaceLg),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "关于",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
+        }
+        Spacer(Modifier.height(SpacingTokens.SpaceMd))
+        // v0.5.4b 映射：关于正文容器＝页内常规内容块 → surfaceContainerLowest；无 elevation、无边框；块级圆角 10
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceLg),
+                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+            ) {
+                Text(
+                    text = "蓝鲸·X",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = "版本 $APP_VERSION_NAME",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider()
+                Text(
+                    text = "蓝牙同网直连文件传输：BLE 发现/握手 → PIN 配对验证 → 组网或同网免热点直连，" +
+                        "经 LocalSend 直传文件；无需服务器、不依赖蜂窝网络。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+    }
+}
+
+/** 抽屉（v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+ 入口列表
+ *  （文件传输记录/个性化/设置/关于）→ 设 currentPage（BluelinkUiState.PAGE_* 常量）；
+ *  主页面为默认页不列项（子页「返回」回主页面）；旧发送/接收/权限栏已移除（发送/接收并入主页面
+ *  操作与设置、权限并入设置页后续）。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
@@ -1352,7 +1428,7 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
                 .fillMaxWidth()
                 .padding(horizontal = SpacingTokens.SpaceLg, vertical = 20.dp), // 20dp 非 4dp 节奏（审计未列，保持原值）
         ) {
-            Text("Bluelink", style = MaterialTheme.typography.headlineSmall)
+            Text("蓝鲸·X", style = MaterialTheme.typography.headlineSmall)
             Text(
                 text = "本机：${ui.selfCard.alias.ifBlank { Build.MODEL }}",
                 style = MaterialTheme.typography.bodySmall,
@@ -1361,13 +1437,10 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
         }
         HorizontalDivider()
         val entries = listOf(
-            0 to "主页面",
-            1 to "发送",
-            2 to "接收",
-            3 to "记录",
-            4 to "设置",
-            5 to "权限",
-            6 to "关于",
+            BluelinkUiState.PAGE_LOG to "文件传输记录",
+            BluelinkUiState.PAGE_PERSONAL to "个性化",
+            BluelinkUiState.PAGE_SETTINGS to "设置",
+            BluelinkUiState.PAGE_ABOUT to "关于",
         )
         entries.forEach { (page, label) ->
             NavigationDrawerItem(

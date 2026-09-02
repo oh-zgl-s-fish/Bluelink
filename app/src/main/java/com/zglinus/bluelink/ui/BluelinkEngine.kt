@@ -105,6 +105,14 @@ import java.util.concurrent.atomic.AtomicInteger
  * 仅停热点/网络与 LocalSend 服务、组网状态回 IDLE，**不调用 stopAllBle / SessionManager.detach**——
  * BLE 会话/广播/扫描全程保留（可继续传输）。
  *
+ * v0.4.7 A8 同网免热点直连：握手完成且 startNetworking 触发时先判同网（[sameLanForPeer]：双方
+ * wifi=true、双方 ssid 非空且相等、[SameLanChecker.isSameLan] 子网一致）——同网 → **跳过仲裁/热点/
+ * offer 全流程**，直接 [onTransportReadyInternal]（对端握手 net.ip）起 LocalSend 服务免热点
+ * TRANSPORT（双方各自起 Server 互连，无协调冲突）；probeTcp(peerIp, 53317) 后台线程异步执行
+ * （成功 → 确认「直连可达」；失败 → 仅提示「直连不可达（可能 AP 隔离）」不阻断——对端服务可能
+ * 尚未监听，probe 容忍）；异网 → 现状（仲裁 + 热点逐级）不动；收尾沿用 v0.4.6 B4 温和收尾
+ * （[endSameLanDirect] 同网直连收尾只停服务 + 复位，BLE 会话/广播/扫描保留）。
+ *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
 class BluelinkEngine(private val context: Context) {
@@ -198,6 +206,10 @@ class BluelinkEngine(private val context: Context) {
     /** 传输就绪时记录的对端 IPv4（TRANSPORT 后发送目标；一期可能为占位 ""）。 */
     @Volatile
     internal var transportPeerIp: String = ""
+
+    /** A8 同网直连（免热点）进行中标记：true=同网直连已 TRANSPORT（无状态机，startNetworking 直接进入）；收尾/停止时复位。 */
+    @Volatile
+    internal var sameLanDirectActive = false
 
     /** 进行中的发送客户端（transferState 旁「取消」→ cancel()）。 */
     @Volatile
@@ -1032,8 +1044,8 @@ class BluelinkEngine(private val context: Context) {
 
     /** 「组建临时局域网」：按选中对端握手能力 + 本机能力仲裁，创建状态机并 start。 */
     fun startNetworking() {
-        if (netStateMachine != null) {
-            DiagLogger.log(TAG, "startNetworking 忽略：组网已在进程中")
+        if (netStateMachine != null || sameLanDirectActive) {
+            DiagLogger.log(TAG, "startNetworking 忽略：组网/同网直连已在进程中（machine=${netStateMachine != null} sameLanDirect=$sameLanDirectActive）")
             return
         }
         val entry = ui.selectedDevice ?: run {
@@ -1048,6 +1060,14 @@ class BluelinkEngine(private val context: Context) {
         ui.writeSettingsDialog = false
         ui.manualPwdDialog = false
         ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：新流程复位系统热点登记模式
+
+        // A8 同网免热点直连：先刷新本机网络（用当前数据判同网；对端侧 net 取自握手时刻，握手后即固化、无需等 offer），
+        // 同网 → 跳过仲裁/热点/offer 全流程直接 TRANSPORT；异网 → 走下方现状（仲裁 + 热点逐级）
+        refreshNetwork()
+        if (sameLanForPeer(hs.net)) {
+            startSameLanDirect(hs)
+            return
+        }
 
         val mine = buildLocalCapability(
             isRoot = RootDetector.isRoot(),
@@ -1085,13 +1105,101 @@ class BluelinkEngine(private val context: Context) {
         netStateMachine?.start()
     }
 
-    /** 「结束组网」：取消状态机（发 abort → TEARDOWN → onAbort 收敛）。 */
+    /**
+     * 「结束组网」：同网直连（免热点）→ [endSameLanDirect]（无状态机）；异网/热点路径 → 取消状态机
+     * （发 abort → TEARDOWN → onAbort 收敛）。
+     */
     fun endNetworking() {
         ui.manualPwdDialog = false
         ui.joinFailDialog = false
         ui.writeSettingsDialog = false
         ui.systemHotspotPwdMode = false // ② Binder 直呼（v0.3.4）：结束组网复位系统热点登记模式
+        if (sameLanDirectActive) {
+            endSameLanDirect()
+            return
+        }
         netStateMachine?.cancel()
+    }
+
+    // ============ A8 同网免热点直连（握手后判定同网 → 直接 TRANSPORT，跳过仲裁/热点/offer） ============
+
+    /**
+     * A8 同网免热点直连（startNetworking 同网分支）：**跳过仲裁/热点/offer 全流程**——
+     * 直接 [onTransportReadyInternal]（起 LocalSendServer + 接收轮询）进入 TRANSPORT，
+     * peerIp=对端握手 net.ip（握手时刻采集，同网判定已过即固化，无需等 offer）；
+     * probeTcp(peerIp, 53317) 后台线程异步执行：成功 → 确认「直连可达」；失败 → 仍进入传输
+     * （同网判定已过，probe 仅提示「直连不可达（可能 AP 隔离）」不阻断——对端 LocalSend 服务
+     * 可能尚未监听，probe 容忍：多次重试 + 失败不阻断）。
+     * 边界：双方同时判同网同时直连 → 无协调冲突（各自起 Server，端口各自本机 53317，互连即可）。
+     */
+    private fun startSameLanDirect(hs: HandshakeMessage) {
+        val peerIp = hs.net.ip?.trim()?.takeIf { it.isNotBlank() } ?: ""
+        sameLanDirectActive = true
+        ui.hotspotSideAfterTransfer = false
+        ui.netActive = true
+        onTransportReadyInternal(peerIp)
+        ui.netState = "✅ 同网直连：传输就绪（免热点）"
+        ui.transferState = "同网直连：传输就绪（免热点）"
+        DiagLogger.log(
+            TAG,
+            "A8 同网直连：跳过仲裁/热点/offer 全流程，直接 TRANSPORT（免热点）peerIp=${peerIp.ifEmpty { "<空>" }}",
+        )
+        if (peerIp.isBlank()) {
+            DiagLogger.log(TAG, "A8 同网直连：对端握手 net.ip 为空，跳过 probeTcp（无可探测地址）")
+            return
+        }
+        // probe 异步（后台线程真实 TCP 探测，不阻塞主线程；失败不阻断传输）
+        Thread({
+            var reachable = false
+            for (attempt in 1..SAME_LAN_PROBE_ATTEMPTS) {
+                if (SameLanChecker.probeTcp(peerIp, Constants.DEFAULT_TCP_PROBE_PORT, SAME_LAN_PROBE_TIMEOUT_MS)) {
+                    reachable = true
+                    break
+                }
+                if (attempt < SAME_LAN_PROBE_ATTEMPTS) {
+                    try {
+                        Thread.sleep(SAME_LAN_PROBE_RETRY_DELAY_MS)
+                    } catch (ie: InterruptedException) {
+                        break
+                    }
+                }
+            }
+            val result = if (reachable) {
+                "✅ 直连可达（probeTcp $peerIp:${Constants.DEFAULT_TCP_PROBE_PORT} 成功）"
+            } else {
+                "直连不可达（可能 AP 隔离或对端服务尚未监听，probe 仅提示不阻断）"
+            }
+            mainHandler.post {
+                // 不覆盖进行中的发送/接收进度：仅当仍处于直连就绪文案时回写 probe 结果
+                val cur = ui.transferState
+                if (cur == null || cur.startsWith("同网直连：传输就绪")) {
+                    ui.transferState = if (reachable) {
+                        "同网直连：传输就绪（免热点）·直连可达"
+                    } else {
+                        "同网直连：传输就绪（免热点）·直连探测未通（可能 AP 隔离）"
+                    }
+                }
+                DiagLogger.log(TAG, "A8 同网直连 probe 结果：$result")
+            }
+        }, "samelan-direct-probe").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * A8 同网直连温和收尾（对齐 v0.4.6 B4 温和收尾语义）：只停 LocalSend 服务与接收轮询、
+     * 组网状态回 IDLE，**不调用 stopAllBle / SessionManager.detach**——BLE 会话/广播/扫描全程保留
+     * （可继续传输）；无状态机（同网直连无仲裁/热点），等价于状态机路径 cancel → onAbort 的收敛。
+     */
+    fun endSameLanDirect() {
+        DiagLogger.log(TAG, "A8 同网直连收尾（温和，对齐 B4）：停 LocalSend 服务 + 状态复位；BLE 会话/广播/扫描保留（不调 stopAllBle/detach）")
+        mainHandler.removeCallbacks(receivePoller)
+        localsendServer.stop()
+        if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
+        transportPeerIp = ""
+        sameLanDirectActive = false
+        ui.netActive = false
+        ui.netState = null
+        ui.hotspotSideAfterTransfer = false
+        ui.transferState = "已关闭同网直连（BLE 通信保留）"
     }
 
     // ============ B4 温和收尾（传输完成后手动关闭热点 / 断开网络；BLE 全程保留） ============
@@ -1124,6 +1232,7 @@ class BluelinkEngine(private val context: Context) {
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
+        sameLanDirectActive = false // A8：同网直连标记复位（防御；同网直连不经热点路径）
         ui.netActive = false
         ui.netState = null
         ui.hotspotSideAfterTransfer = false
@@ -1153,6 +1262,7 @@ class BluelinkEngine(private val context: Context) {
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
+        sameLanDirectActive = false // A8：同网直连标记复位（防御；同网直连不经从机路径）
         ui.netActive = false
         ui.netState = null
         ui.hotspotSideAfterTransfer = false
@@ -1260,12 +1370,20 @@ class BluelinkEngine(private val context: Context) {
         }
         client.onAllDone = { total ->
             mainHandler.post {
-                // B4 温和收尾：发送全部完成 → 传输完成态（按角色区分文案；热点保持/已接入，可继续，
-                // 或点「关闭热点」/「断开网络」手动收尾；BLE 会话/广播/扫描全程保留，不自动拆）
-                ui.transferState = if (ui.hotspotSideAfterTransfer) {
-                    "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
-                } else {
-                    "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                // B4 温和收尾：发送全部完成 → 传输完成态（按角色区分文案；热点保持/已接入/同网直连可继续，
+                // 或点「关闭热点」/「断开网络」/「结束直连」手动收尾；BLE 会话/广播/扫描全程保留，不自动拆）
+                ui.transferState = when {
+                    ui.hotspotSideAfterTransfer -> {
+                        "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
+                    }
+
+                    sameLanDirectActive -> {
+                        "传输完成 ✅（同网直连保持中，可继续发送；或点「结束直连」结束）"
+                    }
+
+                    else -> {
+                        "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                    }
                 }
                 DiagLogger.log(TAG, "T3 发送全部完成：$name total=${total}B（B4 温和收尾：保留 BLE/热点，等待用户手动收尾）")
                 activeSendClient = null
@@ -1394,10 +1512,18 @@ class BluelinkEngine(private val context: Context) {
             ) {
                 mainHandler.post {
                     if (saved) {
-                        ui.transferState = if (ui.hotspotSideAfterTransfer) {
-                            "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
-                        } else {
-                            "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                        ui.transferState = when {
+                            ui.hotspotSideAfterTransfer -> {
+                                "传输完成 ✅（热点保持中，可继续发送；或点「关闭热点」结束）"
+                            }
+
+                            sameLanDirectActive -> {
+                                "传输完成 ✅（同网直连保持中，可继续接收；或点「结束直连」结束）"
+                            }
+
+                            else -> {
+                                "传输完成 ✅（已接入热点，可继续接收；或点「断开网络」结束）"
+                            }
                         }
                     }
                 }
@@ -1627,6 +1753,7 @@ class BluelinkEngine(private val context: Context) {
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
+        sameLanDirectActive = false // A8：同网直连标记随停止复位（幂等）
         // ③ L2 本地热点收尾预留（B4 正式收尾前释放入口；幂等；stopAllBle 覆盖 release() 收尾路径）
         hotspotManager.stopLocalOnly()
         // ② Binder 直呼（v0.3.4）收尾兜底：状态机为 null 但登记框仍悬挂时释放待收敛 Binder 结果（幂等）
@@ -1698,8 +1825,39 @@ class BluelinkEngine(private val context: Context) {
     // ---------- A5 内部：异网判定 / 阶段映射 / 工具 ----------
 
     /**
+     * A8 同网判定（握手完成且 startNetworking 触发时；同网判定在握手后即固化，无需等 offer）：
+     * - 双方 `wifi=true` 且双方 `ssid` 非空且相等（trim 后比较）；
+     * - 且 [SameLanChecker.isSameLan]（纯子网比较：双方 (IP & mask) 一致；复用 SameLanChecker）；
+     * 满足 → 同网（免热点直连）；否则 → 异网（仲裁 + 热点逐级）。
+     * 依据日志：ssid / 子网（describeSubnet）。
+     */
+    private fun sameLanForPeer(peerNet: NetworkSummary): Boolean {
+        val local = ui.localNetwork
+        val localSsid = local.ssid?.trim()?.takeIf { it.isNotBlank() }
+        val peerSsid = peerNet.ssid?.trim()?.takeIf { it.isNotBlank() }
+        if (!local.wifi || !peerNet.wifi || localSsid == null || peerSsid == null || localSsid != peerSsid) {
+            DiagLogger.log(
+                TAG,
+                "A8 同网判定：ssid/网络类型不满足 → 异网（local.wifi=${local.wifi} peer.wifi=${peerNet.wifi} " +
+                    "local.ssid=${localSsid ?: "<空>"} peer.ssid=${peerSsid ?: "<空>"}）",
+            )
+            return false
+        }
+        val subnetSame = SameLanChecker.isSameLan(local, peerNet)
+        DiagLogger.log(
+            TAG,
+            "A8 同网判定依据：ssid 一致（$localSsid）；子网比较 " +
+                "${SameLanChecker.describeSubnet(local.ip, local.mask)} vs ${SameLanChecker.describeSubnet(peerNet.ip, peerNet.mask)}" +
+                " → isSameLan=$subnetSame（${if (subnetSame) "同网，免热点直连" else "异网，走仲裁+热点" }）",
+        )
+        return subnetSame
+    }
+
+    /**
      * 异网判定（简单版，任务约定）：握手后本机与对方 net 比较——
      * wifi 不都为 true，或 ssid 不同，或 IP 网段前缀不同 → 异网；否则视为同网。
+     * v0.4.7 A8：入口可见性改由 [updateNetBtnVisibility] 按「已握手即可见」判定（同网/异网均可点，
+     * 同网走免热点直连、异网走仲裁+热点），本方法保留作异网语义参考。
      */
     private fun isDifferentNet(local: NetworkSummary, remote: NetworkSummary): Boolean {
         if (!local.wifi || !remote.wifi) return true
@@ -1712,17 +1870,20 @@ class BluelinkEngine(private val context: Context) {
         return false
     }
 
-    /** 重算详情弹层「组建临时局域网」按钮可见性（异网且已握手才显示）。 */
+    /**
+     * 重算详情弹层「组建临时局域网 / 同网免热点直连」入口可见性：已握手即可见（v0.4.7 A8：
+     * 同网 → 免热点直连入口；异网 → 仲裁+热点组网入口；入口标签按 entry.lanStatus 区分）。
+     */
     private fun updateNetBtnVisibility() {
         val entry = ui.selectedDevice ?: run {
             ui.netBtnVisible = false
             return
         }
-        val hs = entry.handshake ?: run {
+        if (entry.handshake == null) {
             ui.netBtnVisible = false
             return
         }
-        ui.netBtnVisible = isDifferentNet(ui.localNetwork, hs.net)
+        ui.netBtnVisible = true
     }
 
     /** 状态机阶段 → 展示文本（UI 最简文本式）。 */
@@ -1757,6 +1918,15 @@ class BluelinkEngine(private val context: Context) {
 
         /** 接管路径从机等 ack 超时：120s，对齐状态机 JOINED 等 ack（MANUAL_TIMEOUT_MS 同一值；v0.4.4）。 */
         private const val TAKEOVER_ACK_TIMEOUT_MS: Long = 120_000L
+
+        /** A8 同网直连：probeTcp 异步探测重试次数（容忍对端 LocalSend 服务尚未监听 / AP 隔离，失败不阻断传输）。 */
+        private const val SAME_LAN_PROBE_ATTEMPTS = 3
+
+        /** A8 同网直连：单次 probeTcp 超时（ms；后台线程执行，不阻塞主线程）。 */
+        private const val SAME_LAN_PROBE_TIMEOUT_MS = 1_500L
+
+        /** A8 同网直连：probe 重试间隔（ms；给对端 LocalSend 服务启动留时间）。 */
+        private const val SAME_LAN_PROBE_RETRY_DELAY_MS = 1_000L
 
         /**
          * A5：当前引擎实例（MainActivity 创建，init 注册 / release 注销）。

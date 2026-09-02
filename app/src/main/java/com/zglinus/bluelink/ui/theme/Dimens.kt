@@ -140,4 +140,15 @@ object MetricTokens {
 
     /** 时间流事件色点直径（原 6dp → 8dp；语义图形 ≥8dp，audit S6/S1） */
     val EventDot: Dp = 8.dp
+
+    // ============ v0.5.6b 顶栏广播呼吸圆钮（广播 Switch → 呼吸按钮） ============
+
+    /** 广播圆钮视觉直径（30dp；任务档 28-32dp 取中值，v0.5.6b） */
+    val AdvertiseKnob: Dp = 30.dp
+
+    /** 广播圆钮触达命中区边长（48dp ≥48×48 audit；视觉 30dp 圆钮居中于命中区内，v0.5.6b） */
+    val AdvertiseKnobTouch: Dp = 48.dp
+
+    /** 广播圆钮中心点直径（8dp；语义图形 ≥8dp，audit S6，v0.5.6b） */
+    val AdvertiseKnobDot: Dp = 8.dp
 }

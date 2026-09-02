@@ -8,6 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
@@ -50,6 +55,7 @@ import com.zglinus.bluelink.networking.decide
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.net.Inet4Address
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -112,6 +118,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * （成功 → 确认「直连可达」；失败 → 仅提示「直连不可达（可能 AP 隔离）」不阻断——对端服务可能
  * 尚未监听，probe 容忍）；异网 → 现状（仲裁 + 热点逐级）不动；收尾沿用 v0.4.6 B4 温和收尾
  * （[endSameLanDirect] 同网直连收尾只停服务 + 复位，BLE 会话/广播/扫描保留）。
+ *
+ * v0.4.8 A6 Wi-Fi 变化监听：从机未走 Specifier（系统弹窗被忽略 / 用户手动连了热点）时——
+ * 收 offer 后注册 [ConnectivityManager.NetworkCallback]（观察 TRANSPORT_WIFI，仅状态观察、
+ * 不改变网络行为），当前 SSID（去引号）与 offer.ssid（trim）匹配 → 自动取 IP 回 joined
+ * （复用「接入成功→发 joined」路径：状态机仍 WAIT_JOIN 走 onWifiJoined，否则按接管路径直发
+ * joined）；监听仅 offer 会话内有效（收 offer 注册 / 会话 detach、组网中止、B4 收尾注销），
+ * 防重标志（[wifiMonitorJoinedAlready]）忽略已接入过（joined 已发）的命中。
  *
  * 所有 BLE 回调已由各封装切回主线程；UI 状态只在主线程写入。
  */
@@ -267,10 +280,92 @@ class BluelinkEngine(private val context: Context) {
     /** 对端接入器（A4）：对端流程收到 offer 后接入对方热点，结果经 [wifiJoinCallbacks] 回灌。 */
     private val wifiJoiner = WifiJoiner(appContext)
 
+    /** A6：ConnectivityManager（Wi-Fi 变化监听注册用；仅状态观察，不改变网络行为）。 */
+    private val connectivityManager: ConnectivityManager?
+        get() = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+
+    /**
+     * A6 Wi-Fi 变化监听（v0.4.8）：从机未走 Specifier（系统弹窗被忽略 / 用户手动连了热点）时，
+     * Wi-Fi 连上后当前 SSID 与 offer.ssid 匹配 → 自动取 IP 回 joined（复用「接入成功→发 joined」路径）。
+     * 生命周期：收到 offer（状态机 [netCallbacks.onOfferReceived] / 引擎接管 [handlePeerOffer]）后注册——
+     * 「会话中且已收 offer」时启用；会话 detach（[stopAllBle]/新握手）或组网中止/收尾（onAbort/B4）时注销。
+     * 防重：已通过 Specifier 接入过（joined 已发，[wifiMonitorJoinedAlready]）→ 忽略监听命中；
+     * 同一 SSID 重复命中（onCapabilitiesChanged/onLinkPropertiesChanged 高频回调）由
+     * [wifiMonitorHitPending] 幂等收敛；监听仅 offer 会话内有效（[monitorOfferSsid] + 会话 attach 双守卫），
+     * 不干扰 A8 同网直连/热点流程（A8 无 offer，监听目标为空 → 全路径 no-op）。
+     */
+    private val wifiMonitorRequest = NetworkRequest.Builder()
+        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+        .build()
+
+    /** A6：监听目标 SSID（最近一次 offer 携带，trim 后；null=未收 offer/已收尾，监听 no-op）。 */
+    @Volatile
+    private var monitorOfferSsid: String? = null
+
+    /** A6：NetworkCallback 注册状态（幂等注册/注销判定）。 */
+    @Volatile
+    private var wifiMonitorRegistered = false
+
+    /** A6 防重：本次 offer 会话内 joined 已发（Specifier 接入成功 / 监听命中完成）→ 后续监听命中忽略。 */
+    @Volatile
+    private var wifiMonitorJoinedAlready = false
+
+    /** A6：监听命中后取 IP 进行中（防同一 SSID 重复命中重复回 joined；完成/超时/注销复位）。 */
+    @Volatile
+    private var wifiMonitorHitPending = false
+
+    /** A6：命中后延迟取 IP 的已重试次数（对齐 WifiJoiner「延迟取 IP」轮询语义）。 */
+    private var wifiMonitorIpRetryCount = 0
+
+    /** A6：命中后取 IP 的重试定时（短延迟重取；注销/完成时移除）。 */
+    private val wifiMonitorIpRetryRunnable = object : Runnable {
+        override fun run() {
+            if (!wifiMonitorRegistered || !wifiMonitorHitPending) return
+            val target = monitorOfferSsid ?: return
+            val ip = wifiJoiner.fetchIpForSsid(target)
+            if (ip != null) {
+                completeAutoJoin(ip)
+                return
+            }
+            if (wifiMonitorIpRetryCount >= WIFI_MONITOR_IP_RETRY_MAX) {
+                DiagLogger.log(
+                    TAG,
+                    "A6 延迟取 IP 超时（${WIFI_MONITOR_IP_RETRY_MAX} 次，~${WIFI_MONITOR_IP_RETRY_MAX * WIFI_MONITOR_IP_RETRY_INTERVAL_MS / 1000}s）：未取到 IPv4，按空 IP 回 joined（对齐既有「延迟取 IP 超时按空 IP 上报」语义）",
+                )
+                completeAutoJoin("")
+                return
+            }
+            wifiMonitorIpRetryCount++
+            DiagLogger.log(
+                TAG,
+                "A6 命中后暂未取到 IPv4（DHCP/地址分配延迟），${WIFI_MONITOR_IP_RETRY_INTERVAL_MS}ms 后重取（第 $wifiMonitorIpRetryCount 次）",
+            )
+            mainHandler.postDelayed(this, WIFI_MONITOR_IP_RETRY_INTERVAL_MS)
+        }
+    }
+
+    /** A6：Wi-Fi 变化监听回调（经 mainHandler 主线程；onAvailable/onCapabilitiesChanged/onLinkPropertiesChanged 取 SSID+IP）。 */
+    private val wifiMonitorCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            maybeAutoJoinFromWifi(network)
+        }
+
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                maybeAutoJoinFromWifi(network)
+            }
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            maybeAutoJoinFromWifi(network)
+        }
+    }
+
     /** WifiJoiner 结果回调：成功→状态机 onWifiJoined；失败→手动密码重试对话框；需 WRITE_SETTINGS 引导（8-10 前置 / 12+ 兜底）。 */
     private val wifiJoinCallbacks = object : WifiJoiner.Callbacks {
         override fun onJoined(ip: String) {
             DiagLogger.log(TAG, "WifiJoiner 接入成功 ip=${ip.ifEmpty { "<空>" }}，回灌状态机 onWifiJoined")
+            wifiMonitorJoinedAlready = true // A6 防重：已通过 Specifier 接入（joined 已发）→ 监听命中忽略
             netStateMachine?.onWifiJoined(ip.ifEmpty { "" })
         }
 
@@ -314,20 +409,8 @@ class BluelinkEngine(private val context: Context) {
     private val peerOfferJoinCallbacks = object : WifiJoiner.Callbacks {
         override fun onJoined(ip: String) {
             DiagLogger.log(TAG, "接管接入成功 ip=${ip.ifEmpty { "<空>" }}，发送 joined 回报热点方")
-            val ok = sessionManager.sendSignal(
-                SignalMessage(SignalProtocol.TYPE_JOINED, JSONObject().put("ip", ip))
-            )
-            if (!ok) {
-                DiagLogger.log(TAG, "joined 回报发送失败（无会话/无通道）")
-                ui.netState = "已接入热点，但 joined 回报发送失败（无会话通道）"
-                return
-            }
-            DiagLogger.log(TAG, "joined 回报已发送 ip=${ip.ifEmpty { "<空>" }}")
-            ui.netState = "已接入热点，等待对方确认（IP：${ip.ifEmpty { "<未知>" }}）"
-            // v0.4.4：从机 ack 超时对齐状态机 JOINED 等 ack（120s，MANUAL_TIMEOUT_MS 同一值）——
-            // 热点方 ack 未到（已中止/通道异常）给出明确提示，不无限挂起
-            mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
-            mainHandler.postDelayed(takeoverAckTimeoutRunnable, TAKEOVER_ACK_TIMEOUT_MS)
+            wifiMonitorJoinedAlready = true // A6 防重：已通过 Specifier 接入（joined 已发）→ 监听命中忽略
+            sendJoinedAsPeer(ip)
         }
 
         override fun onFailed(reason: String) {
@@ -466,6 +549,7 @@ class BluelinkEngine(private val context: Context) {
             pendingJoinSsid = ssid
             pendingJoinPwd = pwd ?: ""
             pendingJoinCallbacks = wifiJoinCallbacks
+            startWifiJoinMonitor(ssid) // A6：会话中已收 offer → 启用 Wi-Fi 变化监听（弹窗被忽略/手动接入自动回 joined）
             wifiJoiner.join(ssid, pwd ?: "", wifiJoinCallbacks)
         }
 
@@ -480,6 +564,7 @@ class BluelinkEngine(private val context: Context) {
             DiagLogger.log(TAG, "组网中止: $reason")
             netStateMachine = null // 允许再次「组建临时局域网」（下次 start 新建机器）
             mainHandler.removeCallbacks(netPoller)
+            stopWifiJoinMonitor() // A6：组网中止 → offer 会话结束，注销 Wi-Fi 变化监听（幂等；监听仅 offer 会话内有效）
             // ③ L2 本地热点收尾预留（B4 正式收尾前）：中止/结束时释放 LocalOnlyHotspotReservation
             // 并清理待收敛的 L2 pending（幂等；无 L2 时为 no-op，不影响 ①②④）
             hotspotManager.stopLocalOnly()
@@ -1199,6 +1284,7 @@ class BluelinkEngine(private val context: Context) {
         ui.netActive = false
         ui.netState = null
         ui.hotspotSideAfterTransfer = false
+        stopWifiJoinMonitor() // A6：同网直连收尾（防御；A8 无 offer 本应无监听，幂等 no-op）
         ui.transferState = "已关闭同网直连（BLE 通信保留）"
     }
 
@@ -1228,6 +1314,7 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(netPoller)
         mainHandler.removeCallbacks(receivePoller)
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable) // 接管路径残留定时清理（幂等）
+        stopWifiJoinMonitor() // A6：B4 收尾（热点方「关闭热点」）→ offer 会话结束，注销 Wi-Fi 变化监听（幂等）
         // 仅停 server + 状态复位（覆盖 onAbort 的「组网已中止」文案）
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
@@ -1259,6 +1346,7 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(netPoller)
         mainHandler.removeCallbacks(receivePoller)
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
+        stopWifiJoinMonitor() // A6：B4 收尾（从机「断开网络」）→ offer 会话结束，注销 Wi-Fi 变化监听（幂等）
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
@@ -1660,7 +1748,152 @@ class BluelinkEngine(private val context: Context) {
         pendingJoinPwd = pwd
         pendingJoinCallbacks = peerOfferJoinCallbacks
         ui.netState = "收到组网邀请，正在接入热点…"
+        startWifiJoinMonitor(s) // A6：接管 offer 后注册 Wi-Fi 变化监听（弹窗被忽略/手动接入 → 自动回 joined）
         wifiJoiner.join(s, pwd, peerOfferJoinCallbacks)
+    }
+
+    // ============ A6 Wi-Fi 变化监听（Specifier 弹窗被忽略 / 手动接入自动回 joined） ============
+
+    /**
+     * A6：注册 Wi-Fi 变化监听（NetworkCallback，观察 TRANSPORT_WIFI 网络；仅状态观察，不改变网络行为）。
+     * 由 offer 接入路径（状态机 [netCallbacks.onOfferReceived] / 引擎接管 [handlePeerOffer]）调用——
+     * 「会话中且已收 offer」时启用；会话 detach（[stopAllBle]/新握手）或组网中止/收尾（onAbort/B4）时
+     * [stopWifiJoinMonitor] 注销。幂等：已注册时仅更新目标 SSID 并复位防重标志（新 offer 会话）。
+     */
+    private fun startWifiJoinMonitor(ssid: String) {
+        val s = ssid.trim()
+        if (s.isBlank()) return
+        monitorOfferSsid = s
+        wifiMonitorJoinedAlready = false // 新 offer 会话复位防重（本次 offer 尚未接入）
+        if (wifiMonitorRegistered) {
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听已注册，更新目标 SSID=$s（防重已复位）")
+            return
+        }
+        val cm = connectivityManager
+        if (cm == null) {
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听注册失败：ConnectivityManager 不可用")
+            return
+        }
+        try {
+            cm.registerNetworkCallback(wifiMonitorRequest, wifiMonitorCallback, mainHandler)
+            wifiMonitorRegistered = true
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听已注册（NetworkCallback）：SSID 匹配 $s → 自动取 IP 回 joined")
+        } catch (e: Exception) {
+            wifiMonitorRegistered = false
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听注册异常（不阻断接入流程）: $e")
+        }
+    }
+
+    /**
+     * A6：注销 Wi-Fi 变化监听并复位（幂等）。会话 detach（[stopAllBle]/新握手）/ 组网中止（onAbort）/
+     * B4 收尾（关闭热点/断开网络/结束直连）时调用；监听仅 offer 会话内有效，会话结束即失效。
+     */
+    private fun stopWifiJoinMonitor() {
+        mainHandler.removeCallbacks(wifiMonitorIpRetryRunnable)
+        monitorOfferSsid = null
+        wifiMonitorJoinedAlready = false
+        wifiMonitorHitPending = false
+        wifiMonitorIpRetryCount = 0
+        if (!wifiMonitorRegistered) return
+        wifiMonitorRegistered = false
+        try {
+            connectivityManager?.unregisterNetworkCallback(wifiMonitorCallback)
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听已注销（offer 会话结束/收尾）")
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "A6 Wi-Fi 监听注销异常（忽略）: $e")
+        }
+    }
+
+    /**
+     * A6：监听回调统一入口（主线程）——当前 SSID（去引号）与 offer.ssid（trim）相等 →
+     * 触发「接入成功」：取本机 IPv4 → [completeAutoJoin] 复用「接入成功→发 joined」路径。
+     * 守卫：监听未注册 / 已回 joined（防重）/ 命中取 IP 进行中（幂等）/ 无 offer 目标 / 会话已 detach。
+     */
+    private fun maybeAutoJoinFromWifi(network: Network?) {
+        if (!wifiMonitorRegistered) return
+        if (wifiMonitorJoinedAlready || wifiMonitorHitPending) return // 防重：已接入过 / 命中处理中（幂等）
+        val target = monitorOfferSsid
+        if (target.isNullOrBlank()) return // 未收 offer（A8 同网直连/热点方流程无目标）→ no-op
+        if (!sessionManager.isAttached) return // 监听仅 offer 会话内有效（会话已 detach → 忽略）
+        val nowSsid = wifiJoiner.currentSsid() // 去引号取当前 SSID（与 WifiJoiner 接入轮询同源）
+        if (nowSsid == null || nowSsid != target) return // SSID 不匹配（trim 已在记录 offer.ssid 时归一）
+        // 命中：当前 SSID == offer.ssid（未走 Specifier / 系统弹窗被忽略后用户手动接入）
+        DiagLogger.log(
+            TAG,
+            "A6 Wi-Fi 监听命中：当前 SSID=$nowSsid == offer.ssid=$target（未走 Specifier，手动接入），自动取 IP 回 joined",
+        )
+        wifiMonitorHitPending = true
+        wifiMonitorIpRetryCount = 0
+        var ip: String? = network?.let { ipFromNetwork(it) } // 该 Wi-Fi 网络自身 LinkProperties（最准）
+        if (ip == null) ip = wifiJoiner.fetchIpForSsid(target) // 复用既有取 IP 采集链（collect + WifiInfo 兜底）
+        if (ip != null) {
+            completeAutoJoin(ip)
+            return
+        }
+        DiagLogger.log(TAG, "A6 命中但暂未取到 IPv4（DHCP/地址分配延迟），${WIFI_MONITOR_IP_RETRY_INTERVAL_MS}ms 后短延迟重取")
+        mainHandler.postDelayed(wifiMonitorIpRetryRunnable, WIFI_MONITOR_IP_RETRY_INTERVAL_MS)
+    }
+
+    /**
+     * A6：监听命中取 IP 完成 → 复用「接入成功→发 joined」路径：
+     * - 状态机仍 [NetState.WAIT_JOIN]（弹窗未确认期间用户已手动连上）→ 复用状态机
+     *   [NetworkingStateMachine.onWifiJoined]（发 joined + JOINED 等 ack，与 Specifier 接入成功完全对齐）；
+     * - offer 等待窗口已过 / 状态机已非 WAIT_JOIN（null/中止/接管路径）→ 按接管路径直发 joined
+     *   （[sendJoinedAsPeer]，复用 [peerOfferJoinCallbacks.onJoined] 同款载荷与 ack 超时语义）。
+     * 防重：完成即置 [wifiMonitorJoinedAlready]，同一 SSID 重复命中（回调高频）幂等忽略。
+     */
+    private fun completeAutoJoin(ip: String) {
+        wifiMonitorHitPending = false
+        wifiMonitorIpRetryCount = 0
+        mainHandler.removeCallbacks(wifiMonitorIpRetryRunnable)
+        wifiMonitorJoinedAlready = true // 防重：本次 offer 会话内已回 joined
+        DiagLogger.log(TAG, "A6 自动取 IP 成功 ip=${ip.ifEmpty { "<空>" }}，回 joined")
+        val m = netStateMachine
+        if (m != null && m.currentState == NetState.WAIT_JOIN) {
+            DiagLogger.log(TAG, "A6 状态机仍 WAIT_JOIN：走状态机 onWifiJoined（对齐 Specifier 接入成功路径）")
+            m.onWifiJoined(ip)
+            return
+        }
+        DiagLogger.log(TAG, "A6 状态机已非 WAIT_JOIN（machine=${m != null} state=${m?.currentState}）：按接管路径直发 joined")
+        sendJoinedAsPeer(ip)
+    }
+
+    /** A6：从 NetworkCallback 携带的 network 取该网络自身 IPv4（LinkProperties，最准；DHCP 未完成时可能为空）。 */
+    private fun ipFromNetwork(network: Network): String? {
+        return try {
+            connectivityManager?.getLinkProperties(network)?.linkAddresses?.forEach { la ->
+                val addr = la.address
+                if (addr is Inet4Address && !addr.isLoopbackAddress && !addr.isLinkLocalAddress) {
+                    return addr.hostAddress
+                }
+            }
+            null
+        } catch (e: Exception) {
+            DiagLogger.log(TAG, "A6 读取 LinkProperties IPv4 失败: $e")
+            null
+        }
+    }
+
+    /**
+     * 从机发 joined（复用点）：接管路径 [peerOfferJoinCallbacks.onJoined] 与 A6 监听命中
+     * [completeAutoJoin] 共用——发送 TYPE_JOINED{ip} 回报热点方（载荷与状态机 joined 一致，
+     * 热点方按既有 onJoined 收敛）→ 启动接管路径 ack 超时（120s，对齐状态机 JOINED 等 ack）。
+     */
+    private fun sendJoinedAsPeer(ip: String) {
+        val ok = sessionManager.sendSignal(
+            SignalMessage(SignalProtocol.TYPE_JOINED, JSONObject().put("ip", ip))
+        )
+        if (!ok) {
+            DiagLogger.log(TAG, "joined 回报发送失败（无会话/无通道）")
+            ui.netState = "已接入热点，但 joined 回报发送失败（无会话通道）"
+            return
+        }
+        DiagLogger.log(TAG, "joined 回报已发送 ip=${ip.ifEmpty { "<空>" }}")
+        ui.netState = "已接入热点，等待对方确认（IP：${ip.ifEmpty { "<未知>" }}）"
+        // v0.4.4：从机 ack 超时对齐状态机 JOINED 等 ack（120s，MANUAL_TIMEOUT_MS 同一值）——
+        // 热点方 ack 未到（已中止/通道异常）给出明确提示，不无限挂起
+        mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
+        mainHandler.postDelayed(takeoverAckTimeoutRunnable, TAKEOVER_ACK_TIMEOUT_MS)
     }
 
     /**
@@ -1760,6 +1993,7 @@ class BluelinkEngine(private val context: Context) {
         hotspotManager.stopBinderTetherPending()
         ui.systemHotspotPwdMode = false
         wifiJoiner.cancel() // 释放进行中的接入 / 残留 NetworkCallback
+        stopWifiJoinMonitor() // A6：会话结束（detach）→ 注销 Wi-Fi 变化监听（幂等）
         advertiser.stop()
         scanner.stop()
         gattServer.stop()
@@ -1806,6 +2040,7 @@ class BluelinkEngine(private val context: Context) {
         sessionManager.attach(deviceAddress)
         // Bluelink 组网补丁：新会话重置 offer 接管去重（一次会话一次接管）
         peerOfferHandled = false
+        stopWifiJoinMonitor() // A6：新会话（重新握手 attach）→ 旧 offer 监听失效，注销并复位（新 offer 到来时重新注册）
         // v0.4.4：接管路径状态复位（offer 热点 IP 清空 + ack 超时定时取消，幂等）
         takeoverPeerIp = ""
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
@@ -1927,6 +2162,12 @@ class BluelinkEngine(private val context: Context) {
 
         /** A8 同网直连：probe 重试间隔（ms；给对端 LocalSend 服务启动留时间）。 */
         private const val SAME_LAN_PROBE_RETRY_DELAY_MS = 1_000L
+
+        /** A6 Wi-Fi 监听：命中后取 IP 的短延迟重试间隔（ms；对齐 WifiJoiner IP_POLL_INTERVAL_MS）。 */
+        private const val WIFI_MONITOR_IP_RETRY_INTERVAL_MS: Long = 500L
+
+        /** A6 Wi-Fi 监听：命中后取 IP 最长重试次数（~5s，对齐 WifiJoiner IP_POLL_TIMEOUT_MS 语义）。 */
+        private const val WIFI_MONITOR_IP_RETRY_MAX = 10
 
         /**
          * A5：当前引擎实例（MainActivity 创建，init 注册 / release 注销）。

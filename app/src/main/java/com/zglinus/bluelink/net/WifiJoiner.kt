@@ -368,8 +368,13 @@ class WifiJoiner(private val context: Context) {
         }, SSID_POLL_INTERVAL_MS)
     }
 
+    /**
+     * 当前已连接 Wi-Fi 的 SSID（去引号；未连接 / 读取失败 / Android 12+ 未授权定位时为 null）。
+     * A6：引擎 Wi-Fi 变化监听（[com.zglinus.bluelink.ui.BluelinkEngine] 监听命中判定 offer.ssid 匹配）
+     * 复用此读取，与 26–28 接入轮询同源。
+     */
     @Suppress("DEPRECATION") // WifiInfo.ssid 读取（Android 12+ 未授权定位时可能拿不到，返回 null 属正常）
-    private fun currentSsid(): String? {
+    fun currentSsid(): String? {
         val wm = wifiManager ?: return null
         return try {
             wm.connectionInfo.ssid
@@ -448,6 +453,17 @@ class WifiJoiner(private val context: Context) {
         if (ipInt == 0 || (infoSsid != null && infoSsid != ssid)) return null
         return formatIp(ipInt)
     }
+
+    /**
+     * A6：按目标 SSID 取本机当前 IPv4（复用 [fetchCurrentIp] 的既有采集链：
+     * [NetworkInfoProvider.collect] + [WifiInfo.getIpAddress] 兜底，均与目标 SSID 校验）。
+     * 供引擎 Wi-Fi 变化监听命中后「自动取 IP」用（Specifier 弹窗被忽略、用户手动连上 offer
+     * 热点时复用同一取 IP 语义）；只读采集，不触碰接入尝试状态（无 [current]）。
+     *
+     * @param ssid 目标 SSID（与当前连接校验；不匹配返回 null）。
+     * @return 匹配 SSID 的当前 IPv4；未取到返回 null（调用方按「延迟取 IP」重试语义处理）。
+     */
+    fun fetchIpForSsid(ssid: String): String? = fetchCurrentIp(ssid.trim(), null)
 
     /** WifiInfo.ipAddress（Int，主机序）→ 点分十进制。 */
     private fun formatIp(ip: Int): String =

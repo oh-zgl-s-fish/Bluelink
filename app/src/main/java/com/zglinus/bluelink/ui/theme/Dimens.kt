@@ -1,7 +1,12 @@
 package com.zglinus.bluelink.ui.theme
 
+import android.content.Context
+import android.provider.Settings
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.TweenSpec
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -36,10 +41,11 @@ object SpacingTokens {
 
 /** 圆角 token：显式接 Shapes（audit S7/P0-3）。
  *
- * v0.5.4a 扁平化定稿（10/8 两档）：保留浮层（sheet/dialog/抽屉容器）圆角归 10dp（[Modal]）——
- * M3 组件默认槽位 large=导航抽屉容器(原 16)、extraLarge=AlertDialog/ModalBottomSheet(原 28)，
- * 本 App 这两个槽位仅浮层消费，故 theme 将 large/extraLarge 一并接 [Modal]（见 BluelinkTheme.kt）；
- * 小件（badge/按钮/输入框）保持 8dp（[Small]）。原 Large(16)/ExtraLarge(28) 常量随 v0.5.4a 移除（无消费点）。
+ * v0.5.4a 定稿两档：浮层 10dp（[Modal]）/ 小件 8dp（[Small]）。
+ * v0.5.4b 块级内容容器（surfaceContainer 系列分层块，见 MainScreen.kt）同样取 10dp 档：
+ * theme 中 M3 large 槽位（＝导航抽屉容器）与 extraLarge 槽位（＝AlertDialog/ModalBottomSheet）一并接 [Modal]，
+ * 代码侧块级容器直接用 MaterialTheme.shapes.large（＝10，接线见 BluelinkTheme.kt）——块级统一 10、小件统一 8。
+ * 原 Large(16)/ExtraLarge(28) 常量随 v0.5.4a 移除（无消费点）。
  */
 object ShapeTokens {
     /** xs=4dp */
@@ -51,7 +57,7 @@ object ShapeTokens {
     /** md=12dp —— M3 medium 槽位（Card 已去容器化，无当前视觉消费点，保留槽位接线） */
     val Medium: Dp = 12.dp
 
-    /** modal=10dp（v0.5.4a 新增）—— 浮层（sheet/dialog/抽屉容器）圆角 */
+    /** modal=10dp（v0.5.4a 新增）—— 浮层（sheet/dialog/抽屉容器）与 v0.5.4b 块级内容容器共用圆角档 */
     val Modal: Dp = 10.dp
 }
 
@@ -83,6 +89,36 @@ object MotionTokens {
 
     /** 布局切换缓动（宽度切换等，即 v0.5.1a FastOutSlowIn） */
     val EasingLayout: Easing = FastOutSlowInEasing
+
+    // ---- P2-1 减动效档（audit M1/A6/P2-1：Settings.Global.ANIMATOR_DURATION_SCALE==0）----
+
+    /** 减动效档动画时长：0ms 直切（tween(0)）；无脉冲/呼吸等无限重复动画（PulseRing 已随 v0.5.4a 移除）。 */
+    const val DurationReduced = 0
+
+    /**
+     * 布局切换（两栏 width weight 动画）spec：reduced=true → tween(0) 直切；
+     * 否则 650ms 品牌档（v0.5.1a-3 实机档，audit「保留但进 token」）。
+     */
+    fun layoutSpec(reduced: Boolean): TweenSpec<Float> =
+        if (reduced) tween(DurationReduced) else tween(DurationLong, easing = EasingLayout)
+
+    /**
+     * 面板切换（Crossfade）spec：reduced=true → tween(0) 直切；否则 200ms 快速档（[DurationShort]）。
+     */
+    fun crossfadeSpec(reduced: Boolean): FiniteAnimationSpec<Float> =
+        if (reduced) tween<Float>(DurationReduced) else tween<Float>(DurationShort)
+}
+
+/**
+ * 系统减动效检测（audit P2-1/A6/M1）：`Settings.Global.ANIMATOR_DURATION_SCALE == 0` 即视为开启。
+ * 主题级（app 启动）读取一次——由 [com.zglinus.bluelink.ui.BluelinkEngine] init 写入
+ * `ui.reduceMotion`；MainScreen 动画 spec 消费点据此走 [MotionTokens.layoutSpec]/
+ * [MotionTokens.crossfadeSpec] 最短档（0ms 直切）。读取失败/异常回退 false（不猜减动效）。
+ */
+fun isReduceMotionEnabled(context: Context): Boolean = try {
+    Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+} catch (e: Exception) {
+    false
 }
 
 /** 内容型度量 token（非 4dp 节奏间距项；audit P0-3 例外清单，避免误并入间距 scale）。 */

@@ -7,12 +7,10 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -57,6 +55,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -77,7 +77,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -137,6 +139,15 @@ fun MainScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
+    // P2-4/F3 反馈通道：Snackbar（Toast → Snackbar）。宿主接 Scaffold snackbarHost；ui.snackbarMsg 为一次性
+    // 信号（Engine.snack()/MainScreen 提示点写入），消费先复位 null（同文案可再触发），再经 hostState 展示。
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(ui.snackbarMsg) {
+        val msg = ui.snackbarMsg ?: return@LaunchedEffect
+        ui.snackbarMsg = null
+        snackbarHostState.showSnackbar(msg)
+    }
+
     // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）
     val sendFileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -174,6 +185,7 @@ fun MainScreen(
         },
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 MainTopBar(
                     ui = ui,
@@ -225,6 +237,8 @@ fun MainScreen(
                 DiagLogger.clear()
                 ui.diagnosticText = DiagLogger.dump()
             },
+            // F3/P2-4：复制/导出结果 → Snackbar（替换原 Toast）
+            onNotify = { ui.showSnack(it) },
         )
     }
 
@@ -276,6 +290,10 @@ private fun MainTopBar(
                 Switch(
                     checked = advertisingWanted,
                     onCheckedChange = onAdvertisingWantedChange,
+                    // audit A2/P2-2：开关补状态描述语义（读屏可理解「广播开启/广播停止」）
+                    modifier = Modifier.semantics {
+                        stateDescription = if (advertisingWanted) "广播开启" else "广播停止"
+                    },
                 )
             }
         },
@@ -319,8 +337,8 @@ private fun MainPage(
         // ---- 两态左右栏：开屏 1/3 | 2/3；配对后 1/2 | 1/2（Row weight 动画，宽度平滑切换） ----
         val selfWeight by animateFloatAsState(
             targetValue = if (ui.pairedView) 0.5f else 1f / 3f,
-            // v0.5.1a-3：宽度切换放慢（650ms FastOutSlowIn，避免「太快」观感）
-            animationSpec = tween(MotionTokens.DurationLong, easing = MotionTokens.EasingLayout),
+            // v0.5.1a-3：宽度切换放慢（650ms FastOutSlowIn，避免「太快」观感）；P2-1：spec 进 MotionTokens，减动效档 tween(0) 直切
+            animationSpec = MotionTokens.layoutSpec(ui.reduceMotion), // P2-1：减动效 → tween(0) 直切
             label = "selfWeight",
         )
         Row(modifier = Modifier
@@ -337,6 +355,7 @@ private fun MainPage(
             Spacer(Modifier.width(SpacingTokens.SpaceMd)) // v0.5.1a-5：两栏间 gap ≥ 12dp
             Crossfade(
                 targetState = ui.pairedView,
+                animationSpec = MotionTokens.crossfadeSpec(ui.reduceMotion), // P2-1：减动效 → 直切
                 modifier = Modifier
                     .weight(1f - selfWeight)
                     .fillMaxHeight(),
@@ -596,7 +615,9 @@ private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> U
         },
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onRemove),
+            .combinedClickable(onClick = onClick, onLongClick = onRemove)
+            // audit P2-3：可点击行补 role=Button（读屏按按钮播报；ListItem 行语义合并）
+            .semantics { role = Role.Button },
     )
 }
 
@@ -930,8 +951,12 @@ private fun TimeFlowPanel(ui: BluelinkUiState, modifier: Modifier = Modifier) {
 @Composable
 private fun TimeFlowList(ui: BluelinkUiState, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
+    // audit M4/P2：仅在用户已在顶部附近（首可见项 ≤ 2）才自动滚顶——下翻读历史时不被拽回；
+    // scrollToItem(0) 为瞬时跳转（无动画），减动效档无需另行处理
     LaunchedEffect(ui.eventLog.size) {
-        if (ui.eventLog.isNotEmpty()) listState.scrollToItem(0)
+        if (ui.eventLog.isNotEmpty() && listState.firstVisibleItemIndex <= 2) {
+            listState.scrollToItem(0)
+        }
     }
     if (ui.eventLog.isEmpty()) {
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
@@ -1808,13 +1833,15 @@ private fun WriteSettingsDialog(engine: BluelinkEngine) {
     )
 }
 
-/** 诊断日志弹窗：可滚动文本 + 刷新/复制/导出/清空（导出写 App 外部私有目录，无需存储权限）。 */
+/** 诊断日志弹窗：可滚动文本 + 刷新/复制/导出/清空（导出写 App 外部私有目录，无需存储权限）。
+ * 反馈通道（audit F3/P2-4）：复制/导出结果经 [onNotify] → Snackbar，不再直接 Toast。 */
 @Composable
 private fun DiagnosticLogDialog(
     text: String,
     onDismiss: () -> Unit,
     onRefresh: () -> Unit,
     onClear: () -> Unit,
+    onNotify: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -1837,11 +1864,11 @@ private fun DiagnosticLogDialog(
                     TextButton(onClick = onRefresh) { Text("刷新") }
                     TextButton(onClick = {
                         clipboard.setText(AnnotatedString(text))
-                        Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                        onNotify("已复制")
                     }) { Text("复制全部") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
-                    TextButton(onClick = { exportDiagnosticFile(context, text) }) { Text("导出文件") }
+                    TextButton(onClick = { exportDiagnosticFile(context, text, onNotify) }) { Text("导出文件") }
                     TextButton(onClick = onClear) { Text("清空") }
                 }
             }
@@ -1852,20 +1879,20 @@ private fun DiagnosticLogDialog(
     )
 }
 
-/** 导出诊断日志到 getExternalFilesDir(null)/diag_<yyyyMMdd_HHmmss>.txt，Toast 提示完整路径。 */
-private fun exportDiagnosticFile(context: Context, text: String) {
+/** 导出诊断日志到 getExternalFilesDir(null)/diag_<yyyyMMdd_HHmmss>.txt；结果经 onNotify → Snackbar（audit F3/P2-4）。 */
+private fun exportDiagnosticFile(context: Context, text: String, onNotify: (String) -> Unit) {
     val dir = context.getExternalFilesDir(null)
     if (dir == null) {
-        Toast.makeText(context, "外部存储不可用，导出失败", Toast.LENGTH_SHORT).show()
+        onNotify("外部存储不可用，导出失败")
         return
     }
     val name = "diag_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
     val file = File(dir, name)
     try {
         file.writeText(text)
-        Toast.makeText(context, "已导出: ${file.absolutePath}", Toast.LENGTH_LONG).show()
+        onNotify("已导出: ${file.absolutePath}")
     } catch (e: Exception) {
-        Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        onNotify("导出失败: ${e.message}")
     }
 }
 

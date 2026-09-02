@@ -251,6 +251,23 @@ class BluelinkUiState {
     /** 抽屉路由当前页：0=主页面 1=发送 2=接收 3=记录 4=设置 5=权限 6=关于。 */
     var currentPage by mutableStateOf(0)
 
+    // ============ v0.5.5 P2：动效 / 无障碍 / 反馈 ============
+
+    /**
+     * 系统减动效开关（Settings.Global.ANIMATOR_DURATION_SCALE==0；audit P2-1/A6/M1）：
+     * 主题级（app 启动）读取一次——Engine init 写入；MainScreen 动画 spec 条件引用
+     * （MotionTokens.layoutSpec/crossfadeSpec → tween(0) 直切，不透明/不无限重复）。
+     */
+    var reduceMotion by mutableStateOf(false)
+
+    /** 一次性 Snackbar 提示信号（audit P2-4/F3：Toast → Snackbar；MainScreen SnackbarHost 消费后复位 null）。 */
+    var snackbarMsg by mutableStateOf<String?>(null)
+
+    /** 触发一次性 Snackbar（Engine/MainScreen 通用；消费点先复位 null 再展示，同文案可重复触发）。 */
+    fun showSnack(msg: String) {
+        snackbarMsg = msg
+    }
+
     companion object {
         /** 事件时间流上限（超出丢弃最旧）。 */
         const val EVENT_LOG_MAX = 200

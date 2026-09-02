@@ -54,6 +54,7 @@ import com.zglinus.bluelink.networking.Who
 import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
 import com.zglinus.bluelink.security.PinStore
+import com.zglinus.bluelink.ui.theme.isReduceMotionEnabled
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -223,6 +224,11 @@ class BluelinkEngine(private val context: Context) {
     private lateinit var signalTest: SignalTest
 
     val ui = BluelinkUiState()
+
+    /** P2-1：主题级（app 启动）读取一次系统减动效（ANIMATOR_DURATION_SCALE==0 → ui.reduceMotion；audit A6/M1）。 */
+    init {
+        ui.reduceMotion = isReduceMotionEnabled(appContext)
+    }
 
     // ============ v0.4.9 PIN 配对验证 ============
 
@@ -2433,6 +2439,15 @@ class BluelinkEngine(private val context: Context) {
         } else {
             next
         }
+    }
+
+    /**
+     * 一次性 Snackbar 提示（audit P2-4/F3 反馈通道）：写 ui.snackbarMsg 供 MainScreen SnackbarHost 消费
+     * （消费后复位，可重复触发）。v0.5.5 起 UI 反馈统一走 Snackbar——Engine 内无直接 Toast.show；
+     * 原 Toast 点（MainScreen 诊断复制/导出）已改经本通道/onNotify 替换（见 MainScreen.kt）。
+     */
+    fun snack(msg: String) {
+        ui.showSnack(msg)
     }
 
     /** 从扫描列表移除设备（清除失效设备；同时清关联弹层/对端卡并重算组网入口）。 */

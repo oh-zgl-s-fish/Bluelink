@@ -4,6 +4,7 @@ import android.content.Context
 import android.provider.Settings
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.TweenSpec
 import androidx.compose.animation.core.tween
@@ -89,6 +90,27 @@ object MotionTokens {
 
     /** 布局切换缓动（宽度切换等，即 v0.5.1a FastOutSlowIn） */
     val EasingLayout: Easing = FastOutSlowInEasing
+
+    // ---- v0.5.6d 广播呼吸「力量感」档（BroadcastBreathButton / MainScreen.kt；Web 力量感规范：
+    //      克制幅度 + 非对称节奏 + 点击回弹；原 v0.5.6c 对称往返 1300ms 段已废） ----
+
+    /** 呼吸单周期总时长 3200ms（膨胀 ~60% + 收缩 ~40% 非对称；v0.5.6d） */
+    const val BreathPeriod = 3200
+
+    /** 膨胀段时长 1900ms（~60% 周期；ease-out 缓出——放大到顶的停止感；v0.5.6d） */
+    const val BreathExpand = 1900
+
+    /** 点击按下瞬压时长 80ms（scale→0.94；v0.5.6d） */
+    const val PressCompress = 80
+
+    /** 松手回弹时长 120ms（0.94→1.03 弹起，再交还呼吸；v0.5.6d） */
+    const val PressRelease = 120
+
+    /** 膨胀段缓动：FastOutSlowIn（同 [EasingLayout]，近 ease-out 缓出停止感；v0.5.6d） */
+    val EasingBreathExpand: Easing = FastOutSlowInEasing
+
+    /** 收缩段缓动：LinearOutSlowIn（Material 近 ease-in；回落干脆、无拖尾；v0.5.6d） */
+    val EasingBreathContract: Easing = LinearOutSlowInEasing
 
     // ---- P2-1 减动效档（audit M1/A6/P2-1：Settings.Global.ANIMATOR_DURATION_SCALE==0）----
 

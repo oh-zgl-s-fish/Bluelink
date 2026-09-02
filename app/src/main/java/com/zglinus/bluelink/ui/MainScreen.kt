@@ -10,17 +10,22 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,6 +75,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,6 +84,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -99,6 +107,7 @@ import com.zglinus.bluelink.ui.theme.MetricTokens
 import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
 import com.zglinus.bluelink.ui.theme.extended
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -291,12 +300,14 @@ fun MainScreen(
     }
 }
 
-/** 顶栏（v0.5.6 UI1b-A）：左侧 Text 应用名「蓝鲸·X」（titleLarge/语义色 primary）；右侧 ☰（开抽屉，
- *  contentDescription「打开菜单」已备——由导航槽位移至此）+ 广播开关（置顶栏）。
- * v0.5.6b：广播开关 Switch → 呼吸圆钮 [BroadcastBreathButton]（开=绿底呼吸/关=灰底静止；
- * 减动效静止；语义保持 role=Switch + stateDescription「广播开启/广播停止」）。
- * v0.5.6c：M3 1.4 无导航槽 TopAppBar 不把 actions 槽推到右缘（实机 ☰ 居中偏左）→ 弃用 actions 槽：
- * 标题与右侧组并入同一条 fillMaxWidth Row，标题后 Spacer(weight(1f)) 吸余宽 → 右侧组贴右缘、☰ 在右上。 */
+/** 顶栏（v0.5.6 UI1b-A ☰ 导航槽位移 → v0.5.6c 单 Row 布局 → v0.5.6d ☰ 回左上 + 广播呼吸力量感重做）：
+ * 整条顶栏并入 title 槽单 Row（fillMaxWidth），子项顺序（☰ 在最左 = 左上；其后标题；右侧组贴右缘）：
+ *   [IconButton ☰]（开抽屉）→「蓝鲸·X」（titleLarge/语义色 primary）→ Spacer(weight(1f)) 吸余宽 →
+ *   右侧「广播/停止」状态字 + [BroadcastBreathButton]（呼吸圆钮，开=绿底呼吸/关=灰底静止）。
+ * v0.5.6b：广播开关 Switch → 呼吸圆钮（语义保持 role=Switch + stateDescription「广播开启/广播停止」）；
+ * v0.5.6c：M3 1.4 无导航槽 TopAppBar 不把 actions 槽推到右缘（实机 ☰ 居中偏左）→ 弃用 actions 槽、
+ *   标题与右侧组并入单 Row、标题后 Spacer(weight(1f)) 吸余宽（当时 ☰ 在 Row 最末 = 右上）；
+ * v0.5.6d：☰ 由 Row 最末移至最左（☰ 放顶栏最左、其后标题，右侧保留广播钮）——侧边栏入口回左上。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainTopBar(
@@ -305,14 +316,22 @@ private fun MainTopBar(
     onAdvertisingWantedChange: (Boolean) -> Unit,
     onMenuClick: () -> Unit,
 ) {
-    // v0.5.6c：整条顶栏内容并入 title 槽的单 Row（fillMaxWidth 占满）——标题后 Spacer(weight(1f))
-    // 吸收余宽，右侧组（状态字+呼吸钮+☰）整体贴右缘；☰ 为最末子项 → 恒在最右端（右上）。
+    // v0.5.6d：Row 子项顺序 = [☰] 最左（顶栏左上）→ 标题 → Spacer(weight(1f)) 吸余宽 → 右侧广播组贴右缘
     TopAppBar(
         title = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // v0.5.6d：☰ 放 Row 最左 = 顶栏左上（v0.5.6 UI1b-A 曾位移到右侧组最末=右上 → 回左上）；
+                // 字形 + contentDescription 保持具名（audit A1/K3）
+                IconButton(onClick = onMenuClick) {
+                    Text(
+                        text = "☰",
+                        modifier = Modifier.semantics { contentDescription = "打开菜单" },
+                    )
+                }
+                // v0.5.6d：☰ 其后接标题「蓝鲸·X」（左 ☰ + 标题；语义色 primary 保持）
                 Text(
                     text = "蓝鲸·X",
                     style = MaterialTheme.typography.titleLarge,
@@ -332,34 +351,42 @@ private fun MainTopBar(
                     reduceMotion = reduceMotion,
                     onAdvertisingWantedChange = onAdvertisingWantedChange,
                 )
-                // v0.5.6 UI1b-A：☰ 自导航槽位移至右侧组最末位（☰ 贴最右端）；字形 + contentDescription 保持具名（audit A1/K3）
-                IconButton(onClick = onMenuClick) {
-                    Text(
-                        text = "☰",
-                        modifier = Modifier.semantics { contentDescription = "打开菜单" },
-                    )
-                }
             }
         },
     )
 }
 
 /**
- * 广播呼吸圆钮（v0.5.6b：顶栏广播 Switch → 自定义圆钮；docs 原「广播/扫描开关」中广播侧换控件，
- * 扫描无独立开关控件——扫描随广播开关联动，未动）。
- * v0.5.6c：呼吸由「透明度 0.5↔1 变化」改为「尺寸缩放 0.9↔1.08」（实机反馈要大小变化而非透明度变化）——
- * 动画改驱动 graphicsLayer scaleX/scaleY（transformOrigin 默认中心 → 圆钮中心缩放）；alpha 段删除、底色恒不透明。
+ * 广播呼吸圆钮（v0.5.6d 力量感重做——参考 Web「力量感」规范；v0.5.6b 开关圆钮化 / v0.5.6c 尺寸呼吸见文末历史）。
+ * 视觉四要素（Compose 落地映射）：
+ * 1) 幅度克制：呼吸 scale 1.0↔1.05（v0.5.6c 曾 0.9↔1.08 晃动过大 → 收窄；勿过大）；
+ * 2) 非对称节奏：keyframes + infiniteRepeatable，单周期 ~3.2s——膨胀段 ~1900ms（~60% 周期，
+ *    FastOutSlowInEasing 缓出「到顶停住」）→ 收缩段 ~1300ms（~40% 周期，LinearOutSlowInEasing 近 ease-in
+ *    「回落干脆」）；段端点均 1.0 → RepeatMode.Restart 无缝；
+ * 3) 厚重感（阴影/光晕联动）：Compose 无 box-shadow → Modifier.drawBehind 画径向 glow（成功色 radial
+ *    gradient：中心强→边缘衰减；不透明钮体盖住中心 → 呈沿钮缘外扩的辉光）——半径随呼吸 scale 放大、alpha 稍升，
+ *    模拟「隆起推开」的厚重暗示；关闭/静止态不画（无/极弱）；
+ * 4) 点击蓄力回弹：interactionSource.collectIsPressedAsState() —— 按下 scale 瞬压 0.94（~80ms tween），
+ *    松手 ~120ms 回弹 1.03（releaseBounce 窗口）再回落/交还呼吸 → 「蓄力→弹起→回落」。
  *
- * - 开（advertisingWanted=true）：绿底 = extended.success / onSuccess 白点（success 语义对 + 中心点/相邻文字双通道）；
- *   呼吸动画：rememberInfiniteTransition 驱动 scale 0.9↔1.08 往复（单程 tween DurationPulse/2=650ms、Reverse
- *   全周期 = MotionTokens.DurationPulse 1300ms 脉冲档；无 delay，往返平滑无跳变）；
- * - 减动效（ui.reduceMotion=true，P2-1/M1 豁免）：不创建动画 → 静止 scale=1f（动画节点不挂载、零开销）；
- * - 关（advertisingWanted=false）：surfaceVariant 灰底静止、中心点 onSurfaceVariant 置灰、无动画；
- * - 语义保持（audit A2/P2-2 原 Switch 语义）：clickable(role=Role.Switch) 承接切换（读屏按开关播报），
- *   semantics stateDescription「广播开启/广播停止」；点击沿用既有 onAdvertisingWantedChange 回调
- *   （BluelinkRoot → engine.setAdvertisingWanted，见 BluelinkRoot LaunchedEffect(advertisingWanted)）。
- * - 触达：外命中区 48dp（audit ≥48×48），内 30dp 圆钮视觉居中（scale 仅作用于内层视觉圆钮，
- *   外层 48dp 命中区不缩放 → 触达尺寸恒定满足 audit）。
+ * 节奏/幅度/光晕/点击映射表：
+ * | 阶段 | scale | 时长 | easing |
+ * | 膨胀（0→~60%） | 1.0→1.05 | ~1900ms | FastOutSlowIn（近 ease-out，缓出停止感） |
+ * | 收缩（~60%→100%） | 1.05→1.0 | ~1300ms | LinearOutSlowIn（近 ease-in，干脆回落） |
+ * | 按下 | →0.94 瞬压 | ~80ms | FastOutSlowIn |
+ * | 松手回弹 | →1.03 再回落 | ~120ms | FastOutSlowIn |
+ * | 光晕 | 半径×scale、alpha 0.3×scale 联动 | 随呼吸 | drawBehind radial |
+ * | 关 / 减动效 | 静止 1.0、无 glow | — | — |
+ *
+ * 覆盖优先级：pressed / releaseBounce 窗口 → pressScale（0.94 / 1.03 覆盖优先）；空闲 → 呼吸 keyframes 直驱。
+ * - 开：绿底 extended.success / onSuccess 白点 + 呼吸 + 光晕；减动效（ui.reduceMotion，P2-1/M1）：不创建
+ *   呼吸循环 → 静止 1.0（按压手感保留——用户触发的瞬时反馈）；关：surfaceVariant 灰底静止、无光晕；
+ * - 语义（audit A2/P2-2 原 Switch）：clickable(role=Role.Switch) + stateDescription「广播开启/广播停止」；
+ * - 触达：外命中区 48dp（audit ≥48×48）不缩放；内层 30dp 圆钮 graphicsLayer scale（transformOrigin 中心）。
+ *
+ * v0.5.6b：广播 Switch → 圆钮（docs 原「广播/扫描开关」广播侧换控件，扫描随广播联动未动）；
+ * v0.5.6c：呼吸由 alpha 0.5↔1 改尺寸缩放 0.9↔1.08（650ms 对称往返 = DurationPulse 1300ms 脉冲档）；
+ * v0.5.6d：按上表重做为「力量感」参数（幅度/节奏/光晕/点击全换）。
  */
 @Composable
 private fun BroadcastBreathButton(
@@ -378,32 +405,88 @@ private fun BroadcastBreathButton(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant // 点置灰
     }
-    // 呼吸循环（v0.5.6c 透明度→尺寸呼吸；reduced-motion 分支不变）：仅「开」且非减动效才挂载 rememberInfiniteTransition；
-    // 关/减动效 → 静止 scale=1f（不创建动画节点，符合 P2-1/M1：减动效无无限重复动画）
-    val breathScale = if (advertisingWanted && !reduceMotion) {
+    // ===== 呼吸循环（v0.5.6d 力量感：非对称 keyframes 1.0↔1.05、单周期 ~3.2s）=====
+    // 减动效（ui.reduceMotion，P2-1/M1）或关闭态 → 不创建 rememberInfiniteTransition（无无限动画节点）
+    val breathState: State<Float>? = if (advertisingWanted && !reduceMotion) {
         val pulse = rememberInfiniteTransition(label = "broadcastBreath")
-        val scale by pulse.animateFloat(
-            // v0.5.6c：幅度 0.9↔1.08（围绕名义尺寸放大/缩小，视觉明显；原 alpha 0.5↔1 透明度段已删）
-            initialValue = 0.9f,
-            targetValue = 1.08f,
+        pulse.animateFloat(
+            initialValue = 1.0f,
+            targetValue = 1.0f,
             animationSpec = infiniteRepeatable(
-                animation = tween(
-                    // 单程 650ms；RepeatMode.Reverse 往返 → 全周期 = MotionTokens.DurationPulse(1300ms 脉冲档)
-                    durationMillis = MotionTokens.DurationPulse / 2,
-                    easing = MotionTokens.EasingLayout,
-                ),
-                repeatMode = RepeatMode.Reverse,
+                // keyframes 非对称段：0%:1.0 → ~60%:1.05（~1900ms 膨胀，ease-out 缓出「到顶停住」）
+                //             → 100%:1.0（~1300ms 收缩，ease-in 类「回落干脆」）；端点同 1.0 → Restart 无缝
+                animation = keyframes {
+                    durationMillis = MotionTokens.BreathPeriod // 全周期 ~3200ms
+                    1.0f at 0 with LinearEasing
+                    1.05f at MotionTokens.BreathExpand with MotionTokens.EasingBreathExpand // 幅度克制峰值 1.05（勿过大；原 1.08 收窄）
+                    1.0f at MotionTokens.BreathPeriod with MotionTokens.EasingBreathContract
+                },
+                repeatMode = RepeatMode.Restart,
             ),
             label = "broadcastBreathScale",
         )
-        scale
     } else {
-        1f
+        null // 静止 1.0（关 / 减动效 reduced-motion 分支）
     }
+    val breathScale = breathState?.value ?: 1.0f
+
+    // ===== 点击蓄力/回弹（v0.5.6d）：interactionSource 与 clickable 共用 → 可检测按压态 =====
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    // 刚松手 120ms 窗口：releaseBounce=true → pressScale 目标 1.03（从 0.94 弹起），随后交还呼吸循环
+    var wasPressed by remember { mutableStateOf(false) }
+    var releaseBounce by remember { mutableStateOf(false) }
+    LaunchedEffect(pressed) {
+        if (wasPressed && !pressed) { // 仅在「按下过 → 刚松手」触发回弹窗口（首次进入不触发）
+            releaseBounce = true
+            delay(MotionTokens.PressRelease.toLong()) // 窗口时长 = 回弹时长 120ms
+            releaseBounce = false
+        }
+        wasPressed = pressed
+    }
+    // pressScale：按下 → 0.94（~80ms 瞬压）；松手窗口 → 1.03（~120ms 弹起）；空闲回 1f（不介入呼吸）
+    val pressScale by animateFloatAsState(
+        targetValue = when {
+            pressed -> 0.94f // 点击瞬间压缩 scale(0.94)
+            releaseBounce -> 1.03f // 松手迅速回弹峰值 scale(1.03)
+            else -> 1f
+        },
+        animationSpec = tween(
+            durationMillis = if (pressed) MotionTokens.PressCompress else MotionTokens.PressRelease,
+            easing = MotionTokens.EasingLayout, // FastOutSlowIn：按下快速到位 / 回弹干脆
+        ),
+        label = "broadcastPressScale",
+    )
+    // 最终缩放：按压/回弹窗口 → pressScale（覆盖优先）；空闲 → 呼吸 keyframes 直驱（形态不被中间层扭曲）
+    val displayScale = if (pressed || releaseBounce) pressScale else breathScale
     Box(
         modifier = Modifier
             .size(MetricTokens.AdvertiseKnobTouch) // 48dp 命中区（≥48×48 触达 audit）
-            .clickable(role = Role.Switch) { // role=Switch：切换由 clickable 语义承接（原 Switch toggleable 语义位）
+            // v0.5.6d 厚重感光晕（放链首 → 绘于最底层，钮体/水波纹盖其上）：drawBehind 径向辉光——
+            // 中心强（被不透明钮体盖住）→ 边缘衰减；半径随呼吸 displayScale 放大、alpha 稍升 → 「隆起推开」
+            // 的厚重阴影暗示（Compose 无 box-shadow，以 glow 模拟阴影/光晕联动）；关闭态不画（无/极弱）
+            .drawBehind {
+                if (advertisingWanted && !reduceMotion) { // 减动效/关闭：静止钮无 glow（装饰光晕仅随呼吸出现）
+                    val glowRadius = size.minDimension * 0.47f * displayScale // 半径随 scale 放大（钮缘外推）
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                backgroundColor.copy(alpha = 0.30f * displayScale), // 放大时 alpha 稍升
+                                Color.Transparent,
+                            ),
+                            center = center,
+                            radius = glowRadius,
+                        ),
+                        radius = glowRadius,
+                        center = center,
+                    )
+                }
+            }
+            .clickable(
+                interactionSource = interactionSource, // 与 collectIsPressedAsState 共用 → 按压/回弹检测
+                indication = LocalIndication.current, // 保留 M3 ripple（点击水波反馈）
+                role = Role.Switch, // role=Switch：切换由 clickable 语义承接（原 Switch toggleable 语义位）
+            ) {
                 // 沿用既有广播开关回调：BluelinkRoot onAdvertisingWantedChange → engine.setAdvertisingWanted
                 onAdvertisingWantedChange(!advertisingWanted)
             }
@@ -419,8 +502,9 @@ private fun BroadcastBreathButton(
             modifier = Modifier
                 .size(MetricTokens.AdvertiseKnob)
                 .graphicsLayer {
-                    scaleX = breathScale
-                    scaleY = breathScale
+                    // v0.5.6d：呼吸/按压合成后的最终缩放（transformOrigin 默认中心 → 圆钮中心缩放）
+                    scaleX = displayScale
+                    scaleY = displayScale
                 }
                 .clip(CircleShape)
                 .background(backgroundColor),

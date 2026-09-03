@@ -119,8 +119,9 @@ import kotlinx.coroutines.withContext
  *   WallpaperBackdrop.WallpaperEffect 注释）。
  * - 容器透明度区（v0.5.11 UI1b-E 改④；遮罩行下方）：文字「容器透明度」+ Slider 5–50%（5% 步进，
  *   显示百分比，同遮罩行样式）——语义 = 主页浮层容器「透明程度」（容器实际 alpha = 1−值/100：
- *   5→0.95 … 50→0.50，默认 20→0.80）；拖动只改本地草稿 transparencyDraft（页内无主页可见，
- *   不做预览），保存写 store.containerTransparency，主页面顶栏/内容容器 alpha 随之刷新。
+ *   5→0.95 … 50→0.50，默认 20→0.80）；拖动只改本地草稿 transparencyDraft（v0.5.11b 起壁纸预览区
+ *   按草稿实时叠容器色层预览整区观感），保存写 store.containerTransparency，主页面顶栏/内容容器
+ *   alpha 随之刷新。
  *
  * 保存语义（v0.5.8 新交互，v0.5.11 增容器透明度草稿）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 /
  * 容器透明度草稿 transparencyDraft / accent 草稿 / 当前场景 / 色系展开与选中态），进入页面从
@@ -150,7 +151,7 @@ fun PersonalizePage(
     var maskDraft by remember { mutableStateOf(store.maskAlpha) }
     var accentDraft by remember { mutableStateOf(store.accentColor) }
     // v0.5.11 UI1b-E 改④：容器透明度草稿（初值 store.containerTransparency；拖动只改本地态，保存才写 store；
-    // 离开未保存 = 丢弃，与 mask 草稿同语义；页内无主页可见故不做预览）
+    // 离开未保存 = 丢弃，与 mask 草稿同语义；v0.5.11b 起预览区按草稿实时叠容器色层（见 PreviewSection））
     var transparencyDraft by remember { mutableStateOf(store.containerTransparency) }
     // 当前场景（场景三按钮高亮 + 预览区渲染该槽草稿）
     var sceneSlot by remember { mutableStateOf(WallpaperStore.SLOT_UNIFIED) }
@@ -315,6 +316,9 @@ fun PersonalizePage(
                     slot = slotDraft(sceneSlot),
                     sceneSlot = sceneSlot,
                     maskAlpha = maskDraft,
+                    // v0.5.11b：容器透明度草稿 → 容器 overlay alpha（透明度越高容器层越透明、壁纸透出越多，
+                    // 与主页一致：5→0.95 … 50→0.50）；拖动改草稿 → 预览 recompose 即时变化
+                    containerOverlayAlpha = (100f - transparencyDraft) / 100f,
                     onOpenSource = { sourceSheet = true },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -753,9 +757,10 @@ private fun sceneHint(slotId: Int): String = when (slotId) {
     else -> "通用模式：可以通过上方按钮切换深浅模式壁纸"
 }
 
-/** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩（复用 WallpaperBackdrop 同套
- *  rememberSlotDecode/WallpaperEffect，预览即真实背景效果）；槽未设 → 占位「点击选择壁纸」；
- * 点预览区 → 打开 [WallpaperSourceSheet]。
+/** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩 +（v0.5.11b）容器 overlay 色层
+ *  （复用 WallpaperBackdrop 同套 rememberSlotDecode/WallpaperEffect，预览即真实背景效果；overlay alpha 由
+ *  调用方按容器透明度草稿 (100f-transparencyDraft)/100f 传入，模拟主页浮层容器盖壁纸后的整区观感）；
+ * 槽未设 → 占位「点击选择壁纸」；点预览区 → 打开 [WallpaperSourceSheet]。
  * v0.5.8b：解码失败不再无限「加载壁纸预览…」——failed 时显示可见失败文案 + 来源小字提示
  * （解码中的短暂空白可忽略：复制后才入槽，file 路径直读极快 <300ms）。 */
 @Composable
@@ -763,6 +768,8 @@ private fun PreviewSection(
     slot: WallpaperSlot,
     sceneSlot: Int,
     maskAlpha: Int,
+    // v0.5.11b：容器 overlay alpha（来自顶层 transparencyDraft，调用方换算后传入；0=不叠）
+    containerOverlayAlpha: Float = 0f,
     onOpenSource: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -784,10 +791,11 @@ private fun PreviewSection(
                 },
         ) {
             if (slot.isSet) {
-                // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色）
+                // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色）；v0.5.11b：再叠容器色层（按草稿换算的 overlay）
                 WallpaperEffect(
                     wallpaper = decode.bitmap,
                     maskAlpha = maskAlpha,
+                    containerOverlayAlpha = containerOverlayAlpha,
                     modifier = Modifier.fillMaxSize(),
                 )
                 if (decode.failed) {
@@ -900,7 +908,8 @@ private fun MaskRow(
 /** v0.5.11 UI1b-E 改④：容器透明度区（遮罩行下方 · 全局共用）：文字「容器透明度」+ Slider 5–50%
  * （5% 步进，显示百分比；同遮罩行样式）。语义 = 主页浮层容器「透明程度」：容器实际 alpha = 1−值/100
  * （5→0.95 … 50→0.50，默认 20 → 0.80 与 v0.5.8d 顶栏浮层规格一致）；拖动只改本地草稿
- * transparencyDraft（页内无主页可见，不做预览），保存写 store.containerTransparency 后主页生效。 */
+ * transparencyDraft（v0.5.11b 起上方壁纸预览区同步实时叠容器色层预览），保存写
+ * store.containerTransparency 后主页生效。 */
 @Composable
 private fun ContainerTransparencyRow(
     transparency: Int,

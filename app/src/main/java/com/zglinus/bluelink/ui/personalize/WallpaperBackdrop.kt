@@ -85,12 +85,17 @@ fun WallpaperBackdrop(
  * 壁纸图 ContentScale.Crop 铺满；其上叠加半透明遮罩 Box —— 遮罩色 = 当前主题 surfaceVariant，
  * 透明度 = maskAlpha%（0–80，滑块上限）。**遮罩色 = surfaceVariant，随系统深浅模式自动切换
  * （v0.5.8b 确认：M3 语义 token 浅深各派生，无需按深浅分支改代码）**。
+ * v0.5.11b：可选 [containerOverlayAlpha]（默认 0 = 不叠）——>0 时在遮罩层之上再叠一层当前主题
+ * background 色 Box（alpha = containerOverlayAlpha），模拟主页浮层容器盖住壁纸后的整区观感；
+ * 语义 = 容器不透明度 alpha 0.5–0.95（个性化页预览由调用方按容器透明度草稿换算传入）。
  */
 @Composable
 internal fun WallpaperEffect(
     wallpaper: ImageBitmap?,
     maskAlpha: Int,
     modifier: Modifier = Modifier,
+    // v0.5.11b：容器 overlay alpha（0=不叠，主页背景等既有调用不变；个性化页预览传 (100f-transparencyDraft)/100f）
+    containerOverlayAlpha: Float = 0f,
 ) {
     val maskColor = MaterialTheme.colorScheme.surfaceVariant
     Box(modifier = modifier) {
@@ -107,6 +112,15 @@ internal fun WallpaperEffect(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(maskColor.copy(alpha = maskAlpha / 100f)),
+                )
+            }
+            if (containerOverlayAlpha > 0f) {
+                // v0.5.11b：遮罩层之上再叠当前主题背景色层（alpha = 容器不透明度）——模拟主页浮层
+                // 容器盖壁纸后的整区观感；透明度草稿越高容器层越透明、壁纸透出越多（与主页一致）
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background.copy(alpha = containerOverlayAlpha)),
                 )
             }
         }

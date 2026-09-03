@@ -8,6 +8,7 @@ import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.ble.SignalMessage
 import com.zglinus.bluelink.net.LanStatus
 import com.zglinus.bluelink.net.NetworkSummary
+import com.zglinus.bluelink.ui.transfer.TransferRecord
 
 // ============ v0.5.0 UI-1：事件时间流 / 两态配对视图 / 抽屉路由 ============
 
@@ -231,6 +232,15 @@ class BluelinkUiState {
     /** 事件时间流（engine [BluelinkEngine.logUiEvent] 追加；上限 [EVENT_LOG_MAX] 条滚动）。 */
     var eventLog by mutableStateOf(listOf<EventItem>())
 
+    // ============ v0.5.14d：文件传输记录（LOG 页数据源；docs/ui-design.md §4.7） ============
+
+    /**
+     * 文件传输记录（**真正的传输记录**，非时间流事件日志）：一次传输会话一条；倒序=最新在前。
+     * 引擎启动经 [com.zglinus.bluelink.ui.transfer.TransferRecordStore]（prefs JSON，上限 50 丢最旧）
+     * 加载，每次传输会话结束（成功/失败/取消）落库后刷新；LOG 页渲染源。主页时间流 eventLog 独立保留。
+     */
+    var transferRecords by mutableStateOf(listOf<TransferRecord>())
+
     /** 配对后视图（会话建立且 PIN 关/已验 → true，主页面切换对端卡视图；复位点随会话 detach/stopAllBle）。 */
     var pairedView by mutableStateOf(false)
 
@@ -250,7 +260,7 @@ class BluelinkUiState {
 
     /**
      * 抽屉路由当前页（v0.5.6 UI1b-A 导航重排后取值见 companion PAGE_* 常量，调用处勿再写数字字面量）：
-     * [PAGE_HOME]=主页面（默认页，不列抽屉项）/ [PAGE_LOG]=文件传输记录（记录页/全屏事件流）/
+     * [PAGE_HOME]=主页面（默认页，不列抽屉项）/ [PAGE_LOG]=文件传输记录（v0.5.14d：持久化传输记录页——摘要+可展开，原全屏事件流实现已退出；docs/ui-design.md §4.7）/
      * [PAGE_PERSONAL]=个性化（v0.5.7 UI1b-B 真页，见 ui/personalize/PersonalizePage.kt）/ [PAGE_SETTINGS]=设置（v0.5.9 UI1b-C 五区真页，见 ui/SettingsPage.kt）/
      * [PAGE_ABOUT]=关于（v0.5.9 UI1b-C 扩展：基础信息 + 开发者区自测）。旧 1=发送 2=接收 5=权限 已移除——
      * 发送/接收已并入主页面操作与设置页、权限并入设置页权限检测区（v0.5.9）。
@@ -292,7 +302,7 @@ class BluelinkUiState {
         /** 抽屉路由：主页面（默认页；不列抽屉项，各子页「返回」回此页）。 */
         const val PAGE_HOME = 0
 
-        /** 抽屉路由：文件传输记录（记录页 LogPage / 全屏事件流，复用 [com.zglinus.bluelink.ui.MainScreen] LogPage）。 */
+        /** 抽屉路由：文件传输记录（v0.5.14d：持久化传输记录页 LogPage——摘要+可展开+失败自动展开红字；原全屏事件流已重做，见 docs/ui-design.md §4.7）。 */
         const val PAGE_LOG = 1
 
         /** 抽屉路由：个性化（v0.5.7 UI1b-B 真页，ui/personalize/PersonalizePage.kt：三壁纸槽/遮罩/取色/预览 + 主页面背景应用）。 */

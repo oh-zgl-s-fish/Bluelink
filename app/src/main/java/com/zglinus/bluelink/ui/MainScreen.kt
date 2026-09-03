@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -126,6 +127,9 @@ import com.zglinus.bluelink.ui.personalize.PersonalizePage
 import com.zglinus.bluelink.ui.personalize.WallpaperBackdrop
 import com.zglinus.bluelink.ui.personalize.WallpaperStore
 import com.zglinus.bluelink.ui.theme.MetricTokens
+import com.zglinus.bluelink.ui.transfer.TransferFileInfo
+import com.zglinus.bluelink.ui.transfer.TransferRecord
+import com.zglinus.bluelink.ui.transfer.TransferStatus
 import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
 import com.zglinus.bluelink.ui.theme.THEME_MODE_SYSTEM
@@ -1611,8 +1615,13 @@ private fun EventRow(ev: EventItem) {
     }
 }
 
-/** 文件传输记录页（抽屉 1 / BluelinkUiState.PAGE_LOG；v0.5.6 UI1b-A 由「记录」改名对齐抽屉标签）：
- *  全屏时间流（复用 [TimeFlowList]；v0.5.4b surfaceContainerLow 列表容器分层）。 */
+/** 文件传输记录页（抽屉 1 / BluelinkUiState.PAGE_LOG；v0.5.14d 重做——由「全屏事件流」改为**真正的
+ *  文件传输记录**，docs/ui-design.md §4.7「默认摘要 · 可展开」）：每行 = 一次传输会话摘要（对方别名 +
+ *  收/发 n 文件 · 大小 + 状态徽标 + 时间），点击展开明细（文件清单/落盘路径/用时/速度/失败原因红字）；
+ *  失败记录自动展开（异常可见优先）；空态「暂无传输记录」；记录持久化（重启保留）。
+ *  数据源 [BluelinkUiState.transferRecords]（引擎经 [com.zglinus.bluelink.ui.transfer.TransferRecordStore]
+ *  prefs JSON 持久化，上限 50 丢最旧；启动加载 + 每次传输会话结束落库刷新，倒序=最新在前）。
+ *  主页时间流（[TimeFlowList]/eventLog）与其它页不受影响。 */
 @Composable
 private fun LogPage(ui: BluelinkUiState) {
     Column(
@@ -1636,13 +1645,190 @@ private fun LogPage(ui: BluelinkUiState) {
             color = MaterialTheme.colorScheme.surfaceContainerLow,
             shape = MaterialTheme.shapes.large,
         ) {
-            TimeFlowList(
-                ui,
-                Modifier
+            TransferRecordList(
+                records = ui.transferRecords,
+                modifier = Modifier
                     .fillMaxSize()
                     .padding(horizontal = SpacingTokens.SpaceSm),
             )
         }
+    }
+}
+
+/** 传输记录列表（倒序=最新在前；空态「暂无传输记录」；行 key=记录 id——新增记录不丢既有行展开态）。 */
+@Composable
+private fun TransferRecordList(records: List<TransferRecord>, modifier: Modifier = Modifier) {
+    if (records.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Text(
+                text = "暂无传输记录",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    } else {
+        LazyColumn(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
+        ) {
+            items(records, key = { it.id }) { record ->
+                TransferRecordRow(record)
+            }
+        }
+    }
+}
+
+/** 单条传输记录行：摘要（别名 + 收/发文件数·大小 + 时间 + 状态徽标）可点击展开/收起；明细含文件清单/
+ *  落盘路径/用时/速度/失败原因红字。失败（FAILED）记录默认展开（异常可见优先；可手动收起；
+ *  页面切走再回时失败记录重新默认展开）。 */
+@Composable
+private fun TransferRecordRow(record: TransferRecord) {
+    var expanded by remember(record.id) { mutableStateOf(record.status == TransferStatus.FAILED) }
+    // 状态徽标 token 对（audit P1-4 双通道）：成功=success 对 / 失败=error 对 / 取消=中性 surfaceVariant 对
+    val (badgeText, badgeContainer, badgeContent) = when (record.status) {
+        TransferStatus.OK -> Triple(
+            "已完成",
+            MaterialTheme.extended.successContainer,
+            MaterialTheme.extended.onSuccessContainer,
+        )
+        TransferStatus.FAILED -> Triple(
+            "失败",
+            MaterialTheme.colorScheme.errorContainer,
+            MaterialTheme.colorScheme.onErrorContainer,
+        )
+        TransferStatus.CANCELLED -> Triple(
+            "已取消",
+            MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = SpacingTokens.SpaceXs),
+    ) {
+        // ---- 摘要行（点击展开/收起） ----
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = SpacingTokens.SpaceSm, vertical = SpacingTokens.SpaceXs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                // 对方别名 + 展开箭头（▸/▾）
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = record.peerAlias.ifBlank { "未知设备" },
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = if (expanded) "▾" else "▸",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
+                // 时间 · 收/发 n 文件 · 总大小
+                Text(
+                    text = "${transferTimeText(record.startedAt)} · " +
+                        (if (record.isReceive) "接收" else "发送") +
+                        " ${record.fileCount} 个文件 · ${formatFileSize(record.totalBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(SpacingTokens.SpaceSm))
+            // 状态徽标（8dp 小件档：MaterialTheme.shapes.small）
+            Surface(shape = MaterialTheme.shapes.small, color = badgeContainer) {
+                Text(
+                    text = badgeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = badgeContent,
+                    modifier = Modifier.padding(horizontal = SpacingTokens.SpaceSm, vertical = 2.dp),
+                )
+            }
+        }
+        // ---- 展开明细 ----
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = SpacingTokens.SpaceSm, end = SpacingTokens.SpaceSm, bottom = SpacingTokens.SpaceXs),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                // 文件清单（名称/大小/结果标记 ✓✗）
+                record.files.forEach { f ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = f.name.ifBlank { "(未知名)" },
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                        Text(
+                            text = formatFileSize(f.bytes),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                        Text(
+                            text = if (f.ok) "✓" else "✗",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (f.ok) MaterialTheme.extended.success else MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                // 落盘路径（接收侧；发送侧无此字段）
+                if (record.dirPath != null) {
+                    Text(
+                        text = "落盘 ${record.dirPath}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // 用时（+ 平均速度；仅成功记录含速度）
+                Text(
+                    text = buildString {
+                        append("用时 ")
+                        append(formatDuration(record.durationMs ?: (record.endedAt - record.startedAt).coerceAtLeast(0L)))
+                        record.peerSpeedBps?.let { append(" · 速度 ${formatFileSize(it)}/s") }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // 失败/取消原因红字（异常可见优先）
+                if (record.failReason != null) {
+                    Text(
+                        text = record.failReason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 记录时间显示（HH:mm；与事件时间流同格式）。 */
+private fun transferTimeText(epochMs: Long): String =
+    SimpleDateFormat("HH:mm", Locale.US).format(Date(epochMs))
+
+/** 用时人类可读：<1s 向上取整为 1s；≥1 分钟 → 「X分Ys」。 */
+private fun formatDuration(ms: Long): String {
+    val secs = ((ms.coerceAtLeast(0L)) + 999L) / 1000L
+    return if (secs >= 60L) {
+        "${secs / 60}分${secs % 60}秒"
+    } else {
+        "${secs}s"
     }
 }
 

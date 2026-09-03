@@ -56,6 +56,10 @@ import com.zglinus.bluelink.networking.buildLocalCapability
 import com.zglinus.bluelink.networking.decide
 import com.zglinus.bluelink.security.PinStore
 import com.zglinus.bluelink.ui.theme.isReduceMotionEnabled
+import com.zglinus.bluelink.ui.transfer.TransferFileInfo
+import com.zglinus.bluelink.ui.transfer.TransferRecord
+import com.zglinus.bluelink.ui.transfer.TransferRecordStore
+import com.zglinus.bluelink.ui.transfer.TransferStatus
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -227,9 +231,14 @@ class BluelinkEngine(private val context: Context) {
 
     val ui = BluelinkUiState()
 
+    /** v0.5.14d 文件传输记录存储（prefs JSON 数组，上限 [TransferRecordStore.MAX_RECORDS]；add 写存储并刷新 ui.transferRecords）。 */
+    private val transferStore = TransferRecordStore(appContext)
+
     /** P2-1：主题级（app 启动）读取一次系统减动效（ANIMATOR_DURATION_SCALE==0 → ui.reduceMotion；audit A6/M1）。 */
     init {
         ui.reduceMotion = isReduceMotionEnabled(appContext)
+        // v0.5.14d：启动加载传输记录（LOG 页数据源；倒序=最新在前）
+        ui.transferRecords = transferStore.records()
     }
 
     // ============ v0.4.9 PIN 配对验证 ============
@@ -290,10 +299,29 @@ class BluelinkEngine(private val context: Context) {
     private val receivePoller = object : Runnable {
         override fun run() {
             if (!localsendServer.isRunning) {
+                abandonReceiveSessions() // v0.5.14d：服务停止兜底（正常路径由各停服点显式调用；此处防御幂等）
                 mainHandler.removeCallbacks(this)
                 return
             }
             val sessions = localsendServer.getActiveSessions()
+            val now = System.currentTimeMillis()
+            // v0.5.14d 传输记录：接收会话定稿（每轮询一次）——会话从服务器活动表消失（全文件收完/对端取消）
+            // → 按暂存目录存在性定稿 OK/CANCELLED（finalizeReceiveSession）；仍在活动表且服务器侧字节长时间
+            // 无进展（对端断连、cancel 未达）→ FAILED 定稿。大文件传输中 received 持续推进 → lastProgressAt
+            // 随动，不误判停滞；多文件会话各文件落地也刷新基线。
+            receiveAccums.keys.toList().forEach { sid ->
+                val accum = receiveAccums[sid] ?: return@forEach
+                val prog = sessions[sid]
+                when {
+                    prog == null -> finalizeReceiveSession(sid)
+                    prog.received != accum.lastPollReceived -> {
+                        accum.lastPollReceived = prog.received
+                        accum.lastProgressAt = now
+                    }
+                    now - accum.lastProgressAt > RECEIVE_RECORD_STALL_MS ->
+                        finalizeReceiveSession(sid, TransferStatus.FAILED, "接收中断（会话长时间无进展）")
+                }
+            }
             if (sessions.isEmpty()) {
                 if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
             } else {
@@ -326,6 +354,186 @@ class BluelinkEngine(private val context: Context) {
 
     /** B4 温和收尾：接收侧转存进行中计数（SAF 转存后台线程；全部完成且无待转存/无活动接收会话时置「传输完成」态）。 */
     private val persistInFlight = AtomicInteger(0)
+
+    // ============ v0.5.14d 文件传输记录（会话级采集；docs/ui-design.md §4.7） ============
+
+    /** 发送会话聚合（confirmSend 置位；LocalSendClient 完成/失败/取消回调主线程定稿并复位）。 */
+    private var sendAccum: SendSessionAccum? = null
+
+    /** 接收会话聚合（key=LocalSendServer sessionId；onFileReceived 累积，receivePoller/停服点定稿）。 */
+    private val receiveAccums = ConcurrentHashMap<String, ReceiveSessionAccum>()
+
+    /** v0.5.14d 发送会话聚合（一次 confirmSend = 一个发送会话；多文件清单合并为一条记录——当前引擎单文件发送，清单长度=1）。 */
+    private class SendSessionAccum(
+        val peerAlias: String,
+        val startedAt: Long,
+        val files: List<Pair<String, Long>>, // name to 声明大小
+        val fileOk: BooleanArray, // 逐文件完成标记（LocalSendClient.onFileDone 置位；定稿转 TransferFileInfo.ok）
+    )
+
+    /** v0.5.14d 接收会话聚合（LocalSendServer 会话粒度；files 仅含完整落地文件——转存用户目录结果不影响「传输」状态）。 */
+    private class ReceiveSessionAccum(val sessionId: String, val startedAt: Long) {
+        val files = ArrayList<TransferFileInfo>() // worker 追加 / 主线程定稿读取；synchronized(this) 保护
+        @Volatile var lastProgressAt: Long = startedAt // 最近一次有进展时刻（新文件落地或服务器侧字节推进）
+        @Volatile var lastPollReceived: Long = 0L // 上一轮询的服务器侧已收字节
+    }
+
+    /** v0.5.14d 当前会话对端别名（传输记录用）：对端卡 alias → 握手 alias → MAC 尾段 → 「未知设备」。 */
+    private fun currentPeerAlias(): String {
+        ui.selectedDevice?.alias?.takeIf { it.isNotBlank() }?.let { return it }
+        val peer = sessionManager.currentPeer()
+        val hs = peer?.let { ui.devices[it]?.handshake }
+        hs?.alias?.takeIf { it.isNotBlank() }?.let { return it }
+        peer?.let { return "…${it.takeLast(8)}" }
+        return "未知设备"
+    }
+
+    /**
+     * v0.5.14d 接收侧「落盘位置」展示串（记录 dirPath）：已自定义接收目录 → 目录显示名；
+     * 未选择/未自定义 → 暂存目录绝对路径（文件先落 filesDir/localsend，选定目录后转存）。
+     */
+    private fun receiveDirDisplayPath(): String =
+        if (customReceiveDirUri != null) {
+            ui.receiveDirName ?: "已选择目录"
+        } else {
+            File(appContext.filesDir, "localsend").absolutePath
+        }
+
+    /**
+     * v0.5.14d 接收文件落地记录（worker 线程，LocalSendServer.onFileReceived 同步回调内——先于服务器
+     * 会话移除执行，累积完整后再由轮询/停服点定稿；首次落地记会话开始时间）。文件大小取暂存落盘实际字节。
+     */
+    private fun recordReceivedFile(sessionId: String, fileName: String, path: String) {
+        val now = System.currentTimeMillis()
+        val bytes = try {
+            File(path).length()
+        } catch (e: Exception) {
+            0L
+        }
+        val accum = receiveAccums[sessionId]
+            ?: ReceiveSessionAccum(sessionId, now).also { receiveAccums[sessionId] = it }
+        synchronized(accum) {
+            accum.files.add(TransferFileInfo(fileName, bytes, ok = true))
+            accum.lastProgressAt = now
+        }
+    }
+
+    /**
+     * v0.5.14d 接收会话定稿（主线程）：写一条 TransferRecord 并清累积。
+     * status 判定（forcedStatus==null 时）：会话仍在服务器活动表（本地停服/中止）→ CANCELLED；
+     * 已消失 → 暂存目录存在（全文件收完正常完成）→ OK；目录已被删（对端取消 handleCancel 删目录）→ CANCELLED。
+     * 无完整落地文件的会话（首文件前即中止/取消）信息不足，不产记录（发送侧会记失败/取消）。
+     */
+    private fun finalizeReceiveSession(
+        sessionId: String,
+        forcedStatus: TransferStatus? = null,
+        forcedReason: String? = null,
+    ) {
+        val accum = receiveAccums.remove(sessionId) ?: return
+        val files = synchronized(accum) { accum.files.toList() }
+        if (files.isEmpty()) return
+        val now = System.currentTimeMillis()
+        var status = forcedStatus
+        var reason = forcedReason
+        if (status == null) {
+            if (localsendServer.getActiveSessions().containsKey(sessionId)) {
+                status = TransferStatus.CANCELLED
+                reason = "接收会话未完成（传输已停止）"
+            } else {
+                val stagingDir = File(appContext.filesDir, "localsend").resolve(sessionId)
+                if (stagingDir.exists()) {
+                    status = TransferStatus.OK
+                    reason = null
+                } else {
+                    status = TransferStatus.CANCELLED
+                    reason = "对端取消传输"
+                }
+            }
+        }
+        val totalBytes = files.sumOf { it.bytes }
+        val durationMs = (now - accum.startedAt).coerceAtLeast(0L)
+        val speed = if (status == TransferStatus.OK && durationMs > 0L) {
+            totalBytes * 1000L / durationMs
+        } else {
+            null
+        }
+        addTransferRecord(
+            TransferRecord(
+                id = UUID.randomUUID().toString(),
+                peerAlias = currentPeerAlias(),
+                isReceive = true,
+                fileCount = files.size,
+                totalBytes = totalBytes,
+                status = status,
+                startedAt = accum.startedAt,
+                endedAt = now,
+                durationMs = durationMs,
+                peerSpeedBps = speed,
+                dirPath = receiveDirDisplayPath(),
+                files = files,
+                failReason = reason,
+            ),
+        )
+        DiagLogger.log(
+            TAG,
+            "T3 接收会话记录: session=$sessionId status=$status files=${files.size} total=${totalBytes}B" +
+                (reason?.let { " reason=$it" } ?: ""),
+        )
+    }
+
+    /** v0.5.14d 停服点收尾：未定稿接收会话强制定稿（会话在服务器活动表=传输中止 → 取消；已消失按目录存在性判定；幂等）。 */
+    private fun abandonReceiveSessions() {
+        receiveAccums.keys.toList().forEach { finalizeReceiveSession(it) }
+    }
+
+    /**
+     * v0.5.14d 发送会话定稿（主线程，client 回调内）：写一条 TransferRecord 并复位 sendAccum。
+     * 文件级 ok=已完成（onFileDone）的文件；未完成文件（失败/取消中断）ok=false；
+     * 速度=会话平均字节/秒（仅成功定稿；峰值需传输层逐块回调，本期不改传输层不采集）。
+     */
+    private fun finalizeSendSession(status: TransferStatus, failReason: String?) {
+        val accum = sendAccum ?: return
+        sendAccum = null
+        val ended = System.currentTimeMillis()
+        val durationMs = (ended - accum.startedAt).coerceAtLeast(0L)
+        val files = accum.files.mapIndexed { i, (name, size) ->
+            TransferFileInfo(name, size, ok = i < accum.fileOk.size && accum.fileOk[i])
+        }
+        val totalBytes = accum.files.sumOf { it.second }
+        val speed = if (status == TransferStatus.OK && durationMs > 0L) {
+            totalBytes * 1000L / durationMs
+        } else {
+            null
+        }
+        addTransferRecord(
+            TransferRecord(
+                id = UUID.randomUUID().toString(),
+                peerAlias = accum.peerAlias,
+                isReceive = false,
+                fileCount = accum.files.size,
+                totalBytes = totalBytes,
+                status = status,
+                startedAt = accum.startedAt,
+                endedAt = ended,
+                durationMs = durationMs,
+                peerSpeedBps = speed,
+                dirPath = null,
+                files = files,
+                failReason = failReason,
+            ),
+        )
+        DiagLogger.log(
+            TAG,
+            "T3 发送会话记录: status=$status files=${accum.files.size} total=${totalBytes}B" +
+                (failReason?.let { " reason=$it" } ?: ""),
+        )
+    }
+
+    /** v0.5.14d 传输记录落库（主线程）：TransferRecordStore 持久化（上限 50 丢最旧）+ 刷新 ui.transferRecords（倒序）。 */
+    private fun addTransferRecord(record: TransferRecord) {
+        transferStore.add(record)
+        ui.transferRecords = transferStore.records()
+    }
 
     // ============ A5 组网接线 ============
 
@@ -636,6 +844,7 @@ class BluelinkEngine(private val context: Context) {
             // 对端 IP 复位（发送入口随之回到「组网就绪后可发送」）
             mainHandler.removeCallbacks(receivePoller)
             localsendServer.stop()
+            abandonReceiveSessions() // v0.5.14d：停服 → 在途接收会话定稿（幂等）
             if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
             transportPeerIp = ""
             sameLanDirectActive = false // A8：同网直连标记复位（防御；状态机中止路径不产生直连，幂等）
@@ -793,7 +1002,9 @@ class BluelinkEngine(private val context: Context) {
         gattServer.setHandshakingProvider { ui.handshaking }
         // v0.4.5：LocalSend 服务文件完整落盘（worker 线程）→ 转存用户目录或提示选择保存位置。
         // Server 回调语义 = 文件已入**暂存** filesDir/localsend/（防断连丢数据），待/已转存用户目录。
-        localsendServer.onFileReceived = { _, fileName, path, mimeType ->
+        // v0.5.14d：先入传输记录会话累积（sessionId 会话粒度；转存结果不进「传输」状态），再走既有转存流程。
+        localsendServer.onFileReceived = { sessionId, fileName, path, mimeType ->
+            recordReceivedFile(sessionId, fileName, path)
             handleFileReceived(fileName, path, mimeType)
         }
     }
@@ -1437,6 +1648,7 @@ class BluelinkEngine(private val context: Context) {
         logUiEvent(EVT_TEARDOWN, "已结束同网直连（BLE 保留）")
         mainHandler.removeCallbacks(receivePoller)
         localsendServer.stop()
+        abandonReceiveSessions() // v0.5.14d：停服 → 在途接收会话定稿（幂等）
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
         sameLanDirectActive = false
@@ -1477,6 +1689,7 @@ class BluelinkEngine(private val context: Context) {
         stopWifiJoinMonitor() // A6：B4 收尾（热点方「关闭热点」）→ offer 会话结束，注销 Wi-Fi 变化监听（幂等）
         // 仅停 server + 状态复位（覆盖 onAbort 的「组网已中止」文案）
         localsendServer.stop()
+        abandonReceiveSessions() // v0.5.14d：停服 → 在途接收会话定稿（幂等）
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
         sameLanDirectActive = false // A8：同网直连标记复位（防御；同网直连不经热点路径）
@@ -1509,6 +1722,7 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         stopWifiJoinMonitor() // A6：B4 收尾（从机「断开网络」）→ offer 会话结束，注销 Wi-Fi 变化监听（幂等）
         localsendServer.stop()
+        abandonReceiveSessions() // v0.5.14d：停服 → 在途接收会话定稿（幂等）
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
         sameLanDirectActive = false // A8：同网直连标记复位（防御；同网直连不经从机路径）
@@ -1602,6 +1816,15 @@ class BluelinkEngine(private val context: Context) {
         )
         val client = LocalSendClient(peer, Constants.DEFAULT_TCP_PROBE_PORT, Build.MODEL)
         activeSendClient = client
+        // v0.5.14d 传输记录：发送会话聚合置位（别名/开始时刻/清单；回调定稿时汇总为一条记录——
+        // 结构按会话多文件设计，引擎当前单文件发送 → 清单长度=1，将来多文件泛化为 sendFileList 即可）
+        val sendFileList = listOf(sendFile)
+        sendAccum = SendSessionAccum(
+            peerAlias = currentPeerAlias(),
+            startedAt = System.currentTimeMillis(),
+            files = sendFileList.map { it.name to it.size },
+            fileOk = BooleanArray(sendFileList.size),
+        )
         var lastPct = -1
         client.onProgress = { _, fname, sent, total ->
             // 节流：仅百分比变化时更新 UI/日志（客户端每 64KB 分块回调过密）
@@ -1614,8 +1837,12 @@ class BluelinkEngine(private val context: Context) {
                 }
             }
         }
-        client.onFileDone = { _, fname ->
-            mainHandler.post { DiagLogger.log(TAG, "T3 单文件发送完成：$fname") }
+        client.onFileDone = { idx, fname ->
+            mainHandler.post {
+                DiagLogger.log(TAG, "T3 单文件发送完成：$fname")
+                // v0.5.14d 传输记录：文件级完成标记（定稿时 ok=true）
+                sendAccum?.let { if (idx in it.fileOk.indices) it.fileOk[idx] = true }
+            }
         }
         client.onAllDone = { total ->
             mainHandler.post {
@@ -1636,6 +1863,8 @@ class BluelinkEngine(private val context: Context) {
                     }
                 }
                 DiagLogger.log(TAG, "T3 发送全部完成：$name total=${total}B（B4 温和收尾：保留 BLE/热点，等待用户手动收尾）")
+                // v0.5.14d 传输记录：发送成功定稿（OK）
+                finalizeSendSession(TransferStatus.OK, null)
                 activeSendClient = null
             }
         }
@@ -1643,6 +1872,8 @@ class BluelinkEngine(private val context: Context) {
             mainHandler.post {
                 ui.transferState = "发送失败：$msg"
                 DiagLogger.log(TAG, "T3 发送失败：stage=$stage err=$msg")
+                // v0.5.14d 传输记录：发送失败定稿（原因红字）
+                finalizeSendSession(TransferStatus.FAILED, msg)
                 activeSendClient = null
             }
         }
@@ -1650,10 +1881,12 @@ class BluelinkEngine(private val context: Context) {
             mainHandler.post {
                 ui.transferState = "发送已取消：$name"
                 DiagLogger.log(TAG, "T3 发送已取消：$name")
+                // v0.5.14d 传输记录：发送取消定稿
+                finalizeSendSession(TransferStatus.CANCELLED, "用户取消发送")
                 activeSendClient = null
             }
         }
-        Thread({ client.send(listOf(sendFile)) }, "localsend-send")
+        Thread({ client.send(sendFileList) }, "localsend-send")
             .apply { isDaemon = true }
             .start()
     }
@@ -2465,7 +2698,7 @@ class BluelinkEngine(private val context: Context) {
     /** 组网/同网直连前置判定：模式非「关」且本会话尚未验证通过 → 需先完成 PIN 验证。 */
     fun pinRequired(): Boolean = pinStore.getMode() != PinStore.MODE_OFF && !ui.pinVerifyOk
 
-    // ============ v0.5.14c：扫描消失自动移除（防误清缓冲） ============
+    // ============ v0.5.14c：扫描消失自动移除（防误清缓冲）/ v0.5.14d：RSSI=0（无效信号）设备自动移除 ============
 
     /** 扫描运行期各设备最后出现时间戳（address → epoch ms；handleScanResult 每收到一次广播即刷新——与
      *  DeviceEntry.lastSeen 的「rssi 变化或 >5s 才更新」节流解耦，作消失判定的准确基准）。 */
@@ -2494,6 +2727,16 @@ class BluelinkEngine(private val context: Context) {
                 // 防误清：会话对端 / 对端卡选中 / 弹层打开中不清除；保护期内顺延缓冲
                 if (addr == peer || addr == selected || addr == detail) {
                     scanLastSeen[addr] = now
+                    return@forEach
+                }
+                // v0.5.14d ②：RSSI=0（0dBm 无效信号）设备自动移除——BLE 有效 RSSI 约 -100..-20dBm，
+                // 0dBm 视为无效/未知信号（部分广播栈对无信号设备报 0），无效信号设备不占扫描列表；
+                // 保护集与 30s 消失移除同逻辑（上段已过滤）；removeDevice 幂等——移除后列表无此条目，
+                // 下个周期不再重复移除（除非设备再次以 0dBm 广播重新入列，属新一次移除）。
+                if (entry.rssi == 0) {
+                    DiagLogger.log(TAG, "扫描 0dB 设备自动移除: $addr")
+                    removeDevice(addr)
+                    scanLastSeen.remove(addr)
                     return@forEach
                 }
                 // 基准 lastSeen：优先扫描侧 map（广播级精度）；握手补入等未在扫描 map 的条目回退
@@ -2541,6 +2784,7 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(receivePoller)
         mainHandler.removeCallbacks(staleScanPruner) // v0.5.14c：扫描消失自动移除定时器随扫描停止取消（幂等）
         localsendServer.stop()
+        abandonReceiveSessions() // v0.5.14d：停服 → 在途接收会话定稿（幂等）
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
         sameLanDirectActive = false // A8：同网直连标记随停止复位（幂等）
@@ -2845,6 +3089,10 @@ class BluelinkEngine(private val context: Context) {
 
         /** T3 接收进度轮询间隔。 */
         private const val RECEIVE_POLL_INTERVAL_MS = 1000L
+
+        /** v0.5.14d 接收会话停滞定稿阈值：会话仍在服务器活动表且服务器侧字节/文件落地长时间（60s）无进展
+         *  → 判失败定稿（对端断连且 cancel 未达；大文件传输中字节持续推进不触发）。 */
+        private const val RECEIVE_RECORD_STALL_MS: Long = 60_000L
 
         /** v0.5.14c 扫描消失自动移除：周期检查间隔（扫描运行期每 10s 一次）。 */
         private const val STALE_SCAN_CHECK_INTERVAL_MS: Long = 10_000L

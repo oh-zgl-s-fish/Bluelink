@@ -326,7 +326,7 @@ Root 模式可越过多数权限（`pm grant` / `appops set` / shell uid 自带�
 4. **项目地址**：`https://github.com/oh-zgl-s-fish/Bluelink`（点击打开仓库）
 5. **反馈**：`https://github.com/oh-zgl-s-fish/Bluelink/issues`（点击打开 Issues）
 6. **隐藏热区（反馈与致谢之间）**：快速连点 **5 次（间隔 ≤2s 视为连击）**解锁显示「收集日志」行
-7. **致谢区**（底部，小字号多行；**文案照抄仓库 README 的「致谢 + Contributors」原文**——LocalSend（协议启发）/ MacroDroid（方法论）/ Material Design 3 + zglinus-for-agent（项目维护与集成）/ DeepSeek / pi agent / **王宝煲**（应用图标表情包来自于她 🫶，链 https://space.bilibili.com/1978636705/）；GPL-3.0 注记）
+7. **致谢区**（底部，小字号多行；**文案照抄仓库 README 的「致谢 + Contributors」原文**——LocalSend（协议启发）/ MacroDroid（方法论）/ Material Design 3 + zglinus（项目维护与集成）/ DeepSeek / pi agent / **王宝煲**（应用图标表情包来自于她 🫶，链 https://space.bilibili.com/1978636705/）；GPL-3.0 注记）
 8. 底部：致谢区
 
 **「收集日志」两段式交互**（隐藏入口，替代旧自测区）：

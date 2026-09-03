@@ -44,6 +44,10 @@ data class WallpaperSlot(
  * - [maskAlpha]：遮罩强度 0–[MASK_MAX]（%）；背景遮罩用当前主题 surfaceVariant 色按该百分比叠加；
  * - [accentColor]：强调色 ARGB Long（0xAARRGGBB；「从壁纸取色」/ 下方基础色板选择写入）。
  *   本版仅做「选中色 chip」预览展示与后续主题预留，不全局改 ColorScheme（见 PersonalizePage.kt）；
+ * - [containerTransparency]：容器透明度 5–[TRANSPARENCY_MAX]（%）= 主页浮层容器「透明程度」，
+ *   容器实际 alpha = 1f − value/100f（[containerAlpha]；默认 20 → alpha 0.80，范围 alpha 0.95–0.50）
+ *   ——v0.5.11 UI1b-E 改③ 新增：HOME 顶栏/两态卡/底部动作行/时间流/横幅等浮层 alpha 由固定常量
+ *   0.80 改为本值运行态可调（MainScreen 读本 store，个性化页「容器透明度」滑块保存后生效）；
  * - [effectiveSlot]：背景取槽规则——按当前深浅模式取对应槽（深→深槽 / 浅→浅槽），槽未设 → 统一槽（兜底）；
  *   统一槽也未设 → [WallpaperSlot.NONE]（App 根背景回纯色，维持现状）。
  */
@@ -92,6 +96,19 @@ class WallpaperStore(context: Context) {
             editor.apply()
         }
 
+    /** 容器透明度（5–[TRANSPARENCY_MAX]%，越界写入自动收拢；v0.5.11 UI1b-E 改③）。
+     * 语义 = 透明程度 %（数值越大容器越透明）；主页浮层容器实际 alpha 见 [containerAlpha]。 */
+    var containerTransparency: Int
+        get() = prefs.getInt(KEY_TRANSPARENCY, DEFAULT_TRANSPARENCY)
+            .coerceIn(TRANSPARENCY_MIN, TRANSPARENCY_MAX)
+        set(value) {
+            prefs.edit().putInt(KEY_TRANSPARENCY, value.coerceIn(TRANSPARENCY_MIN, TRANSPARENCY_MAX)).apply()
+        }
+
+    /** 主页浮层容器实际 alpha = 1f − 透明度/100f（默认 20 → 0.80，范围 0.95–0.50；
+     * 默认 0.80 与 v0.5.8d 顶栏浮层规格一致）。 */
+    fun containerAlpha(): Float = 1f - containerTransparency / 100f
+
     /** 背景取槽 helper：当前深浅模式槽未设 → 统一槽兜底；仍未设 → 空槽（纯色）。 */
     fun effectiveSlot(isDark: Boolean): WallpaperSlot {
         val modeSlot = slot(if (isDark) SLOT_DARK else SLOT_LIGHT)
@@ -118,9 +135,20 @@ class WallpaperStore(context: Context) {
         /** 遮罩强度默认值（无壁纸/不叠加）。 */
         const val DEFAULT_MASK = 0
 
+        /** 容器透明度下限（5%；对应容器 alpha 0.95，下限保护：不透明上限 95%）。 */
+        const val TRANSPARENCY_MIN = 5
+
+        /** 容器透明度上限（50%；对应容器 alpha 0.50，至少保持半透明基底可读）。 */
+        const val TRANSPARENCY_MAX = 50
+
+        /** 容器透明度默认值（20% → 容器 alpha 0.80，同 v0.5.8d 顶栏浮层规格 0.80）。 */
+        const val DEFAULT_TRANSPARENCY = 20
+
         private const val KEY_MASK = "mask_alpha"
 
         private const val KEY_ACCENT = "accent_color"
+
+        private const val KEY_TRANSPARENCY = "container_transparency"
 
         private val TYPE_KEYS = arrayOf(
             "slot_unified_type",

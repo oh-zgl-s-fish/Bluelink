@@ -69,7 +69,7 @@ import kotlinx.coroutines.withContext
 /**
  * 个性化页（抽屉 2 / BluelinkUiState.PAGE_PERSONAL；v0.5.8 UI1b-B2 整页重做，覆盖 v0.5.7 UI1b-B
  * 三槽长表单版——真机反馈 v0.5.7「主页面背景不变」由 MainScreen HOME 浮层化修复（另见
- * ui/MainScreen.kt RootWallpaperLayer/HOME_FLOAT_ALPHA），本页只管草稿编辑与保存）。
+ * ui/MainScreen.kt RootWallpaperLayer；主页浮层 alpha 已运行态可调见 WallpaperStore.containerAlpha），本页只管草稿编辑与保存）。
  *
  * v0.5.8b 本版改动（壁纸来源修复 + 视觉收尾，真机反馈「壁纸两个来源都不显示/重启后丢失」）：
  * - 自选图：SAF 收到 content:// 后**立即复制到 App 私有目录**（filesDir/wallpapers/，存文件绝对路径
@@ -117,11 +117,17 @@ import kotlinx.coroutines.withContext
  * - 遮罩区（底部固定 · 全局共用）：「遮罩」+ Slider 0–80%（显示百分比），拖动即页内预览
  *   （预览区遮罩同步变）。遮罩色 = 主题 surfaceVariant（随系统深浅自动切换，v0.5.8b 确认，见
  *   WallpaperBackdrop.WallpaperEffect 注释）。
+ * - 容器透明度区（v0.5.11 UI1b-E 改④；遮罩行下方）：文字「容器透明度」+ Slider 5–50%（5% 步进，
+ *   显示百分比，同遮罩行样式）——语义 = 主页浮层容器「透明程度」（容器实际 alpha = 1−值/100：
+ *   5→0.95 … 50→0.50，默认 20→0.80）；拖动只改本地草稿 transparencyDraft（页内无主页可见，
+ *   不做预览），保存写 store.containerTransparency，主页面顶栏/内容容器 alpha 随之刷新。
  *
- * 保存语义（v0.5.8 新交互）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 / accent 草稿 / 当前场景 /
- * 色系展开与选中态），进入页面从 [WallpaperStore] 读初值；任何改动只改本地态并即时页内预览
- * （不写 prefs，保存前主页面背景与主题不变）。右上「保存」一次性写 prefs（三槽 setSlot×3 +
- * maskAlpha + accentColor）→ `ui.wallpaperTick++`（主页面背景刷新，见 [BluelinkUiState.wallpaperTick]）
+ * 保存语义（v0.5.8 新交互，v0.5.11 增容器透明度草稿）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 /
+ * 容器透明度草稿 transparencyDraft / accent 草稿 / 当前场景 / 色系展开与选中态），进入页面从
+ * [WallpaperStore] 读初值；任何改动只改本地态并即时页内预览（不写 prefs，保存前主页面背景与主题不变）。
+ * 右上「保存」一次性写 prefs（三槽 setSlot×3 + maskAlpha + containerTransparency + accentColor）→
+ * `ui.wallpaperTick++`（主页面背景 WallpaperBackdrop 与浮层容器 alpha（MainScreen 以 tick 为 key 重读
+ * containerAlpha()）一并刷新，见 [BluelinkUiState.wallpaperTick]）
  * → [onSaved] 上抛强调色（MainActivity 主题 state → BluelinkTheme(accent) 重算 primary 系）
  * → Snackbar「已保存」。离开页面未保存 = 丢弃草稿（remember 随页面出组合失效，重进从 prefs 重读；
  * 首版不做未保存提示）。强调色未选/null → 主题用默认 M3 品牌蓝派生，不覆写。
@@ -143,6 +149,9 @@ fun PersonalizePage(
     var lightDraft by remember { mutableStateOf(store.slot(WallpaperStore.SLOT_LIGHT)) }
     var maskDraft by remember { mutableStateOf(store.maskAlpha) }
     var accentDraft by remember { mutableStateOf(store.accentColor) }
+    // v0.5.11 UI1b-E 改④：容器透明度草稿（初值 store.containerTransparency；拖动只改本地态，保存才写 store；
+    // 离开未保存 = 丢弃，与 mask 草稿同语义；页内无主页可见故不做预览）
+    var transparencyDraft by remember { mutableStateOf(store.containerTransparency) }
     // 当前场景（场景三按钮高亮 + 预览区渲染该槽草稿）
     var sceneSlot by remember { mutableStateOf(WallpaperStore.SLOT_UNIFIED) }
     // 色系展开态：false=右区显示当前色系具体色行；true=右区展开色系列表大圆点行（v0.5.8d 同款切换，
@@ -216,14 +225,17 @@ fun PersonalizePage(
         }
     }
 
-    // 「保存」：一次性写 prefs（三槽 + mask + accent）→ 主页面背景刷新信号 → 主题强调色上抛 → Snackbar
+    // 「保存」：一次性写 prefs（三槽 + mask + 容器透明度 + accent）→ 主页面背景/浮层 alpha 刷新信号 → 主题强调色上抛 → Snackbar
     fun save() {
         store.setSlot(WallpaperStore.SLOT_UNIFIED, unifiedDraft)
         store.setSlot(WallpaperStore.SLOT_DARK, darkDraft)
         store.setSlot(WallpaperStore.SLOT_LIGHT, lightDraft)
         store.maskAlpha = maskDraft
+        // v0.5.11 UI1b-E 改④：容器透明度入 store（mask 之后、tick++ 之前；主页容器 alpha 由 MainScreen
+        // 以 wallpaperTick 为 key 重读 containerAlpha() 即时生效）
+        store.containerTransparency = transparencyDraft
         store.accentColor = accentDraft
-        ui.wallpaperTick++ // 主页面背景（WallpaperBackdrop 自订阅）重读 store 刷新
+        ui.wallpaperTick++ // 主页面背景（WallpaperBackdrop）与浮层容器 alpha（MainScreen 重读）刷新
         onSaved(accentDraft) // 主题强调色 state 更新 → MaterialTheme 重算（primary 系换色）
         ui.showSnack("已保存")
     }
@@ -312,6 +324,13 @@ fun PersonalizePage(
                 MaskRow(
                     maskAlpha = maskDraft,
                     onMaskChange = { maskDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(SpacingTokens.SpaceSm)) // v0.5.11：遮罩行与下方容器透明度行间同页内行距
+                // v0.5.11 UI1b-E 改④：遮罩行下方新增「容器透明度」行（同遮罩行样式：文字 + Slider 5–50% 步进 5 + %）
+                ContainerTransparencyRow(
+                    transparency = transparencyDraft,
+                    onTransparencyChange = { transparencyDraft = it },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -870,6 +889,43 @@ private fun MaskRow(
         )
         Text(
             text = "$maskAlpha%",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(44.dp),
+            maxLines = 1,
+        )
+    }
+}
+
+/** v0.5.11 UI1b-E 改④：容器透明度区（遮罩行下方 · 全局共用）：文字「容器透明度」+ Slider 5–50%
+ * （5% 步进，显示百分比；同遮罩行样式）。语义 = 主页浮层容器「透明程度」：容器实际 alpha = 1−值/100
+ * （5→0.95 … 50→0.50，默认 20 → 0.80 与 v0.5.8d 顶栏浮层规格一致）；拖动只改本地草稿
+ * transparencyDraft（页内无主页可见，不做预览），保存写 store.containerTransparency 后主页生效。 */
+@Composable
+private fun ContainerTransparencyRow(
+    transparency: Int,
+    onTransparencyChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "容器透明度",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.width(96.dp),
+        )
+        Slider(
+            value = transparency.toFloat(),
+            onValueChange = { onTransparencyChange(it.toInt()) },
+            valueRange = WallpaperStore.TRANSPARENCY_MIN.toFloat()..WallpaperStore.TRANSPARENCY_MAX.toFloat(),
+            // 5% 步进（5/10/…/50）：steps = 中间离散点数 = (50−5)/5 − 1 = 8
+            steps = (WallpaperStore.TRANSPARENCY_MAX - WallpaperStore.TRANSPARENCY_MIN) / 5 - 1,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = "$transparency%",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.width(44.dp),

@@ -432,8 +432,10 @@ class HotspotManager(
     private fun tryPrivateApiHotspot(): HotspotResult {
         // v0.4.0：先快照热点启动前的旧 Wi-Fi 接口（collectHotspotIp 排除旧 Wi-Fi 网段用）
         snapshotPreHotspotInterfaces()
-        // 临时「禁用②」开关（LocalOnly 测试包）：② 私有 API 路径直接失败，状态机既有降级链自动落 ③
-        if (DISABLE_PRIVATE_API) return HotspotResult(success = false, error = "② 已禁用(LocalOnly 测试包)，降级 ③")
+        // v0.5.14 启用 ②（回归私有 API 反射路径）：DISABLE_PRIVATE_API=false 时本守卫恒 false
+        // （编译期常量折叠），正常走 k1/c 式按名枚举 Binder 直呼 → setWifiApEnabled 降级全链；
+        // 如需强制 LocalOnly 联调可临时置 true（② 直接失败，状态机既有降级链自动落 ③）
+        if (DISABLE_PRIVATE_API) return HotspotResult(success = false, error = "② 已经 DISABLE_PRIVATE_API 联调开关禁用，降级 ③")
         val ctx = resolveContext()
         if (ctx == null) {
             val err = "L1_PRIVATE_API：Context 不可用（注入与 ActivityThread.currentApplication() 兜底均失败）"
@@ -1898,8 +1900,12 @@ class HotspotManager(
     }
 
     companion object {
-        /** 临时「禁用②」开关：LocalOnly 测试包临时禁用②，验证后移除。 */
-        private const val DISABLE_PRIVATE_API = true
+        /**
+         * ② 私有 API 路径联调开关：v0.5.14 起置 false（启用 ②，回归私有 API 反射路径——
+         * k1/c 式按名枚举 Binder 直呼第一手段 + setWifiApEnabled 降级全链，见 [tryPrivateApiHotspot]）；
+         * 如需强制 LocalOnly（③）联调可临时置 true（② 直接失败、走状态机既有降级链落 ③）。
+         */
+        private const val DISABLE_PRIVATE_API = false
 
         /** SSID 前缀。 */
         private const val SSID_PREFIX = "Bluelink-"

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -25,10 +26,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -49,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -299,7 +304,19 @@ fun PersonalizePage(
         ) {
             // 颜色区高度 ≈ 内容区高 1/8（收 80–128dp，防过小/过大；预览区弹性占剩余大部）
             val colorAreaHeight = (maxHeight * COLOR_AREA_FRACTION).coerceIn(80.dp, 128.dp)
-            Column(modifier = Modifier.fillMaxSize()) {
+            // S4/AD3（md3-audit-2 P2）：一屏精确适配只在「区内容自然高 + 预览保底」放得下时成立——内容区高低于
+            // 估算阈值（337 + 说明句 16×fontScale + 预览保底 60，见 REGION_* 常量）→ 原 weight 一屏布局会把
+            // 预览压到 0、底部行溢出被裁（fontScale 超高 / 矮横屏场景）→ 切「自然高 + verticalScroll」滚动兜底；
+            // 默认字号内容不高恒走精确适配分支（不滚、一屏规格不变，v0.5.8 定稿布局保持）。
+            val fontScale = LocalDensity.current.fontScale
+            val fitOneScreen = maxHeight >=
+                (REGION_FIXED_CHROME_DP.dp +
+                    REGION_HINT_DP_PER_FONT_SCALE.dp * fontScale +
+                    REGION_PREVIEW_FLOOR_DP.dp)
+            val regionScroll = rememberScrollState()
+            // 内容子序列：两分支共用同一组子件（改动须同步）；差异只在容器与预览高度策略——精确适配 = 预览
+            // weight(1f) 弹性吸收剩余（v0.5.8 定稿原布局）；滚动兜底 = 预览固定高（weight 不适用于滚动容器）
+            val sections: @Composable ColumnScope.() -> Unit = {
                 ColorSectionRow(
                     accentDraft = accentDraft,
                     currentFamily = currentFamily,
@@ -339,18 +356,34 @@ fun PersonalizePage(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(SpacingTokens.SpaceXs))
-                PreviewSection(
-                    slot = slotDraft(sceneSlot),
-                    sceneSlot = sceneSlot,
-                    maskAlpha = maskDraft,
-                    // v0.5.12b：透明度草稿直传预览区（浮层卡 mock 内部按 (100f-transparencyDraft)/100f
-                    // 换算卡 alpha；透明度越高卡越透明、壁纸透出越多，与主页一致：5→0.95 … 50→0.50）
-                    transparencyDraft = transparencyDraft,
-                    onOpenSource = { sourceSheet = true },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                )
+                if (fitOneScreen) {
+                    // 精确适配分支：预览区 weight(1f) 弹性占剩余大部（v0.5.8 定稿原布局）
+                    PreviewSection(
+                        slot = slotDraft(sceneSlot),
+                        sceneSlot = sceneSlot,
+                        maskAlpha = maskDraft,
+                        // v0.5.12b：透明度草稿直传预览区（浮层卡 mock 内部按 (100f-transparencyDraft)/100f
+                        // 换算卡 alpha；透明度越高卡越透明、壁纸透出越多，与主页一致：5→0.95 … 50→0.50）
+                        transparencyDraft = transparencyDraft,
+                        onOpenSource = { sourceSheet = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                    )
+                } else {
+                    // S4/AD3 滚动兜底：预览区固定高（[FALLBACK_PREVIEW_HEIGHT]；滚动容器内不能用 weight 弹性，
+                    // 固定高保证 mock/占位有稳定可视高度；超高部分随整列 verticalScroll 可达）
+                    PreviewSection(
+                        slot = slotDraft(sceneSlot),
+                        sceneSlot = sceneSlot,
+                        maskAlpha = maskDraft,
+                        transparencyDraft = transparencyDraft,
+                        onOpenSource = { sourceSheet = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(FALLBACK_PREVIEW_HEIGHT),
+                    )
+                }
                 Spacer(Modifier.height(SpacingTokens.SpaceSm))
                 MaskRow(
                     maskAlpha = maskDraft,
@@ -363,6 +396,17 @@ fun PersonalizePage(
                     transparency = transparencyDraft,
                     onTransparencyChange = { transparencyDraft = it },
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (fitOneScreen) {
+                Column(modifier = Modifier.fillMaxSize(), content = sections)
+            } else {
+                // S4/AD3：滚动兜底列——内容自然高、超高可滚到底；默认字号（内容不高）恒走上方精确适配分支不滚
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(regionScroll),
+                    content = sections,
                 )
             }
         }
@@ -399,6 +443,56 @@ fun PersonalizePage(
 
 /** 颜色区占内容区高度的比例（≈1/8，规格「颜色区占页面内容高约 1/8」）。 */
 private const val COLOR_AREA_FRACTION = 0.125f
+
+// ==================== md3-audit-2 S1（P2）：页内非间距/内容度量字面量集中登记（注释收口，不改布局值） ====================
+// 个性化页无字圆钮/色点系列是「内容度量 token」（选中环语言/内容列宽/区高，4dp 间距节奏不适用）——按 S1 只登记
+// 不收归 SpacingTokens（间距 scale 只管 4dp 节奏留白）；值 = v0.5.8b/8d 定稿视觉、原值保留：
+//  - 选中环语言（SH2 已提炼为下方常量并替换使用点）：选中环 2dp / 未选环 2dp（审计 v0.5.11 口径「2/1dp」——
+//    v0.5.12 md3-audit-2 C1/C2 已把未选 outlineVariant 1dp 升为 outline 2dp，原 1dp 档现不存在）；
+//    环底衬 44dp（= 色点 40 + 2×2dp 环；审计口径「44/42」中 42 为 v0.5.11 旧值，现状无 42）；色点直径 40dp；
+//  - 场景钮 56dp 触达/环底衬、52dp 填充圆（审计口径「56/54/52」中 54 为 v0.5.11 旧值，现状 56+52 两档）；
+//  - 触达 48dp（色点/色系入口/取色钮命中区，≥48×48 触达规范，audit A5 保持）；
+//  - 遮罩/容器透明度行固定文本列 48/96/44dp（MaskRow/ContainerTransparencyRow；S2 已改
+//    widthIn(min=原值)+maxLines=1+ellipsis 做 2x 缩放保护，列宽语义不变）；
+//  - 颜色区高度收口 80–128dp（= 内容区高 1/8 的收口区间，见 [COLOR_AREA_FRACTION] 消费点）。
+// =========================================================================================================
+
+// ==================== md3-audit-2 SH2（P2）：选中环视觉语言页内提炼（token 化，不改当前视觉） ====================
+// 无字圆钮/色点「选中环」语言（v0.5.8b 引入；原散落 AccentSwatch/FamilyEntryStrip/SceneDotButton 三处字面量）：
+// 实现 = 「内容圆 + 外环底衬」两层 Box（内容圆盖住底衬中心、外缘露环宽，无需描边半宽换算）——底衬直径 =
+// 内容直径 + 2×环宽（40+2×2=44、52+2×2=56）。环宽按 v0.5.13 现状常量化：选中/未选均为 2dp，差异只在色档：
+// selected = primary（浅 6.21:1 / 深 10.90:1 ✓）、normal = outline（v0.5.12 md3-audit-2 C1/C2 未选
+// outlineVariant 1dp 1.66:1 → outline 2dp 后，原 SH2「highContrast=outline」档即现状未选档：浅 #74777F
+// 3.39:1 / 深 #8F9099 4.29:1 ≥3:1 图形）——色档随主题读取见 [swatchRingColor]。
+private val SwatchRingSelected = 2.dp // 选中环宽（色档 primary；底衬/填充圆按「内容 + 2×环宽」派生，见下）
+private val SwatchRingNormal = 2.dp // 未选环宽（色档 outline；v0.5.12 C1/C2 升档后与选中同宽——几何共用
+// SwatchRingSelected 的底衬派生（SwatchRingBacking/SceneFillSize），本名保留双名便于读码/维护；未来未选档
+// 若另设宽度，在底衬派生处按态区分即可）
+private val SwatchTouchSize = 48.dp // 色点/色系入口触达命中区边长（≥48×48 触达规范）
+private val SwatchDotSize = 40.dp // 色点/色系圆点内容直径（AccentSwatch/FamilyDotsRow/FamilyEntryStrip 半彩圆共用）
+// 底衬/填充 = 内容直径 + 2×环宽（选中/未选同宽 2dp）——改环宽只动 SwatchRing*，底衬与填充随之派生
+private val SwatchRingBacking = SwatchDotSize + SwatchRingSelected * 2f // 环底衬直径 = 40 + 2×2 = 44dp
+private val SceneDotTouch = 56.dp // 场景钮触达命中区 = 环底衬直径（≥48 触达）
+private val SceneFillSize = SceneDotTouch - SwatchRingSelected * 2f // 场景钮填充圆直径 = 56 − 2×2 = 52dp
+
+/** 选中环色档（SH2）：选中 = primary / 未选 = outline——v0.5.12 C1/C2 修复后未选即原 highContrast 档
+ *  （outlineVariant 1dp 1.66:1 → outline 2dp：浅 #74777F 3.39:1 / 深 #8F9099 4.29:1 ≥3:1 图形；
+ *  选中 primary 浅 6.21:1 / 深 10.90:1 ✓）。 */
+@Composable
+private fun swatchRingColor(selected: Boolean): Color =
+    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+
+// ==================== md3-audit-2 S4/AD3（P2）：一屏精确适配 vs 滚动兜底 分界常量（估算） ====================
+// 内容区（标题下）「一屏精确适配」可行性估算（dp；消费点在 PersonalizePage 内容区 BoxWithConstraints）：
+// 区内不含弹性预览的自然高 ≈ 颜色区封顶 128 + 间隔/分隔线 37（SpaceXs4+Divider1+SpaceSm8+SpaceXs4+
+// SpaceXs4+SpaceSm8+SpaceSm8）+ 场景钮行 56 + 遮罩行 48（M3 Slider）+ 容器透明度行 68（Slider 48 + C4
+// 风险留白 20）= 337（dp 封顶或与 fontScale 无关）；说明句（bodySmall 单行 maxLines=1）≈ 16×fontScale。
+// 内容区高低于（337 + 16×fontScale + 预览保底 60）→ weight 一屏布局会把预览压到 0 且底部行溢出被裁
+// （fontScale 超高 / 矮横屏）→ 切滚动兜底（自然高 + verticalScroll）。默认字号内容不高恒走精确适配分支。
+private const val REGION_FIXED_CHROME_DP = 337 // 区内固定高部件合计上限（dp；不含弹性预览/说明句）
+private const val REGION_HINT_DP_PER_FONT_SCALE = 16 // 说明句单行高 ≈ bodySmall 行高 16sp × fontScale
+private const val REGION_PREVIEW_FLOOR_DP = 60 // 精确适配时预览区需保底高度（dp）
+private val FALLBACK_PREVIEW_HEIGHT = 180.dp // 滚动兜底布局中预览区固定高（滚动容器内 weight 弹性不适用）
 
 /**
  * 颜色区（占标题下内容区高约 1/8）：左 1/6 色系入口圆钮 / 中竖分割线 / 右 5/6（收拢 = 当前色系具体色
@@ -501,7 +595,7 @@ private fun FamilyEntryStrip(
     ) {
         Box(
             modifier = Modifier
-                .size(48.dp)
+                .size(SwatchTouchSize) // SH2：色系入口触达命中区（48dp ≥48×48）
                 .clip(CircleShape)
                 .clickable(onClick = onClick)
                 .semantics {
@@ -512,25 +606,22 @@ private fun FamilyEntryStrip(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // 外环底衬（先画，被半彩圆盖住中心、露外圈环）：展开（=选中）primary 2dp / 收拢 outline 2dp
-            // （v0.5.12 md3-audit-2 C2 环档：收拢态 outlineVariant 1dp → outline 2dp——浅色主题浅色系双色半彩
-            // 直贴浅底时的可辨描边，两主题 ≥3:1 图形；与 [AccentSwatch]/[SceneDotButton] 共用同款环档）
+            // 外环底衬（先画，被半彩圆盖住中心、露外圈环）：尺寸/色档走 SH2 常量——底衬 SwatchRingBacking 44
+            // = 半彩圆 SwatchDotSize 40 + 2×SwatchRing* 2dp；色档 = swatchRingColor(expanded) = 展开（选中）
+            // primary / 收拢 outline（v0.5.12 C1/C2：outlineVariant 1dp → outline 2dp 后收拢 outline 即
+            // 原 highContrast 档，两主题 ≥3:1 图形；与 [AccentSwatch]/[SceneDotButton] 同款环语言）
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(SwatchRingBacking)
                     .background(
-                        color = if (expanded) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.outline
-                        },
+                        color = swatchRingColor(expanded),
                         shape = CircleShape,
                     ),
             )
-            // 40dp 双色半彩圆（左=代表色 / 右=加深半彩；无文字）
+            // 40dp（SwatchDotSize）双色半彩圆（左=代表色 / 右=加深半彩；无文字）
             Row(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(SwatchDotSize)
                     .clip(CircleShape),
             ) {
                 Box(
@@ -625,7 +716,7 @@ private fun AccentSwatch(
 ) {
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(SwatchTouchSize) // SH2：色点触达命中区（48dp ≥48×48）
             .clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
@@ -640,25 +731,22 @@ private fun AccentSwatch(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 外环底衬（先画，被色点盖住中心、露外圈环）：选中 primary 2dp / 未选 outline 2dp（同 2dp 环宽，
-        // 档位差异只在颜色——v0.5.12 md3-audit-2 C2 环档：未选 outlineVariant 1dp → outline 2dp，浅色主题
-        // 白/浅灰系色点 1.06:1、环 1.66:1 → outline 环浅 #74777F 3.39:1 / 深 #8F9099 4.29:1，图形 ≥3:1）
+        // 外环底衬（先画，被色点盖住中心、露外圈环）：尺寸/色档走 SH2——底衬 SwatchRingBacking 44 =
+        // 色点 SwatchDotSize 40 + 2×SwatchRing 2dp；色档 swatchRingColor(isSelected) = 选中 primary /
+        // 未选 outline（v0.5.12 C1/C2 未选 outlineVariant 1dp 1.66:1 → outline 2dp：浅 #74777F 3.39:1 /
+        // 深 #8F9099 4.29:1 ≥3:1 图形，修浅色主题白/浅灰系色点盲选）
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .size(SwatchRingBacking)
                 .background(
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.outline
-                    },
+                    color = swatchRingColor(isSelected),
                     shape = CircleShape,
                 ),
         )
-        // 40dp 大圆色点（纯色填充，无文字）
+        // 40dp（SwatchDotSize）大圆色点（纯色填充，无文字）
         Box(
             modifier = Modifier
-                .size(40.dp)
+                .size(SwatchDotSize)
                 .clip(CircleShape)
                 .background(Color(argb)),
         )
@@ -746,7 +834,7 @@ private fun SceneDotButton(
 ) {
     Box(
         modifier = Modifier
-            .size(56.dp)
+            .size(SceneDotTouch) // SH2：场景钮触达命中区 = 环底衬直径（56dp ≥48 触达）
             .clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
@@ -757,22 +845,19 @@ private fun SceneDotButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 外环底衬（先画，被填充圆盖住中心、露外圈环）：选中 primary 2dp / 未选 outline 2dp（同 2dp 环宽，
-        // 档位差异只在颜色——C1 方案② outline 2dp 外环兜底；选中环 primary 不变）
+        // 外环底衬（先画，被填充圆盖住中心、露外圈环）：尺寸/色档走 SH2——底衬 SceneDotTouch 56 =
+        // 填充圆 SceneFillSize 52 + 2×SwatchRing 2dp；色档 swatchRingColor(isSelected) = 选中 primary /
+        // 未选 outline（C1 方案② outline 2dp 外环兜底；填充数据灰阶保留，见 [SceneDotFill] 注释）
         Box(
             modifier = Modifier
-                .size(56.dp)
+                .size(SceneDotTouch)
                 .background(
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.outline
-                    },
+                    color = swatchRingColor(isSelected),
                     shape = CircleShape,
                 ),
         )
-        // 52dp 填充圆（统一 = 左右半灰分半）
-        SceneDotFill(slotId = slotId, modifier = Modifier.size(52.dp))
+        // 52dp（SceneFillSize）填充圆（统一 = 左右半灰分半）
+        SceneDotFill(slotId = slotId, modifier = Modifier.size(SceneFillSize))
     }
 }
 
@@ -988,7 +1073,11 @@ private fun MaskRow(
         Text(
             text = "遮罩",
             style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.width(48.dp),
+            // S2（md3-audit-2 P2）：固定文本列 48dp → widthIn(min=48.dp)——min 保底使默认 1x 几何与固定列一致；
+            // fontScale 超高（2x CJK）列随内容放宽不截断；maxLines=1+ellipsis 兜窄屏不折行不错位
+            modifier = Modifier.widthIn(min = 48.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         Slider(
             value = maskAlpha.toFloat(),
@@ -1001,8 +1090,10 @@ private fun MaskRow(
             text = "$maskAlpha%",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(44.dp),
+            // S2：% 列同改 widthIn(min=44.dp)（默认几何不变；2x「80%」需 ~54dp 全显示）+ ellipsis 兜窄屏
+            modifier = Modifier.widthIn(min = 44.dp),
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -1031,7 +1122,11 @@ private fun ContainerTransparencyRow(
             Text(
                 text = "容器透明度",
                 style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.width(96.dp),
+                // S2（md3-audit-2 P2）：固定文本列 96dp → widthIn(min=96.dp)——5 字 ×2x labelLarge ≈140dp，
+                // 固定 96dp 原会折行错位；min 保底默认 1x 几何不变、超高列随内容放宽全显示，单行不折行
+                modifier = Modifier.widthIn(min = 96.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Slider(
                 value = transparency.toFloat(),
@@ -1045,8 +1140,10 @@ private fun ContainerTransparencyRow(
                 text = "$transparency%",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.width(44.dp),
+                // S2：% 列同改 widthIn(min=44.dp)（默认几何不变）+ ellipsis 兜窄屏
+                modifier = Modifier.widthIn(min = 44.dp),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         // v0.5.12 md3-audit-2 C4（v0.5.13 改固定留白位）：风险提示行——滑杆行下方常驻固定高度留白区

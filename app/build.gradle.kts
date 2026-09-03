@@ -53,6 +53,14 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    // v0.5.13 md3-audit-2 K4/T2/N1：Material Icons——字形当图标（☰/×/›）换矢量 Icons + 抽屉 4 项图标
+    // （Menu/Close/KeyboardArrowRight/History/Palette/Settings/Info）。无版本号 → 由上方 composeBom
+    // platform 约束（BOM 2026.08.00 映射 material-icons-extended 1.7.8，同 ui/material3 走 BOM 风格，
+    // 不写入 libs.versions.toml——避免与并行组冲突）。
+    implementation("androidx.compose.material:material-icons-extended")
+    // v0.5.14 合并编译修复：Menu 基础图标（☰）在 material-icons-core（extended 1.7.8 只含 MenuBook/
+    // MenuOpen，无 Menu）；同走上方 composeBom platform 约束（BOM 2026.08.00 → core 1.7.8），无版本号。
+    implementation("androidx.compose.material:material-icons-core")
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.core.ktx)

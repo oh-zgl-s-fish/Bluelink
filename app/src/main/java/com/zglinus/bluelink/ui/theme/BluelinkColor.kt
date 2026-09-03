@@ -189,12 +189,19 @@ private fun deriveAccentPrimaryLight(accent: Color): AccentPrimaryRoles = Accent
     onPrimaryContainer = clampLuminance(accent, minLum = 0f, maxLum = 0.12f),
 )
 
-/** 深色 primary 系派生（primary 亮度 ≥0.5 提亮；onPrimary 压深、container 压深、container 字提亮）。 */
+/**
+ * 深色 primary 系派生（primary 亮度 ≥0.5 提亮；onPrimary 压深、container 压深、container 字提亮）。
+ * audit md3-audit-2 C5（P2）：收紧暗主题 container 两档钳制——primaryContainer maxLum 0.16 → 0.14、
+ * onPrimaryContainer minLum 0.6 → 0.66，目标对比度 ≥4.5:1（「已连接」状态徽标
+ * primaryContainer/onPrimaryContainer 为 labelSmall 消费点）：中亮强调色（lum≈0.6）边缘档由
+ * ~3.39:1 提至 ~4.8:1（container 0.142→0.107、container 字 0.6→0.7），留 ≥4.5:1 余量。
+ * 仅收紧暗主题两档；亮主题派生 [deriveAccentPrimaryLight] 不变。
+ */
 private fun deriveAccentPrimaryDark(accent: Color): AccentPrimaryRoles = AccentPrimaryRoles(
     primary = clampLuminance(accent, minLum = 0.5f, maxLum = 1f),
     onPrimary = clampLuminance(accent, minLum = 0f, maxLum = 0.05f),
-    primaryContainer = clampLuminance(accent, minLum = 0f, maxLum = 0.16f),
-    onPrimaryContainer = clampLuminance(accent, minLum = 0.6f, maxLum = 1f),
+    primaryContainer = clampLuminance(accent, minLum = 0f, maxLum = 0.14f),
+    onPrimaryContainer = clampLuminance(accent, minLum = 0.66f, maxLum = 1f),
 )
 
 /** 向黑/白 25% 步进混合，把亮度收进 [minLum, maxLum]（上限 16 步收敛；色相近似保留，无精确色调表）。 */

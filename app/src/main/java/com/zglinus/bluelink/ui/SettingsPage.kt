@@ -278,10 +278,23 @@ fun SettingsPage(
                 onValueChange = { ssidInput = it.take(32) },
                 label = { Text("热点名称 (SSID)") },
                 singleLine = true,
+                // v0.5.13 md3-audit-2 FI1：SSID supportingText 实时 inline 长度校验红字（与下方密码字段一致——
+                // trim 后 1–32 越界（空/纯空白）→ error 红字 + 已给恢复范围；输入恢复合法即自动还原常规提示）
                 supportingText = {
+                    val ssid = ssidInput.trim()
+                    val ssidInvalid = ssid.isEmpty() || ssid.length > 32
                     Text(
-                        text = "1–32 字符；默认建议：${HotspotPresetStore.defaultSsid(alias)}",
+                        text = if (ssidInvalid) {
+                            "SSID 需 1–32 个字符"
+                        } else {
+                            "1–32 字符；默认建议：${HotspotPresetStore.defaultSsid(alias)}"
+                        },
                         style = MaterialTheme.typography.bodySmall,
+                        color = if (ssidInvalid) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 },
                 modifier = Modifier.fillMaxWidth(),

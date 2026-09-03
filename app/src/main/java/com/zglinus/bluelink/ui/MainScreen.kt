@@ -39,7 +39,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -49,6 +48,18 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+// v0.5.13 md3-audit-2 K4/T2/N1：Material Icons（依赖 androidx.compose.material:material-icons-extended，走 composeBom）——
+// 字形当图标（☰/×/›）换矢量 Icons；抽屉 4 项图标（History/Palette/Settings/Info）
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
+// v0.5.14：☰ Menu 非 automirrored 图标——automirrored/filled 在 core 1.7.8 仅含
+// ArrowBack/ArrowForward/ExitToApp/KeyboardArrow{L,R}/List/Send，Menu 基础图标在 filled（material-icons-core）
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,6 +67,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -91,10 +103,13 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -310,7 +325,9 @@ fun MainScreen(
                     writeLogTextToTree(wallpaperCtx, uri, text)
                 }
                 logExporting = false
-                Toast.makeText(wallpaperCtx, msg, Toast.LENGTH_LONG).show()
+                // v0.5.13 md3-audit-2 F2：导出完成 Toast → ui.showSnack（统一 Snackbar 反馈通道；本回调在
+                // MainScreen 顶层 scope，snackbarHost 同层可及——消费见 LaunchedEffect(ui.snackbarMsg)）
+                ui.showSnack(msg)
             }
         }
     }
@@ -343,7 +360,8 @@ fun MainScreen(
                         writeLogTextToTree(wallpaperCtx, tree, text)
                     }
                     logExporting = false
-                    Toast.makeText(wallpaperCtx, msg, Toast.LENGTH_LONG).show()
+                    // v0.5.13 md3-audit-2 F2：导出完成 Toast → ui.showSnack（同 logDirLauncher 回调，统一 Snackbar）
+                    ui.showSnack(msg)
                 }
             }
         }
@@ -418,51 +436,61 @@ fun MainScreen(
                 // 抽屉路由（v0.5.6 UI1b-A 4 栏重排；取值 BluelinkUiState.PAGE_*，勿写数字）：
                 // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（v0.5.7 UI1b-B 真页）
                 // PAGE_SETTINGS=设置（v0.5.9 UI1b-C 五区真页，ui/SettingsPage.kt） PAGE_ABOUT=关于（v0.5.10 重做：应用名/版本/外链行/隐藏收集日志/致谢）
-                when (ui.currentPage) {
-                    BluelinkUiState.PAGE_HOME -> MainPage(
-                        ui = ui,
-                        containerAlpha = containerAlpha,
-                        onDeviceClick = onDeviceClick,
-                        onRefreshNetwork = onRefreshNetwork,
-                        onRequestPermissions = onRequestPermissions,
-                        onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
-                        onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
-                    )
+                // v0.5.13 md3-audit-2 M3：页身份切换套 Crossfade（fade 150–200ms → MotionTokens.crossfadeSpec
+                // 的 200ms 档；减动效（ui.reduceMotion）→ tween(0) 直切——与主页两态面板同档复用，不再硬编码字面量）。
+                // 跨页状态均在 MainScreen 层持有（aboutLogUnlocked/logCollecting 等收集状态机、personalDirty），
+                // 页面切走/切回不丢（v0.5.12 F4/FI2 上提，见上）；Crossfade 过渡期间旧页短暂保留属正常。
+                Crossfade(
+                    targetState = ui.currentPage,
+                    animationSpec = MotionTokens.crossfadeSpec(ui.reduceMotion),
+                    label = "pageRoute",
+                ) { page ->
+                    when (page) {
+                        BluelinkUiState.PAGE_HOME -> MainPage(
+                            ui = ui,
+                            containerAlpha = containerAlpha,
+                            onDeviceClick = onDeviceClick,
+                            onRefreshNetwork = onRefreshNetwork,
+                            onRequestPermissions = onRequestPermissions,
+                            onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
+                            onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
+                        )
 
-                    BluelinkUiState.PAGE_LOG -> LogPage(ui)
-                    // v0.5.8 UI1b-B2：个性化页整页重做（无滚动一屏 + 右上保存）；保存回调上抛主题强调色
-                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(
-                        ui = ui,
-                        onSaved = onAccentSaved,
-                        // v0.5.12 md3-audit-2 FI2：草稿 dirty 上报（离开页面前提示未保存改动用）
-                        onDirtyChange = { personalDirty = it },
-                    )
-                    // v0.5.9 UI1b-C：设置页五区真页（ui/SettingsPage.kt：安全/热点/传输/外观/权限检测 + 深浅三态）
-                    BluelinkUiState.PAGE_SETTINGS -> SettingsPage(
-                        ui = ui,
-                        engine = engine,
-                        themeMode = themeMode,
-                        onThemeModeChange = onThemeModeChange,
-                    )
-                    // v0.5.10：关于页重做（新布局 + 隐藏收集日志两段式，见下方 AboutPage）
-                    // v0.5.12 md3-audit-2 F4：收集状态/导出状态机在 MainScreen（跨路由不丢 + 导出 busy）
-                    BluelinkUiState.PAGE_ABOUT -> AboutPage(
-                        ui = ui,
-                        logUnlocked = aboutLogUnlocked,
-                        onLogUnlocked = { aboutLogUnlocked = true },
-                        collecting = logCollecting,
-                        exporting = logExporting,
-                        onCollectRowClick = { onLogCollectClick() },
-                    )
-                    else -> MainPage(
-                        ui = ui,
-                        containerAlpha = containerAlpha,
-                        onDeviceClick = onDeviceClick,
-                        onRefreshNetwork = onRefreshNetwork,
-                        onRequestPermissions = onRequestPermissions,
-                        onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
-                        onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
-                    )
+                        BluelinkUiState.PAGE_LOG -> LogPage(ui)
+                        // v0.5.8 UI1b-B2：个性化页整页重做（无滚动一屏 + 右上保存）；保存回调上抛主题强调色
+                        BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(
+                            ui = ui,
+                            onSaved = onAccentSaved,
+                            // v0.5.12 md3-audit-2 FI2：草稿 dirty 上报（离开页面前提示未保存改动用）
+                            onDirtyChange = { personalDirty = it },
+                        )
+                        // v0.5.9 UI1b-C：设置页五区真页（ui/SettingsPage.kt：安全/热点/传输/外观/权限检测 + 深浅三态）
+                        BluelinkUiState.PAGE_SETTINGS -> SettingsPage(
+                            ui = ui,
+                            engine = engine,
+                            themeMode = themeMode,
+                            onThemeModeChange = onThemeModeChange,
+                        )
+                        // v0.5.10：关于页重做（新布局 + 隐藏收集日志两段式，见下方 AboutPage）
+                        // v0.5.12 md3-audit-2 F4：收集状态/导出状态机在 MainScreen（跨路由不丢 + 导出 busy）
+                        BluelinkUiState.PAGE_ABOUT -> AboutPage(
+                            ui = ui,
+                            logUnlocked = aboutLogUnlocked,
+                            onLogUnlocked = { aboutLogUnlocked = true },
+                            collecting = logCollecting,
+                            exporting = logExporting,
+                            onCollectRowClick = { onLogCollectClick() },
+                        )
+                        else -> MainPage(
+                            ui = ui,
+                            containerAlpha = containerAlpha,
+                            onDeviceClick = onDeviceClick,
+                            onRefreshNetwork = onRefreshNetwork,
+                            onRequestPermissions = onRequestPermissions,
+                            onSendFileClick = { sendFileLauncher.launch(arrayOf("*/*")) },
+                            onChooseReceiveDir = { receiveDirLauncher.launch(initialReceiveDirUri()) },
+                        )
+                    }
                 }
             }
         }
@@ -526,11 +554,13 @@ private fun MainTopBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // v0.5.6d：☰ 放 Row 最左 = 顶栏左上（v0.5.6 UI1b-A 曾位移到右侧组最末=右上 → 回左上）；
-                // 字形 + contentDescription 保持具名（audit A1/K3）
+                // v0.5.13 md3-audit-2 K4/T2：字形 ☰ → Material 图标 Menu
+                // v0.5.14：Icons.Filled.Menu（core；无 automirrored 变体）——字形跨字体/读屏拼读不稳定；
+                // icon-only 控件 contentDescription「打开菜单」保留具名（audit A1/K3）
                 IconButton(onClick = onMenuClick) {
-                    Text(
-                        text = "☰",
-                        modifier = Modifier.semantics { contentDescription = "打开菜单" },
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = "打开菜单",
                     )
                 }
                 // v0.5.6d：☰ 其后接标题「蓝鲸·X」（左 ☰ + 标题；语义色 primary 保持）
@@ -745,6 +775,9 @@ private fun BroadcastBreathButton(
                 // v0.5.12 md3-audit-2 A3：开关名称补位（此前只有 role=Switch + stateDescription，读屏孤立
                 // 节点无名；旁边「广播/停止」状态字为独立文本节点未绑定——名称 =「广播」）
                 contentDescription = "广播"
+                // v0.5.14：checked 语义行已删——androidx.compose.ui.semantics.checked 符号在当前 compose-bom
+                // 下 unresolved（合并编译 778:17）；K2 双态位目标已由 role=Switch + contentDescription「广播」+
+                // stateDescription「广播开启/广播停止」覆盖（名称/状态描述齐备；保留 clickable 点按语义不变）
                 // audit A2/P2-2：状态描述保持原 Switch 语义（读屏「广播开启/广播停止」）
                 stateDescription = if (advertisingWanted) "广播开启" else "广播停止"
             },
@@ -856,10 +889,14 @@ private fun MainPage(
         TimeFlowPanel(
             ui = ui,
             // v0.5.1a-1：时间流占屏高 ~45%（原固定 160dp）；上半屏为顶部两栏 + 底部动作行，页面不额外滚动
+            // v0.5.13 md3-audit-2 AD1：加 260dp 高度封顶（timeFlowFill）——矮屏/横屏/大字号下防时间流
+            // 挤爆上半屏主任务区（两栏/底部动作行被压没）；实机定稿档（0.45×可用高 ≤260dp）观感不变，
+            // 仅当 45% 超出 260dp 时才收窄。不直接拼 fillMaxHeight+heightIn：fill 会把内层约束钉成精确高度，
+            // 外层 heightIn 无法再收窄（见 TimeFlowPanel 下方 timeFlowFill 注释）。
             containerAlpha = containerAlpha,
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.45f),
+                .timeFlowFill(),
         )
     }
 }
@@ -1101,10 +1138,12 @@ private fun DeviceRow(entry: DeviceEntry, onClick: () -> Unit, onRemove: () -> U
         },
         trailingContent = {
             // 图标删除（audit K2/A1）：× TextButton → IconButton + contentDescription
+            // v0.5.13 md3-audit-2 K4/T2：字形 × → Material 图标 Icons.Filled.Close（字形跨字体/读屏拼读
+            // 「乘号」不稳定）；icon-only 控件 contentDescription「移除设备」保留具名
             IconButton(onClick = onRemove) {
-                Text(
-                    text = "×",
-                    modifier = Modifier.semantics { contentDescription = "移除设备" },
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "移除设备",
                 )
             }
         },
@@ -1404,6 +1443,8 @@ private fun BottomActionRow(
             }
         }
         ui.transferState?.let { state ->
+            // v0.5.13 md3-audit-2 A8：传输状态行 liveRegion（发送/接收/完成/取消等阶段切换时 TalkBack
+            // 主动播报，不依赖读屏焦点恰好停在行上）
             Text(
                 text = state,
                 style = MaterialTheme.typography.bodySmall,
@@ -1414,6 +1455,7 @@ private fun BottomActionRow(
                 },
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
         // v0.4.5 接收保存位置（SAF OpenDocumentTree 目录，不自建文件浏览器）
@@ -1434,6 +1476,28 @@ private fun BottomActionRow(
         }
     }
     }
+}
+
+/** v0.5.13 md3-audit-2 AD1：时间流面板高度上限（矮屏/横屏保护；实机定稿档 0.45×可用高 ≤260dp 不受影响）。 */
+private val TimeFlowMaxHeight: Dp = 260.dp
+
+/**
+ * v0.5.13 md3-audit-2 AD1：时间流高度 = 可用高 ×0.45（原 fillMaxHeight(0.45f) 语义）但 ≤ [TimeFlowMaxHeight]（260dp）。
+ *
+ * 为什么不用 `fillMaxHeight(0.45f).heightIn(max=…)` 链：fillMaxHeight 的 fraction 布局会把内层约束强制为
+ * 精确高度（min=max=0.45×maxH），heightIn 在其内层拿到的已是钉死的高度、无法再收窄（SizeIn 非 required 语义
+ * 下子内容 fillMaxSize 仍会取到内层上限）——即字面上追加 heightIn 是空操作。这里改在单个 layout 内对「原始
+ * 可用高」取 45% 后直接封顶 260dp，并把面板钉在最终高度上：矮屏（0.45×maxH ≤ 260dp）行为与原 fillMaxHeight
+ * 完全一致，仅当 45% 超 260dp 才收窄 → 不推翻实机定稿观感。
+ */
+private fun Modifier.timeFlowFill(): Modifier = layout { measurable, constraints ->
+    val cap = TimeFlowMaxHeight.roundToPx()
+    val h = Math.round(constraints.maxHeight * 0.45f)
+        .coerceIn(constraints.minHeight, cap)
+    val placeable = measurable.measure(
+        constraints.copy(minHeight = h, maxHeight = h),
+    )
+    layout(placeable.width, h) { placeable.place(0, 0) }
 }
 
 /** 时间流面板（主页面最下，v0.5.4b surfaceContainerLow 列表容器分层）：标题 + 条数 + [TimeFlowList]。 */
@@ -1691,7 +1755,19 @@ private fun AboutPage(
         AboutLinkRow(
             title = "版本",
             onClick = { onVersionTap() },
-            trailing = BuildConfig.VERSION_NAME,
+            // v0.5.13 md3-audit-2 AP2/A10：版本行 = 隐藏开发者入口（刻意隐藏，不宣示，本注释即记录）：
+            // ① 五连击解锁（2s 窗口内连点 5 次，onVersionTap；TalkBack 用户每次激活间隔难 <2s，几乎不可达）；
+            // ② 长按解锁（combinedClickable onLongClick → onLogUnlocked，与连击并存）——长按对读屏可达
+            // （TalkBack 双指长按 / 可访问性「长按」动作），作无障碍替代入口；解锁内容仅「收集日志」开发者卡片，风险低
+            onLongPress = { onLogUnlocked() },
+            // v0.5.13 md3-audit-2 K4/T2：版本号仍为文本内容（trailing 槽位）；右箭头图标只给可跳转外链行
+            trailing = {
+                Text(
+                    text = BuildConfig.VERSION_NAME,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
         )
         // v0.5.10c 条件间距（版本号行 ↔ 链接 Surface）：正常态 SpaceXs 分组留白；解锁态去掉额外 Spacer（仅
         // 容器常规 spacedBy）→ 链接 Surface 与其正下方「收集日志」卡片整体上移、按钮进入首屏明显可见。
@@ -1740,7 +1816,15 @@ private fun AboutPage(
                         .fillMaxWidth()
                         .clip(MaterialTheme.shapes.large)
                         // v0.5.12 md3-audit-2 F4：导出中 busy——收集行禁点（IO/SAF 选目录期间防重入）
-                        .clickable(enabled = !exporting, onClick = onCollectRowClick)
+                        .clickable(
+                            enabled = !exporting,
+                            // v0.5.13 md3-audit-2 A6：可点行补 role=Role.Button（读屏按「按钮」播报；行内两行状态文字合并为按钮标签）
+                            role = Role.Button,
+                            onClick = onCollectRowClick,
+                        )
+                        // v0.5.13 md3-audit-2 A8：两段式收集状态 liveRegion——开始/收集中/导出中/完成状态文案与颜色切换
+                        // 时 TalkBack 主动播报（Polite；接在 clickable 之后，liveRegion 随 clickable 合并节点上报）
+                        .semantics { liveRegion = LiveRegionMode.Polite }
                         .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
                     verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
                 ) {
@@ -1797,11 +1881,12 @@ private fun AboutPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 // 王宝煲：应用图标表情包来源（可链 Bilibili 空间）——Contributors 组（图标来源 🫶）
+                // v0.5.13 md3-audit-2 A6：可点行补 role=Role.Button；K4/T2：右侧字形 › → 右箭头 Material 图标
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(MaterialTheme.shapes.large)
-                        .clickable { openExternalUrl(context, ABOUT_WANGBAOBAO_URL) }
+                        .clickable(onClick = { openExternalUrl(context, ABOUT_WANGBAOBAO_URL) }, role = Role.Button)
                         .padding(vertical = SpacingTokens.SpaceXs),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1811,31 +1896,45 @@ private fun AboutPage(
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.weight(1f),
                     )
-                    Text(
-                        text = "›",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    RowChevronIcon()
                 }
             }
         }
     }
 }
 
-/** 关于页行式条目（列表行样式，同设置页分组行；整行可点 + 点击水波纹；subtitle 小字；trailing 右侧字形，null=隐藏）。 */
+/** 关于页行式条目（列表行样式，同设置页分组行；整行可点 + 点击水波纹；subtitle 小字；trailing 右侧槽位）。
+ * v0.5.13 md3-audit-2 改动：K4/T2 trailing 由字形字符串（›）改 composable 槽位（默认渲染右箭头 Material 图标——
+ * 字形跨字体/读屏拼读「大于号」不稳定）；A6 clickable 补 role=Role.Button（读屏播「按钮」）；AP2/A10 可选
+ * onLongPress（版本号行替代解锁入口用，见 AboutPage 调用处；combinedClickable 暴露读屏「长按」动作）。 */
+@OptIn(ExperimentalFoundationApi::class) // combinedClickable（onLongPress 分支；DeviceRow 同款 OptIn）
 @Composable
 private fun AboutLinkRow(
     title: String,
     onClick: () -> Unit,
     subtitle: String? = null,
-    trailing: String? = "›",
-    trailingColor: Color = Color.Unspecified,
+    // v0.5.13 md3-audit-2 K4/T2：trailing 槽位——null（默认）= 渲染右箭头 chevron（[RowChevronIcon]，外链行惯例）；
+    // 调用方可传任意 composable 覆写（版本行传版本号 Text，无箭头）
+    trailing: (@Composable () -> Unit)? = null,
+    // v0.5.13 md3-audit-2 AP2/A10：版本号行替代解锁——长按同样触发解锁（与五连击并存）；其余行不传
+    onLongPress: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.large)
-            .clickable(onClick = onClick)
+            // v0.5.13 md3-audit-2 A6：可点行补 role=Role.Button（读屏按「按钮」播报而非裸可点）
+            .let { base ->
+                if (onLongPress != null) {
+                    base.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = onLongPress,
+                        role = Role.Button,
+                    )
+                } else {
+                    base.clickable(onClick = onClick, role = Role.Button)
+                }
+            }
             .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1852,20 +1951,28 @@ private fun AboutLinkRow(
             }
         }
         if (trailing != null) {
-            Text(
-                text = trailing,
-                style = MaterialTheme.typography.titleMedium,
-                color = if (trailingColor == Color.Unspecified) {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                } else {
-                    trailingColor
-                },
-            )
+            trailing()
+        } else {
+            RowChevronIcon()
         }
     }
 }
 
-/** 打开外链（ACTION_VIEW；失败 Toast 提示，不崩溃）。 */
+/** v0.5.13 md3-audit-2 K4/T2：可点行右侧装饰 chevron（Icons.AutoMirrored.Filled.KeyboardArrowRight，extended）。
+ * 装饰性图标不读屏（contentDescription=null）：行内 title/文字即整行名称（A6 role=Button 合并语义），不重复播报。 */
+@Composable
+private fun RowChevronIcon() {
+    Icon(
+        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** 打开外链（ACTION_VIEW；失败 Toast 提示，不崩溃）。
+ * v0.5.13 md3-audit-2 F2：外链打开失败**保留 Toast**——系统 Activity 跳转失败属工具性例外（非页面内反馈流，
+ * Snackbar 上下文不连续：跳转尝试发生于点击即时的系统层，失败回传无页面内状态可挂靠），注释注明例外保留；
+ * 收集日志导出完成已改 ui.showSnack（见 MainScreen 顶层回调）。 */
 private fun openExternalUrl(context: Context, url: String) {
     try {
         context.startActivity(
@@ -1971,15 +2078,23 @@ private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
             )
         }
         HorizontalDivider()
+        // v0.5.13 md3-audit-2 N1：抽屉 4 项配 Material 图标（History/Palette/Settings/Info，extended）——
+        // 扫读更快（icon+label 双通道）；图标装饰（label 文字即名称，contentDescription=null 不重复读屏）
         val entries = listOf(
-            BluelinkUiState.PAGE_LOG to "文件传输记录",
-            BluelinkUiState.PAGE_PERSONAL to "个性化",
-            BluelinkUiState.PAGE_SETTINGS to "设置",
-            BluelinkUiState.PAGE_ABOUT to "关于",
+            Triple(BluelinkUiState.PAGE_LOG, "文件传输记录", Icons.Filled.History),
+            Triple(BluelinkUiState.PAGE_PERSONAL, "个性化", Icons.Filled.Palette),
+            Triple(BluelinkUiState.PAGE_SETTINGS, "设置", Icons.Filled.Settings),
+            Triple(BluelinkUiState.PAGE_ABOUT, "关于", Icons.Filled.Info),
         )
-        entries.forEach { (page, label) ->
+        entries.forEach { (page, label, icon) ->
             NavigationDrawerItem(
                 label = { Text(label) },
+                icon = {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null, // 装饰性图标（抽屉行 label 即名称）
+                    )
+                },
                 selected = ui.currentPage == page,
                 onClick = { onNavigate(page) },
                 modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
@@ -2009,12 +2124,15 @@ private fun PermissionBanner(
                 .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceSm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusDot(color = MaterialTheme.colorScheme.error)
+            // v0.5.13 md3-audit-2 C6：缺权限 = 「待动作/阻塞可恢复」而非「已出错」——error 语义日常化会稀释
+            // 真实错误识别 → 点/文字改 secondary（图标双通道保留：StatusDot 点 + 文字同色，非色 alone 表状态）；
+            // 「去授权」按钮保留（可恢复动作入口）
+            StatusDot(color = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(SpacingTokens.SpaceSm))
             Text(
                 text = "需要权限: 蓝牙 + 位置",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
+                color = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.weight(1f),
             )
             TextButton(onClick = onRequestPermissions) { Text("去授权") }
@@ -2247,10 +2365,15 @@ fun DeviceDetailSheet(
             }
 
             Spacer(Modifier.height(SpacingTokens.SpaceSm))
-            Button(
-                onClick = onDismiss,
+            // v0.5.13 md3-audit-2 K3：关闭 = 低风险 dismiss 动作——原全宽 filled Button 与区内主操作
+            // （同网免热点直连/组建临时局域网 filled）同视区双 filled 抢层级 → 降级 TextButton 右对齐；
+            // filled 只留主操作
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("关闭") }
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
         }
     }
 
@@ -2609,13 +2732,16 @@ private fun NetPairingDialog(engine: BluelinkEngine) {
     )
 }
 
-/** 状态短语一行（v0.5.4a）：进行中=onSurface；错误态=error 色文案。 */
+/** 状态短语一行（v0.5.4a）：进行中=onSurface；错误态=error 色文案。
+ * v0.5.13 md3-audit-2 A8：liveRegion——配网弹窗阶段短语（正在握手/PIN/开热点/等待接入/传输就绪/错误）
+ * 切换时 TalkBack 主动播报，不依赖读屏焦点恰好停在弹窗上。 */
 @Composable
 private fun StatusPhrase(text: String, error: Boolean = false) {
     Text(
         text = text,
         style = MaterialTheme.typography.bodyMedium,
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
     )
 }
 

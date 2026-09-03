@@ -5,8 +5,10 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
@@ -49,7 +51,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -89,7 +90,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -97,11 +97,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.documentfile.provider.DocumentFile
+import com.zglinus.bluelink.BuildConfig
 import com.zglinus.bluelink.ble.HandshakeMessage
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.LanStatus
@@ -113,9 +114,10 @@ import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
 import com.zglinus.bluelink.ui.theme.THEME_MODE_SYSTEM
 import com.zglinus.bluelink.ui.theme.extended
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.File
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -127,7 +129,7 @@ import java.util.Locale
  * （文件传输记录/个性化/设置/关于，PAGE_* 常量路由）；个性化页于 v0.5.7 UI1b-B 实现真页
  * （三壁纸槽/遮罩/取色/预览 + 主页面背景应用，见 ui/personalize/PersonalizePage.kt 与 WallpaperBackdrop.kt）；
  * v0.5.9 UI1b-C 设置页五区真页 + 关于页扩展：设置（安全/热点/传输/外观/权限检测，见 ui/SettingsPage.kt）
- * 与个性化已实现；关于页扩展为「基础信息 + 开发者区」（信令/LocalOnly 自测与诊断入口自旧设置页迁入，
+ * 与个性化已实现；关于页 v0.5.10 重做（新布局 + 隐藏收集日志两段式；旧「开发者」区自测/诊断入口删除，
  * 见下方 AboutPage）；深浅三态（themeMode）经 MainScreen 参数传入设置页外观区，全局联动见
  * MainActivity/BluelinkTheme（effectiveDark 判定源 Provide）。主页面仍为默认页（不列抽屉项）。
  * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
@@ -159,11 +161,12 @@ import java.util.Locale
  *   强调色（accent）保存后经 MainActivity 主题 state → BluelinkTheme(accent) 运行态重算
  *   （个性化页新交互见 ui/personalize/PersonalizePage.kt）。
  * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 配对验证/热点预设/接收目录/深浅三态/
- *   权限检测入设置页（ui/SettingsPage.kt）；信令自测/LocalOnly 自测/诊断入口入关于页开发者区（v0.5.9 UI1b-C）；
- *   发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
+ *   权限检测入设置页（ui/SettingsPage.kt）；信令自测/LocalOnly 自测/诊断入口曾入关于页开发者区（v0.5.9 UI1b-C，
+ *   v0.5.10 随关于页重做整块删除）；发送/接收 SAF launcher、组网/发送确认等弹层与设备详情弹层原样保留。
  *
  * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页，v0.5.9 随设置页重构迁入关于页；
- * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
+ * sdk 33+ 密码登记框（[LoTestPwdDialog]）曾于 MainScreen 顶层渲染——v0.5.10 随开发者区删除；
+ * ③ LocalOnly 主路径登记框（[LocalOnlyPwdDialog]）保留（组网真路径，与自测无关）。
  */
 
 /** v0.5.8 UI1b-B2：HOME 主页面内容容器/顶栏浮层化 alpha（规格 0.80，壁纸更透出；文字可读由遮罩+半透明层承担）。 */
@@ -220,6 +223,9 @@ fun MainScreen(
         ui.snackbarMsg = null
         snackbarHostState.showSnackbar(msg)
     }
+
+    // v0.5.10 关于页：隐藏热区解锁态上提 MainScreen——AboutPage 随路由切页离开组合，解锁需本会话内保持
+    var aboutLogUnlocked by remember { mutableStateOf(false) }
 
     // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）
     val sendFileLauncher = rememberLauncherForActivityResult(
@@ -302,7 +308,7 @@ fun MainScreen(
             ) {
                 // 抽屉路由（v0.5.6 UI1b-A 4 栏重排；取值 BluelinkUiState.PAGE_*，勿写数字）：
                 // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（v0.5.7 UI1b-B 真页）
-                // PAGE_SETTINGS=设置（v0.5.9 UI1b-C 五区真页，ui/SettingsPage.kt） PAGE_ABOUT=关于（v0.5.9 扩展：基础信息+开发者区）
+                // PAGE_SETTINGS=设置（v0.5.9 UI1b-C 五区真页，ui/SettingsPage.kt） PAGE_ABOUT=关于（v0.5.10 重做：应用名/版本/外链行/隐藏收集日志/致谢）
                 when (ui.currentPage) {
                     BluelinkUiState.PAGE_HOME -> MainPage(
                         ui = ui,
@@ -323,8 +329,13 @@ fun MainScreen(
                         themeMode = themeMode,
                         onThemeModeChange = onThemeModeChange,
                     )
-                    // v0.5.9 UI1b-C：关于页扩展（基础信息 + 开发者区：自测三块迁自旧设置页）
-                    BluelinkUiState.PAGE_ABOUT -> AboutPage(ui, engine)
+                    // v0.5.10：关于页重做（新布局 + 隐藏收集日志两段式，见下方 AboutPage）
+                    BluelinkUiState.PAGE_ABOUT -> AboutPage(
+                        ui = ui,
+                        engine = engine,
+                        logUnlocked = aboutLogUnlocked,
+                        onLogUnlocked = { aboutLogUnlocked = true },
+                    )
                     else -> MainPage(
                         ui = ui,
                         onDeviceClick = onDeviceClick,
@@ -339,30 +350,8 @@ fun MainScreen(
     }
     } // ← 关闭根背景 Box（WallpaperBackdrop 层，v0.5.7 UI1b-B；包住 ModalNavigationDrawer）
 
-    // 诊断日志弹窗：打开时自动加载一次 dump
-    LaunchedEffect(ui.diagVisible) {
-        if (ui.diagVisible) ui.diagnosticText = DiagLogger.dump()
-    }
-
-    if (ui.diagVisible) {
-        DiagnosticLogDialog(
-            text = ui.diagnosticText,
-            onDismiss = { ui.diagVisible = false },
-            onRefresh = { ui.diagnosticText = DiagLogger.dump() },
-            onClear = {
-                DiagLogger.clear()
-                ui.diagnosticText = DiagLogger.dump()
-            },
-            // F3/P2-4：复制/导出结果 → Snackbar（替换原 Toast）
-            onNotify = { ui.showSnack(it) },
-        )
-    }
-
-    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（入口在关于页开发者区（v0.5.9 随设置页重构迁入）；登记框仍在顶层渲染，
-    // 经 BluelinkEngine.current() 取引擎，与设备详情弹层无关）
-    engine?.let {
-        if (ui.loTestPwdDialog) LoTestPwdDialog(it)
-    }
+    // v0.5.10：原「打开诊断日志」弹层（DiagnosticLogDialog）与 LocalOnly 自测密码登记框（LoTestPwdDialog）
+    // 入口随旧 About「开发者」区一并删除（engine 侧自测/诊断方法保留，不面向 UI）。
 
     // T3 LocalSend：发送确认框（SAF 选文件后展示文件名/大小/目标；确认后后台发送）
     engine?.let {
@@ -1439,79 +1428,222 @@ private fun LogPage(ui: BluelinkUiState) {
 // 设置页（抽屉 3 / PAGE_SETTINGS）自 v0.5.9 UI1b-C 起移至 ui/SettingsPage.kt 实现：
 // 五区（安全 / 热点 / 传输 / 外观 / 权限检测）分组容器 + 深浅三态联动（themeMode 经 MainScreen 参数传入）；
 // 旧页 PIN 配对验证区能力并入新页安全区（PinStore 直驱：模式三态/已配对列表/重置指纹/清空配对），
-// 信令自测 / LocalOnly 自测 / 诊断三块迁入关于页「开发者」区（见下方 AboutPage）。
+// 信令自测 / LocalOnly 自测 / 诊断三块曾迁入关于页「开发者」区（v0.5.9 UI1b-C；v0.5.10 整块删除，见下方 AboutPage）。
 
 // 个性化页（抽屉 2 / PAGE_PERSONAL）自 v0.5.7 UI1b-B 起移至 ui/personalize/PersonalizePage.kt 实现：
 // 三壁纸槽（统一/深色/浅色）+ 遮罩滑块（0–80%）+ 取色区（API27+ 从壁纸取色 + 8 色板 + 选中色 chip）+
 // 预览块（按当前模式取槽渲染：壁纸+遮罩）；路由见 MainScreen 上方 when(ui.currentPage) 分支（本文件不再保留实现）。
 
-// v0.5.6 UI1b-A 关于页版本号：buildConfig 未开启（app/build.gradle.kts buildFeatures 无 buildConfig=true），
-// BuildConfig.VERSION_NAME 不可引 → 以常量同步 versionName（0.1.0）；升级 versionName 时一并更新
-//（或后续开启 buildConfig 后改引 BuildConfig.VERSION_NAME）。
-private const val APP_VERSION_NAME = "0.1.0"
+// ==================== v0.5.10 关于页（AboutPage 重做；旧「开发者」区删除） ====================
+// 演变：v0.5.6 UI1b-A 占位页 → v0.5.9 UI1b-C（基础信息 + 开发者区：信令自测/LocalOnly 自测/诊断入口迁自旧设置页）
+// → v0.5.10 重做：应用名居中 + 版本号（buildConfig 已开启，引 BuildConfig.VERSION_NAME）+
+// 行式条目（GitHub / 项目地址 / 反馈，ACTION_VIEW 外链）+ 隐藏热区五连击解锁「收集日志」+
+// 「收集日志」两段式导出（脱敏 txt 落盘接收目录体系）+ 致谢区。旧开发者区三块整块删除，
+// 对应 MainScreen 顶层 DiagnosticLogDialog / LoTestPwdDialog 渲染一并清理；engine 自测方法保留不面向 UI。
+
+/** v0.5.10 关于页：隐藏热区连点解锁参数（相邻点击间隔 ≤ [ABOUT_HOT_TAP_WINDOW_MS]，超时计数清零；连点 5 次解锁）。 */
+private const val ABOUT_HOT_TAP_WINDOW_MS = 2000L
+private const val ABOUT_HOT_TAPS_UNLOCK = 5
+
+/** v0.5.10 关于页：隐藏热区最小可点高度（≥48dp 触达下限）。 */
+private val ABOUT_HOT_ZONE_MIN_HEIGHT = 48.dp
+
+/** v0.5.10 关于页行式条目外链目标。 */
+private const val ABOUT_GITHUB_URL = "https://github.com/zglinus"
+private const val ABOUT_PROJECT_URL = "https://github.com/oh-zgl-s-fish/Bluelink"
+private const val ABOUT_FEEDBACK_URL = "https://github.com/oh-zgl-s-fish/Bluelink/issues"
+private const val ABOUT_WANGBAOBAO_URL = "https://space.bilibili.com/1978636705/"
 
 /**
- * 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT）：v0.5.6 UI1b-A 占位页 → v0.5.9 UI1b-C 扩展——
- * 基础信息块（App 名「蓝鲸·X」/ 版本 [APP_VERSION_NAME] / GPL-3.0 / 简介 / 致谢）+「开发者」区
- * （信令自测 / LocalOnly 自测 / 诊断日志入口——自旧设置页迁入，行为等价原实现；诊断日志弹层仍由
- * MainScreen 顶层渲染，dump/刷新/清空/复制/导出见 DiagnosticLogDialog）。
+ * 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT）：v0.5.10 重做。布局自上而下：
+ * 1) 顶部应用名「蓝鲸·X」居中（headlineLarge，页面顶部留白）；
+ * 2) 版本号（[BuildConfig.VERSION_NAME]，v0.5.10 起 buildConfig 已开启）；
+ * 3-5) 行式条目区（列表行样式 + 点击水波纹）：GitHub 主页 / 项目地址 / 反馈（ACTION_VIEW 外链）；
+ * 6) 反馈行与致谢区之间的隐藏热区（快速连点 [ABOUT_HOT_TAPS_UNLOCK] 次、相邻间隔 ≤ [ABOUT_HOT_TAP_WINDOW_MS]ms
+ *    解锁；解锁态 [logUnlocked] 由 MainScreen 持有——AboutPage 随路由切页离开组合，解锁需本会话保持）；
+ *    解锁后同位置显示「收集日志」行：两段式——首次点击开始记录（[DiagLogger.entryCount] 起点偏移 + Snackbar），
+ *    期间日志持续入内存缓冲；再次点击停止 → [DiagLogger.entriesSince] 取起点后新增条目 → 脱敏（型号/别名/
+ *    pwd/ssid 键值/MAC/IPv4/6 位 PIN）→ 写 txt（自定义接收目录直接 SAF 落盘；未自定义则本次弹目录选择器选
+ *    落盘位置，Downloads 初始，不改接收目录设置）→ Toast「已保存日志：…」；
+ * 8) 底部致谢区（DeepSeek / 王宝煲 / LocalSend / MacroDroid / Material 3 / GPL-3.0）。
  */
 @Composable
-private fun AboutPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
+private fun AboutPage(
+    ui: BluelinkUiState,
+    engine: BluelinkEngine?,
+    // v0.5.10：隐藏热区解锁态（MainScreen 持有；AboutPage 只读展示 + 上报解锁）
+    logUnlocked: Boolean,
+    onLogUnlocked: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 「收集日志」两段式（本页局部状态；解锁态不随本页离开丢失）
+    var collecting by remember { mutableStateOf(false) }
+    var collectStart by remember { mutableStateOf(0L) }
+    var pendingLogText by remember { mutableStateOf<String?>(null) }
+    // 隐藏热区连点计数（相邻间隔 >2s 清零）
+    var hotTaps by remember { mutableStateOf(0) }
+    var lastHotTapMs by remember { mutableStateOf(0L) }
+
+    // 未自定义接收目录时「本次保存」的目录选择器（SAF OpenDocumentTree；初始 Downloads；不改接收目录设置）
+    val logDirLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        val text = pendingLogText
+        pendingLogText = null
+        if (uri != null && text != null) {
+            scope.launch {
+                val msg = withContext(Dispatchers.IO) { writeLogTextToTree(context, uri, text) }
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // 隐藏热区点击：五连击计数（相邻间隔 ≤ ABOUT_HOT_TAP_WINDOW_MS 递增，超时清零；达 5 次解锁）
+    fun onHotZoneTap() {
+        val now = SystemClock.elapsedRealtime()
+        hotTaps = if (now - lastHotTapMs <= ABOUT_HOT_TAP_WINDOW_MS) hotTaps + 1 else 1
+        lastHotTapMs = now
+        if (hotTaps >= ABOUT_HOT_TAPS_UNLOCK) {
+            hotTaps = 0
+            onLogUnlocked()
+        }
+    }
+
+    // 「收集日志」两段式状态机：未开始 → 开始记录；收集中 → 停止并保存（脱敏 txt → 接收目录 → Toast）
+    fun onCollectRowClick() {
+        if (!collecting) {
+            collecting = true
+            collectStart = DiagLogger.entryCount()
+            ui.showSnack("已开始收集，操作复现后再次点击保存")
+        } else {
+            collecting = false
+            val text = buildLogExportText(
+                alias = ui.selfCard.alias.ifBlank { Build.MODEL },
+                startCount = collectStart,
+            )
+            val tree = engine?.receiveDirUri()
+            if (tree == null) {
+                // 默认接收目录（未自定义）：本次弹目录选择器（Downloads 初始）选落盘位置；不改接收目录设置
+                pendingLogText = text
+                logDirLauncher.launch(initialReceiveDirUri())
+            } else {
+                // 自定义接收目录：直接经 SAF 写入该目录（与引擎收文件落盘同机制）
+                scope.launch {
+                    val msg = withContext(Dispatchers.IO) { writeLogTextToTree(context, tree, text) }
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(SpacingTokens.SpaceLg),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "关于",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f),
-            )
+        // 标题行（同 LOG/设置页风格）：左侧「关于」+ 右侧「返回」回主页面
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("关于", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
             TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
 
-        // ===== 基础信息块（v0.5.4b 容器分层：页内常规内容块 → surfaceContainerLowest；无 elevation、无边框；块级圆角 10）=====
+        // 1-2) 顶部应用名居中（页面顶部留白）+ 版本号
+        Spacer(Modifier.height(SpacingTokens.SpaceXl))
+        Text(
+            text = "蓝鲸·X",
+            style = MaterialTheme.typography.headlineLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = "版本 ${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(SpacingTokens.SpaceMd))
+
+        // 3-5) 行式条目区（列表行样式，同设置页分组行风格；点击水波纹；ACTION_VIEW 外链）
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surfaceContainerLowest,
             shape = MaterialTheme.shapes.large,
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceLg),
-                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
-            ) {
-                Text(
-                    text = "蓝鲸·X",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = "版本 $APP_VERSION_NAME · GPL-3.0",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Column {
+                AboutLinkRow(
+                    title = "GitHub",
+                    subtitle = ABOUT_GITHUB_URL.removePrefix("https://"),
+                    onClick = { openExternalUrl(context, ABOUT_GITHUB_URL) },
                 )
                 HorizontalDivider()
-                Text(
-                    text = "蓝牙同网直连文件传输：BLE 发现/握手 → PIN 配对验证 → 组网或同网免热点直连，" +
-                        "经 LocalSend 直传文件；无需服务器、不依赖蜂窝网络。",
-                    style = MaterialTheme.typography.bodyMedium,
+                AboutLinkRow(
+                    title = "项目地址",
+                    subtitle = ABOUT_PROJECT_URL.removePrefix("https://"),
+                    onClick = { openExternalUrl(context, ABOUT_PROJECT_URL) },
                 )
                 HorizontalDivider()
-                Text(
-                    text = "致谢：Material Design 3 语义配色；传输互通采用 LocalSend 协议（v2）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                AboutLinkRow(
+                    title = "反馈",
+                    subtitle = ABOUT_FEEDBACK_URL.removePrefix("https://"),
+                    onClick = { openExternalUrl(context, ABOUT_FEEDBACK_URL) },
                 )
             }
         }
 
-        // ===== 开发者区（v0.5.9 UI1b-C：自旧设置页迁入的自测三块；仅供验证链路，行为等价原实现）=====
+        // 6) 反馈行与致谢区之间：隐藏热区（未解锁） / 「收集日志」行（已解锁，同位置）
+        if (logUnlocked) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                shape = MaterialTheme.shapes.large,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.large)
+                        .clickable { onCollectRowClick() }
+                        .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
+                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
+                ) {
+                    Text(
+                        text = if (collecting) "收集日志（收集中）" else "收集日志",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (collecting) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    Text(
+                        text = if (collecting) {
+                            "已开始记录——操作复现后再次点击停止并保存"
+                        } else {
+                            "点击开始记录；再次点击停止并脱敏保存为 txt"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        } else {
+            // 隐藏热区：极淡低可见点击区（快速连点 5 次解锁「收集日志」）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = ABOUT_HOT_ZONE_MIN_HEIGHT)
+                    .clip(MaterialTheme.shapes.large)
+                    .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.25f))
+                    .clickable { onHotZoneTap() },
+            )
+        }
+
+        // 8) 底部致谢区（小字号/多行，普通分组容器风格）
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surfaceContainerLowest,
@@ -1523,83 +1655,173 @@ private fun AboutPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
                     .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
                 verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
             ) {
-                Text("开发者", style = MaterialTheme.typography.titleMedium)
-                if (engine == null) {
+                Text("致谢", style = MaterialTheme.typography.titleMedium)
+                HorizontalDivider()
+                Text(
+                    text = "LocalSend（传输协议形状启发，端到端互通）\nMacroDroid（系统热点机制逆向参考，仅方法论）\nMaterial Design 3（UI/UX 决策系统）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text("Contributors", style = MaterialTheme.typography.titleMedium)
+                HorizontalDivider()
+                Text(
+                    text = "zglinus（项目维护与集成：编码协调、构建发布）\nDeepSeek（绝大多数代码与设计由 DeepSeek 模型生成）\npi agent（DeepSeek-powered coding subagent：按任务切割执行模块编码/修复/逆向分析）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                // 王宝煲：应用图标表情包来源（可链 Bilibili 空间）——Contributors 组（图标来源 🫶）
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.large)
+                        .clickable { openExternalUrl(context, ABOUT_WANGBAOBAO_URL) }
+                        .padding(vertical = SpacingTokens.SpaceXs),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Text(
-                        text = "引擎未就绪（自测入口暂不可用）",
+                        text = "王宝煲（应用图标表情包来源）· Bilibili 空间",
                         style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "›",
+                        style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    return@Column
                 }
-
-                // ---- 信令自测（验证包；迁自旧设置页，等价） ----
-                HorizontalDivider()
-                Text("信令自测（验证包）", style = MaterialTheme.typography.titleSmall)
-                ui.signalTestStatus?.let { status ->
-                    Text(
-                        text = status,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (ui.signalTestRunning) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                    )
-                }
-                TextButton(
-                    onClick = {
-                        if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
-                    },
-                ) { Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测") }
-
-                // ---- ③ LocalOnly 自测（迁自旧设置页，等价） ----
-                HorizontalDivider()
-                Text("LocalOnly 自测（③）", style = MaterialTheme.typography.titleSmall)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = {
-                            if (ui.localOnlyTestRunning) {
-                                engine.closeLocalOnlySelfTest()
-                            } else {
-                                engine.localOnlySelfTest()
-                            }
-                        },
-                    ) { Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测") }
-                    if (ui.localOnlyTestRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    }
-                }
-                ui.localOnlyTestInfo?.let { info ->
-                    // 状态行 icon+label（audit P1-4）：密码已登记(✅)加 success 语义点；色不单独表达状态
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (ui.localOnlyTestPasswordSet) {
-                            StatusDot(color = MaterialTheme.extended.success)
-                            Spacer(Modifier.width(SpacingTokens.SpaceSm))
-                        }
-                        Text(
-                            text = info,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (ui.localOnlyTestRunning) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                }
-
-                // ---- 诊断（dump/清空等动作在 MainScreen 顶层 DiagnosticLogDialog 内） ----
-                HorizontalDivider()
-                Text("诊断", style = MaterialTheme.typography.titleSmall)
-                TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
             }
         }
     }
 }
+
+/** 关于页行式条目（列表行样式，同设置页分组行；整行可点 + 点击水波纹；subtitle 小字；trailing 右侧字形，null=隐藏）。 */
+@Composable
+private fun AboutLinkRow(
+    title: String,
+    onClick: () -> Unit,
+    subtitle: String? = null,
+    trailing: String? = "›",
+    trailingColor: Color = Color.Unspecified,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.large)
+            .clickable(onClick = onClick)
+            .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (trailing != null) {
+            Text(
+                text = trailing,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (trailingColor == Color.Unspecified) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    trailingColor
+                },
+            )
+        }
+    }
+}
+
+/** 打开外链（ACTION_VIEW；失败 Toast 提示，不崩溃）。 */
+private fun openExternalUrl(context: Context, url: String) {
+    try {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    } catch (e: Exception) {
+        Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show()
+    }
+}
+
+// ==================== v0.5.10 关于页「收集日志」导出支撑 ====================
+
+/** JSON 键值打码正则：键含 pwd/password/passwd → 值 <pwd>；键含 ssid → 值 <ssid>（值保留键、整值打码）。 */
+private val LOG_JSON_PWD_KEY_RE = Regex(
+    "(\"([^\"]*(?:pwd|password|passwd)[^\"]*)\"\\s*:\\s*)\"[^\"]*\"",
+    RegexOption.IGNORE_CASE,
+)
+private val LOG_JSON_SSID_KEY_RE = Regex(
+    "(\"([^\"]*ssid[^\"]*)\"\\s*:\\s*)\"[^\"]*\"",
+    RegexOption.IGNORE_CASE,
+)
+
+/** MAC / IPv4 / 6 位纯数字 PIN 打码正则。 */
+private val LOG_MAC_RE = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+private val LOG_IPV4_RE = Regex("\\b\\d{1,3}(\\.\\d{1,3}){3}\\b")
+private val LOG_PIN6_RE = Regex("\\b\\d{6}\\b")
+
+/** 两段式导出文本：头部（时间，不含设备信息）+ 起点后新增诊断条目（[DiagLogger.entriesSince]）。 */
+private fun buildLogExportText(alias: String, startCount: Long): String {
+    val sb = StringBuilder()
+    sb.append("Bluelink 诊断日志（导出已脱敏：型号/别名/密码/PIN/IP/MAC 打码）\n")
+    sb.append("导出时间：").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())).append('\n')
+    sb.append("----------------------------------------\n")
+    sb.append(sanitizeLogText(DiagLogger.entriesSince(startCount), alias))
+    return sb.toString()
+}
+
+/**
+ * 导出文本脱敏（保守优先，宁可多打码不漏）：
+ * 1) 设备信息：Build.MODEL / Build.MANUFACTURER → `<model>`；本机别名 → `<alias>`（先型号后别名——别名默认即型号）；
+ * 2) JSON 键值打码（先于裸 PIN，整值保护）：pwd/password 系键值 → `<pwd>`；ssid 键值 → `<ssid>`；
+ * 3) 正则打码：MAC → `<mac>`；IPv4 → `<ip>`；6 位纯数字（PIN） → `<pin>`。
+ */
+private fun sanitizeLogText(raw: String, alias: String): String {
+    var s = raw
+    Build.MODEL.takeIf { it.isNotBlank() }?.let { s = s.replace(it, "<model>") }
+    Build.MANUFACTURER.takeIf { it.isNotBlank() }?.let { s = s.replace(it, "<model>") }
+    alias.takeIf { it.isNotBlank() }?.let { s = s.replace(it, "<alias>") }
+    s = LOG_JSON_PWD_KEY_RE.replace(s) { m -> m.groupValues[1] + "\"<pwd>\"" }
+    s = LOG_JSON_SSID_KEY_RE.replace(s) { m -> m.groupValues[1] + "\"<ssid>\"" }
+    s = LOG_MAC_RE.replace(s, "<mac>")
+    s = LOG_IPV4_RE.replace(s, "<ip>")
+    s = LOG_PIN6_RE.replace(s, "<pin>")
+    return s
+}
+
+/**
+ * 写诊断日志到 SAF 目录（与引擎收文件落盘同机制：DocumentFile.createFile + openOutputStream，
+ * 用户可读）；文件名 bluelink-log-<yyyyMMdd-HHmmss>.txt。在后台线程调用（调用方经 Dispatchers.IO）。
+ * @return 用户可读结果文案（成功含文件名 + 目录名；失败含原因）。
+ */
+private fun writeLogTextToTree(context: Context, treeUri: Uri, text: String): String {
+    val fileName = "bluelink-log-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".txt"
+    val appContext = context.applicationContext
+    try {
+        val dir = DocumentFile.fromTreeUri(appContext, treeUri)
+        if (dir == null) return "保存失败：无法访问所选目录"
+        if (!dir.canWrite()) return "保存失败：所选目录不可写"
+        val doc = dir.createFile("text/plain", fileName)
+            ?: return "保存失败：无法在目录中创建文件"
+        val out = appContext.contentResolver.openOutputStream(doc.uri)
+            ?: return "保存失败：无法打开输出流"
+        out.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+        val dirName = dir.name?.takeIf { it.isNotBlank() }
+            ?: Uri.decode(treeUri.lastPathSegment ?: "")?.takeIf { it.isNotBlank() }
+            ?: "所选目录"
+        return "已保存日志：$fileName（$dirName）"
+    } catch (e: Exception) {
+        return "保存失败：${e.message ?: e.javaClass.simpleName}"
+    }
+}
+
 
 /** 抽屉（v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+ 入口列表
  *  （文件传输记录/个性化/设置/关于）→ 设 currentPage（BluelinkUiState.PAGE_* 常量）；
@@ -2050,43 +2272,6 @@ private fun LocalOnlyPwdDialog(engine: BluelinkEngine) {
     )
 }
 
-/** ③ LocalOnly 自测（v0.3.9，sdk 33+）密码登记框：系统弹窗/通知已展示 SSID 与密码（App 侧不可读），
- *  请用户按系统弹窗抄写回填（复用 manualPwdInput 输入；确认走 confirmLocalOnlySelfTestPwd）。 */
-@Composable
-private fun LoTestPwdDialog(engine: BluelinkEngine) {
-    val ui = engine.ui
-    AlertDialog(
-        onDismissRequest = { ui.loTestPwdDialog = false },
-        title = { Text("LocalOnly 密码登记（自测 ③）") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
-                Text(
-                    text = "系统已弹出本地热点通知/弹窗，展示 SSID 与密码（App 侧不可读）：",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    text = "请按系统弹窗抄写密码并填写如下：",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = ui.manualPwdInput,
-                    onValueChange = { ui.manualPwdInput = it },
-                    label = { Text("热点密码（按系统弹窗抄写）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { engine.confirmLocalOnlySelfTestPwd() }) { Text("确认") }
-        },
-        dismissButton = {
-            TextButton(onClick = { ui.loTestPwdDialog = false }) { Text("取消") }
-        },
-    )
-}
-
 /** 接入失败对话框：提示原因 + 手动输入密码重试（WifiJoiner onFailed）。 */
 @Composable
 private fun JoinFailDialog(engine: BluelinkEngine) {
@@ -2144,69 +2329,6 @@ private fun WriteSettingsDialog(engine: BluelinkEngine) {
             TextButton(onClick = { ui.writeSettingsDialog = false }) { Text("取消") }
         },
     )
-}
-
-/** 诊断日志弹窗：可滚动文本 + 刷新/复制/导出/清空（导出写 App 外部私有目录，无需存储权限）。
- * 反馈通道（audit F3/P2-4）：复制/导出结果经 [onNotify] → Snackbar，不再直接 Toast。 */
-@Composable
-private fun DiagnosticLogDialog(
-    text: String,
-    onDismiss: () -> Unit,
-    onRefresh: () -> Unit,
-    onClear: () -> Unit,
-    onNotify: (String) -> Unit,
-) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("诊断日志") },
-        text = {
-            Column {
-                Text(
-                    text = text.ifBlank { "（暂无日志）" },
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = MetricTokens.DiagLogMaxHeight)
-                        .verticalScroll(rememberScrollState()),
-                )
-                Spacer(Modifier.height(SpacingTokens.SpaceSm))
-                Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
-                    TextButton(onClick = onRefresh) { Text("刷新") }
-                    TextButton(onClick = {
-                        clipboard.setText(AnnotatedString(text))
-                        onNotify("已复制")
-                    }) { Text("复制全部") }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
-                    TextButton(onClick = { exportDiagnosticFile(context, text, onNotify) }) { Text("导出文件") }
-                    TextButton(onClick = onClear) { Text("清空") }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
-    )
-}
-
-/** 导出诊断日志到 getExternalFilesDir(null)/diag_<yyyyMMdd_HHmmss>.txt；结果经 onNotify → Snackbar（audit F3/P2-4）。 */
-private fun exportDiagnosticFile(context: Context, text: String, onNotify: (String) -> Unit) {
-    val dir = context.getExternalFilesDir(null)
-    if (dir == null) {
-        onNotify("外部存储不可用，导出失败")
-        return
-    }
-    val name = "diag_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".txt"
-    val file = File(dir, name)
-    try {
-        file.writeText(text)
-        onNotify("已导出: ${file.absolutePath}")
-    } catch (e: Exception) {
-        onNotify("导出失败: ${e.message}")
-    }
 }
 
 /** 跳系统应用设置页（空态「去授权」：权限未授的恢复路径，audit P1-1）。 */

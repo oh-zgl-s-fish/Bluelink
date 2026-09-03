@@ -15,8 +15,8 @@ android {
         applicationId = "com.zglinus.bluelink"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.5.10"
     }
 
     buildTypes {
@@ -32,6 +32,8 @@ android {
 
     buildFeatures {
         compose = true
+        // v0.5.10：开启 buildConfig 供 About 页引用 BuildConfig.VERSION_NAME（AGP9 默认关闭）
+        buildConfig = true
     }
 
     packaging {

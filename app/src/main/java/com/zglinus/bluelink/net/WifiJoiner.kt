@@ -159,7 +159,11 @@ class WifiJoiner(private val context: Context) {
         val attempt = current
         if (attempt != null) {
             DiagLogger.log(tag, "cancel：中止进行中的接入 ssid=${attempt.ssid}")
-            complete(attempt) { releaseRequest(attempt) }
+            complete(attempt) {
+                // v0.5.14b（Bug2 修复）：cancel 立即打断挂起的 Specifier 延迟重试（cancel 后不再发起新尝试）
+                cancelPendingRetry(attempt)
+                releaseRequest(attempt)
+            }
             return
         }
         val cb = registeredCallback
@@ -180,10 +184,12 @@ class WifiJoiner(private val context: Context) {
      * API 29+ 路径：构造 WifiNetworkSpecifier → requestNetwork，系统弹窗由用户确认。
      *
      * - onAvailable：接入成功，延迟取 IP（DHCP/地址分配可能有延迟，轮询 [IP_POLL_TIMEOUT_MS]）；
-     * - onUnavailable：系统弹窗未确认 / 请求失败；
+     * - onUnavailable：系统弹窗未确认 / 请求失败（v0.5.14b Bug2 修复：自动延迟重试，最多
+     *   [SPECIFIER_MAX_ATTEMPTS] 次——首次 + 2 次重试，见 [handleSpecifierUnavailable]；
+     *   真机诊断：热点刚开/系统扫描缓存未就绪 → ~300ms 即 onUnavailable，非弹窗超时）；
      * - onLost：仅记录（传输层已按成功上报，是否降级由上层决定）。
      *
-     * 成功路径保持注册（见 [registeredCallback] 注释），[cancel] 时统一注销。
+     * 成功路径保持注册（见 [registeredCallback] 注释），[cancel] 时统一注销（含打断挂起的延迟重试）。
      */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun joinWithSpecifier(attempt: Attempt) {
@@ -210,6 +216,27 @@ class WifiJoiner(private val context: Context) {
             return
         }
         DiagLogger.log(tag, "API 29+ 路径（sdk=${Build.VERSION.SDK_INT}）：权限 $permission 已就绪，继续 Specifier 流程")
+        // v0.5.14b（Bug2 修复）：请求注册抽成 [registerSpecifierRequest]，首次与 onUnavailable 延迟重试共用
+        registerSpecifierRequest(attempt)
+    }
+
+    /**
+     * v0.5.14b（Bug2 修复）：Specifier 请求注册体（首次与 onUnavailable 延迟重试共用）——构造
+     * specifier/request 的 **新** NetworkCallback → requestNetwork → 登记引用（每次重试均重新注册
+     * callback；热点刚开/系统扫描缓存未就绪导致 ~300ms 即 onUnavailable 时，延迟重试等缓存就绪后
+     * 即可命中，见 [handleSpecifierUnavailable]）。
+     */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun registerSpecifierRequest(attempt: Attempt) {
+        DiagLogger.log(
+            tag,
+            "Specifier 接入尝试 ${attempt.specifierTry}/$SPECIFIER_MAX_ATTEMPTS" +
+                (if (attempt.specifierTry > 1) "（延迟重试）" else "") + "：requestNetwork(ssid=${attempt.ssid})",
+        )
+        if (attempt.done) {
+            DiagLogger.log(tag, "Specifier 接入尝试被取消（attempt 已终结，cancel 打断），不再发起 requestNetwork")
+            return
+        }
         val cm = connectivityManager
         if (cm == null) {
             fail(attempt, "ConnectivityManager 不可用")
@@ -240,8 +267,7 @@ class WifiJoiner(private val context: Context) {
             }
 
             override fun onUnavailable() {
-                DiagLogger.log(tag, "onUnavailable：系统弹窗未确认或请求失败")
-                fail(attempt, "系统弹窗未确认或请求失败（onUnavailable）")
+                handleSpecifierUnavailable(attempt)
             }
 
             override fun onLost(network: Network) {
@@ -275,7 +301,52 @@ class WifiJoiner(private val context: Context) {
         // requestNetwork 同步注册成功后才登记引用（回调经 mainHandler 异步派发，无竞争）
         attempt.networkCallback = callback
         registeredCallback = callback
-        DiagLogger.log(tag, "requestNetwork 已注册：等待系统弹窗确认（ssid=${attempt.ssid}）")
+        DiagLogger.log(
+            tag,
+            "requestNetwork 已注册：等待系统弹窗确认（ssid=${attempt.ssid}，尝试 ${attempt.specifierTry}/$SPECIFIER_MAX_ATTEMPTS）",
+        )
+    }
+
+    /**
+     * v0.5.14b（Bug2 修复）：Specifier onUnavailable 失败重试——真机诊断：热点方刚开热点（②
+     * startTethering 路径）时系统扫描缓存尚无该新开热点，requestNetwork 注册后 ~300ms 即
+     * onUnavailable（Specifier 即时匹配失败，非弹窗超时）→ 延迟 [SPECIFIER_RETRY_DELAY_MS] 重走一次
+     * requestNetwork（重新注册 callback），最多 [SPECIFIER_MAX_ATTEMPTS] 次（首次 + 2 次重试）；每次重试
+     * 前 [releaseRequest] 清理上一次 callback/request（防泄漏）；成功（onAvailable）即停；重试耗尽 →
+     * 原文案失败。cancel() 打断：挂起重试 Runnable 存 [Attempt.pendingRetry]，cancel 时
+     * [cancelPendingRetry] 移除 + attempt.done 双保险（cancel 后不再发起新尝试）。
+     * 注：本路径同时覆盖「系统弹窗未确认」触发 onUnavailable 的分支（同一回调，重试语义一致）。
+     */
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun handleSpecifierUnavailable(attempt: Attempt) {
+        if (attempt.done) return
+        DiagLogger.log(
+            tag,
+            "onUnavailable（尝试 ${attempt.specifierTry}/$SPECIFIER_MAX_ATTEMPTS）：系统弹窗未确认或请求失败" +
+                "（热点刚开/扫描缓存未就绪场景），准备延迟重试",
+        )
+        // onUnavailable 后系统已终结该请求：先注销旧 callback/清理引用，防泄漏后再重试
+        releaseRequest(attempt)
+        if (attempt.specifierTry >= SPECIFIER_MAX_ATTEMPTS) {
+            DiagLogger.log(tag, "Specifier 接入尝试耗尽（${attempt.specifierTry}/$SPECIFIER_MAX_ATTEMPTS），按失败收敛")
+            fail(attempt, "系统弹窗未确认或请求失败（onUnavailable）")
+            return
+        }
+        attempt.specifierTry++
+        val retry = Runnable {
+            attempt.pendingRetry = null
+            if (attempt.done) {
+                DiagLogger.log(tag, "Specifier 延迟重试已取消（attempt 已终结，cancel/收敛打断），不再发起新尝试")
+                return@Runnable
+            }
+            registerSpecifierRequest(attempt)
+        }
+        attempt.pendingRetry = retry
+        DiagLogger.log(
+            tag,
+            "Specifier 接入尝试 ${attempt.specifierTry}/$SPECIFIER_MAX_ATTEMPTS（延迟重试：${SPECIFIER_RETRY_DELAY_MS / 1000}s 后重新 requestNetwork）",
+        )
+        mainHandler.postDelayed(retry, SPECIFIER_RETRY_DELAY_MS)
     }
 
     // ---------- Android 8–10（API 26–28）：WRITE_SETTINGS + WifiManager.addNetwork ----------
@@ -508,6 +579,19 @@ class WifiJoiner(private val context: Context) {
         }
     }
 
+    /**
+     * v0.5.14b（Bug2 修复）：移除挂起的 Specifier 延迟重试 Runnable（cancel/结果收敛时调用，幂等）——
+     * cancel 后不再发起新尝试（attempt.done 已置位 + Runnable 已移除双保险）。
+     */
+    private fun cancelPendingRetry(attempt: Attempt) {
+        val r = attempt.pendingRetry
+        if (r != null) {
+            attempt.pendingRetry = null
+            mainHandler.removeCallbacks(r)
+            DiagLogger.log(tag, "cancel：已移除挂起的 Specifier 延迟重试（不再发起新尝试）")
+        }
+    }
+
     // ---------- root 静默接入：stub（B 包） ----------
 
     /**
@@ -533,6 +617,16 @@ class WifiJoiner(private val context: Context) {
 
         /** API 29+ 路径注册的 NetworkCallback（失败/取消时注销，成功时保留至 [WifiJoiner.cancel]）。 */
         var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+        /**
+         * v0.5.14b（Bug2 修复）：Specifier 路径当前尝试序号（1=首次；onUnavailable 后递增重试，
+         * ≤ [WifiJoiner.SPECIFIER_MAX_ATTEMPTS]，即首次 + 2 次延迟重试）。
+         */
+        var specifierTry: Int = 1
+
+        /** v0.5.14b（Bug2 修复）：Specifier 路径挂起的延迟重试 Runnable（cancel/结果收敛时移除，防取消后仍发起新尝试；cancel 可能非主线程，volatile 保可见性）。 */
+        @Volatile
+        var pendingRetry: Runnable? = null
     }
 
     companion object {
@@ -541,6 +635,12 @@ class WifiJoiner(private val context: Context) {
 
         /** API 26–28 路径确认 SSID 匹配的最长等待（任务约定 ≤10s）。 */
         private const val SSID_MATCH_TIMEOUT_MS: Long = 10_000L
+
+        /** v0.5.14b（Bug2 修复）：Specifier 失败重试——最大尝试次数（首次 + 2 次延迟重试）。 */
+        private const val SPECIFIER_MAX_ATTEMPTS = 3
+
+        /** v0.5.14b（Bug2 修复）：Specifier 失败重试延迟（~2s；热点刚开/扫描缓存未就绪 → Specifier 即时匹配失败场景，延迟后扫描缓存应就绪）。 */
+        private const val SPECIFIER_RETRY_DELAY_MS: Long = 2_000L
 
         /** 接入成功后取新 IP 的轮询间隔。 */
         private const val IP_POLL_INTERVAL_MS: Long = 500L

@@ -122,9 +122,10 @@ import kotlinx.coroutines.withContext
  *   WallpaperBackdrop.WallpaperEffect 注释）。
  * - 容器透明度区（v0.5.11 UI1b-E 改④；遮罩行下方）：文字「容器透明度」+ Slider 5–50%（5% 步进，
  *   显示百分比，同遮罩行样式）——语义 = 主页浮层容器「透明程度」（容器实际 alpha = 1−值/100：
- *   5→0.95 … 50→0.50，默认 20→0.80）；拖动只改本地草稿 transparencyDraft（v0.5.11b 起壁纸预览区
- *   按草稿实时叠容器色层预览整区观感），保存写 store.containerTransparency，主页面顶栏/内容容器
- *   alpha 随之刷新。
+ *   5→0.95 … 50→0.50，默认 20→0.80）；拖动只改本地草稿 transparencyDraft（v0.5.12b 起壁纸预览区
+ *   以浮层卡模拟实时预览——壁纸之上叠主页同款圆角表面块模拟浮层容器、卡外露壁纸（见 PreviewSection/
+ *   HomeContainerMock），透明度草稿越高卡越透明、壁纸透出越多），保存写 store.containerTransparency，
+ *   主页面顶栏/内容容器 alpha 随之刷新。
  *
  * 保存语义（v0.5.8 新交互，v0.5.11 增容器透明度草稿）：页面持本地编辑态（三槽草稿 / maskAlpha 草稿 /
  * 容器透明度草稿 transparencyDraft / accent 草稿 / 当前场景 / 色系展开与选中态），进入页面从
@@ -158,7 +159,7 @@ fun PersonalizePage(
     var maskDraft by remember { mutableStateOf(store.maskAlpha) }
     var accentDraft by remember { mutableStateOf(store.accentColor) }
     // v0.5.11 UI1b-E 改④：容器透明度草稿（初值 store.containerTransparency；拖动只改本地态，保存才写 store；
-    // 离开未保存 = 丢弃，与 mask 草稿同语义；v0.5.11b 起预览区按草稿实时叠容器色层（见 PreviewSection））
+    // 离开未保存 = 丢弃，与 mask 草稿同语义；v0.5.12b 起预览区按草稿以浮层卡模拟实时预览（见 PreviewSection））
     var transparencyDraft by remember { mutableStateOf(store.containerTransparency) }
 
     // v0.5.12 md3-audit-2 FI2：未保存草稿判定（三槽 / 遮罩 / 容器透明度 / 强调色 任一 ≠ store 已存值）。
@@ -342,9 +343,9 @@ fun PersonalizePage(
                     slot = slotDraft(sceneSlot),
                     sceneSlot = sceneSlot,
                     maskAlpha = maskDraft,
-                    // v0.5.11b：容器透明度草稿 → 容器 overlay alpha（透明度越高容器层越透明、壁纸透出越多，
-                    // 与主页一致：5→0.95 … 50→0.50）；拖动改草稿 → 预览 recompose 即时变化
-                    containerOverlayAlpha = (100f - transparencyDraft) / 100f,
+                    // v0.5.12b：透明度草稿直传预览区（浮层卡 mock 内部按 (100f-transparencyDraft)/100f
+                    // 换算卡 alpha；透明度越高卡越透明、壁纸透出越多，与主页一致：5→0.95 … 50→0.50）
+                    transparencyDraft = transparencyDraft,
                     onOpenSource = { sourceSheet = true },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -805,9 +806,11 @@ private fun sceneHint(slotId: Int): String = when (slotId) {
     else -> "通用模式：可以通过上方按钮切换深浅模式壁纸"
 }
 
-/** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩 +（v0.5.11b）容器 overlay 色层
- *  （复用 WallpaperBackdrop 同套 rememberSlotDecode/WallpaperEffect，预览即真实背景效果；overlay alpha 由
- *  调用方按容器透明度草稿 (100f-transparencyDraft)/100f 传入，模拟主页浮层容器盖壁纸后的整区观感）；
+/** 复用预览区（弹性占剩余大部）：渲染当前场景槽草稿 = 壁纸图 + 当前遮罩（复用 WallpaperBackdrop 同套
+ *  rememberSlotDecode/WallpaperEffect，预览即真实背景效果——WallpaperEffect 为壁纸+遮罩两态，v0.5.12b
+ *  无整区叠层）；壁纸解码成功后其上再叠 [HomeContainerMock]「模拟主页内容浮层卡」（v0.5.12b 方案 B：
+ *  圆角表面块 = 主页同款色 surfaceContainerLow/Lowest，块 alpha 按透明度草稿
+ *  (100f-transparencyDraft)/100f 实时变化，卡外/卡间露壁纸）。
  * 槽未设 → 占位「点击选择壁纸」；点预览区 → 打开 [WallpaperSourceSheet]。
  * v0.5.8b：解码失败不再无限「加载壁纸预览…」——failed 时显示可见失败文案 + 来源小字提示
  * （解码中的短暂空白可忽略：复制后才入槽，file 路径直读极快 <300ms）。 */
@@ -816,8 +819,8 @@ private fun PreviewSection(
     slot: WallpaperSlot,
     sceneSlot: Int,
     maskAlpha: Int,
-    // v0.5.11b：容器 overlay alpha（来自顶层 transparencyDraft，调用方换算后传入；0=不叠）
-    containerOverlayAlpha: Float = 0f,
+    // v0.5.12b：容器透明度草稿（5–50%，WallpaperStore.TRANSPARENCY_MIN..MAX；浮层卡 mock 换算 alpha 用）
+    transparencyDraft: Int,
     onOpenSource: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -839,13 +842,21 @@ private fun PreviewSection(
                 },
         ) {
             if (slot.isSet) {
-                // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色）；v0.5.11b：再叠容器色层（按草稿换算的 overlay）
+                // 壁纸图 + 遮罩叠加（与主页面背景同函数同遮罩色；无整区叠层——WallpaperEffect 自
+                // v0.5.12b 恢复两态）；解码成功后其上叠模拟主页浮层卡（卡块 alpha 随透明度草稿即时变化）
                 WallpaperEffect(
                     wallpaper = decode.bitmap,
                     maskAlpha = maskAlpha,
-                    containerOverlayAlpha = containerOverlayAlpha,
                     modifier = Modifier.fillMaxSize(),
                 )
+                // v0.5.12b（方案 B）：壁纸（+遮罩）之上叠 [HomeContainerMock] 两块主页同款色圆角表面块，
+                // 卡外/卡间露壁纸；解码未成功前不叠（避免盖住解码中观感，失败时下方文案不被遮挡）
+                if (decode.bitmap != null && !decode.failed) {
+                    HomeContainerMock(
+                        transparencyDraft = transparencyDraft,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 if (decode.failed) {
                     // v0.5.8b：解码失败可见——失败被静默吞掉是 v0.5.8「两个来源都不显示」观感根因之一，
                     // 现显示主文案 + 来源小字提示（点按整区可更换来源）；解码中的短暂空白不提示
@@ -899,6 +910,49 @@ private fun PreviewSection(
                 }
             }
         }
+    }
+}
+
+/** v0.5.12b（方案 B）模拟主页内容浮层卡：壁纸预览之上叠两块圆角表面块示意主页容器浮在壁纸上、
+ *  卡外/卡间露壁纸（贴主页结构示意，不追求精确）：
+ * - 上部大圆角块（弹性占余下大部，随预览区高度浮动 ≈ 高 60–75%）：模拟主页「两态」内容区主层次卡
+ *   （本端设备区/对端列表，主页同款 [MaterialTheme.shapes.large] 块级圆角 10）→ 色 = 主页同款
+ *   surfaceContainerLow（MainScreen SelfDevicePane/ScanListPanel 同色）；
+ * - 下部窄横条（高 ≈ 预览高 18%，紧贴预览区底边）：模拟底部动作行/时间流 → 色 = surfaceContainerLowest
+ *   （MainScreen BottomActionRow 同色）；
+ * 两块均四周留 ~8dp 边距（圆角块与预览区边缘/两块之间露壁纸）；每块色
+ * copy(alpha = (100f - transparencyDraft) / 100f)（透明度草稿越高卡越透明、壁纸透出越多；默认 20 →
+ * 0.80 与主页一致）；滑杆拖动 → [PreviewSection] recompose → 块 alpha 即时变化，直观反映主页观感。
+ */
+@Composable
+private fun HomeContainerMock(
+    transparencyDraft: Int,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 上部大圆角块：模拟主页两态内容区主层次卡（surfaceContainerLow）；块外四周露壁纸
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(MaterialTheme.shapes.large)
+                .background(
+                    MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = (100f - transparencyDraft) / 100f),
+                ),
+        )
+        // 下部窄横条（高 ≈ 预览高 18%）：模拟底部动作行/时间流（surfaceContainerLowest）；两卡间露壁纸
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.18f)
+                .clip(MaterialTheme.shapes.large)
+                .background(
+                    MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = (100f - transparencyDraft) / 100f),
+                ),
+        )
     }
 }
 
@@ -956,7 +1010,8 @@ private fun MaskRow(
 /** v0.5.11 UI1b-E 改④：容器透明度区（遮罩行下方 · 全局共用）：文字「容器透明度」+ Slider 5–50%
  * （5% 步进，显示百分比；同遮罩行样式）。语义 = 主页浮层容器「透明程度」：容器实际 alpha = 1−值/100
  * （5→0.95 … 50→0.50，默认 20 → 0.80 与 v0.5.8d 顶栏浮层规格一致）；拖动只改本地草稿
- * transparencyDraft（v0.5.11b 起上方壁纸预览区同步实时叠容器色层预览），保存写
+ * transparencyDraft（v0.5.12b 起上方壁纸预览区以浮层卡模拟同步实时预览——壁纸之上叠主页同款圆角
+ * 表面块，卡 alpha 随草稿即时变化），保存写
  * store.containerTransparency 后主页生效。
  * v0.5.12 md3-audit-2 C4：透明度 ≥40%（容器 alpha ≤0.60）为文字可读风险区（深壁纸 + 低遮罩下容器文字
  * 对比可跌破 4.5:1 且无自动钳制）——滑杆下方动态显示 warning 色风险提示（50% 档 = alpha 0.50 下限提示

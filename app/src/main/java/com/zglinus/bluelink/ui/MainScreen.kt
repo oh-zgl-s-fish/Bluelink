@@ -1440,13 +1440,13 @@ private fun LogPage(ui: BluelinkUiState) {
 // 行式条目（GitHub / 项目地址 / 反馈，ACTION_VIEW 外链）+ 隐藏热区五连击解锁「收集日志」+
 // 「收集日志」两段式导出（脱敏 txt 落盘接收目录体系）+ 致谢区。旧开发者区三块整块删除，
 // 对应 MainScreen 顶层 DiagnosticLogDialog / LoTestPwdDialog 渲染一并清理；engine 自测方法保留不面向 UI。
+// → v0.5.10c：连击目标由隐藏热区迁移至版本号行条目——淡条热区（60dp 槽位）整段删除，正常形态链接 Surface
+//   与致谢 Surface 直接相邻（无留白）；解锁「收集日志」卡片置链接 Surface 正下方槽位，链接区条件压缩上移、
+//   按钮首屏可见。热区最小高度等热区专用常量与淡条一并删除（本文件无残留）。
 
-/** v0.5.10 关于页：隐藏热区连点解锁参数（相邻点击间隔 ≤ [ABOUT_HOT_TAP_WINDOW_MS]，超时计数清零；连点 5 次解锁）。 */
-private const val ABOUT_HOT_TAP_WINDOW_MS = 2000L
-private const val ABOUT_HOT_TAPS_UNLOCK = 5
-
-/** v0.5.10b 关于页：隐藏热区最小可点高度（v0.5.10 为 48dp → v0.5.10b 提至 60dp：更大瞄准面，降低连点点偏率）。 */
-private val ABOUT_HOT_ZONE_MIN_HEIGHT = 60.dp
+/** v0.5.10c 关于页：版本号行连点解锁参数（相邻点击间隔 ≤ [ABOUT_VERSION_TAP_WINDOW_MS]，超时计数清零；连点 5 次解锁；v0.5.10c 起连击目标为版本号行条目，原隐藏热区废弃）。 */
+private const val ABOUT_VERSION_TAP_WINDOW_MS = 2000L
+private const val ABOUT_VERSION_TAPS_UNLOCK = 5
 
 /** v0.5.10 关于页行式条目外链目标。 */
 private const val ABOUT_GITHUB_URL = "https://github.com/zglinus"
@@ -1455,23 +1455,26 @@ private const val ABOUT_FEEDBACK_URL = "https://github.com/oh-zgl-s-fish/Bluelin
 private const val ABOUT_WANGBAOBAO_URL = "https://space.bilibili.com/1978636705/"
 
 /**
- * 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT）：v0.5.10 重做。布局自上而下：
- * 1) 顶部应用名「蓝鲸·X」居中（headlineLarge，页面顶部留白）；
- * 2) 版本号（[BuildConfig.VERSION_NAME]，v0.5.10 起 buildConfig 已开启）；
+ * 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT）：v0.5.10 重做；v0.5.10c 连击目标迁移 + 热区槽位删除。布局自上而下：
+ * 1) 顶部应用名「蓝鲸·X」居中（headlineLarge，页面顶部留白保持 v0.5.10b 紧凑值）；
+ * 2) 版本号行条目（v0.5.10c 起为连击目标）：AboutLinkRow 同款独立行——左「版本」+ 右 [BuildConfig.VERSION_NAME]
+ *    （v0.5.10 起 buildConfig 已开启），整行可点带水波纹；
  * 3-5) 行式条目区（列表行样式 + 点击水波纹）：GitHub 主页 / 项目地址 / 反馈（ACTION_VIEW 外链）；
- * 6) 反馈行与致谢区之间的隐藏热区（快速连点 [ABOUT_HOT_TAPS_UNLOCK] 次、相邻间隔 ≤ [ABOUT_HOT_TAP_WINDOW_MS]ms
- *    解锁；解锁态 [logUnlocked] 由 MainScreen 持有——AboutPage 随路由切页离开组合，解锁需本会话保持）；
- *    解锁后同位置显示「收集日志」行：两段式——首次点击开始记录（[DiagLogger.entryCount] 起点偏移 + Snackbar），
- *    期间日志持续入内存缓冲；再次点击停止 → [DiagLogger.entriesSince] 取起点后新增条目 → 脱敏（型号/别名/
- *    pwd/ssid 键值/MAC/IPv4/6 位 PIN）→ 写 txt（自定义接收目录直接 SAF 落盘；未自定义则本次弹目录选择器选
- *    落盘位置，Downloads 初始，不改接收目录设置）→ Toast「已保存日志：…」；
- * 8) 底部致谢区（DeepSeek / 王宝煲 / LocalSend / MacroDroid / Material 3 / GPL-3.0）。
+ * 6) 链接 Surface 与致谢 Surface 之间：v0.5.10c 起正常形态无中间元素（两 Surface 直接相邻、仅容器常规间距，
+ *    原 60dp 淡条隐藏热区已删除）；版本号行快速连点 [ABOUT_VERSION_TAPS_UNLOCK] 次（相邻间隔 ≤
+ *    [ABOUT_VERSION_TAP_WINDOW_MS]ms，超时清零）解锁；解锁态 [logUnlocked] 由 MainScreen 持有——AboutPage 随
+ *    路由切页离开组合，解锁需本会话保持）；解锁后同槽位（链接 Surface 正下方紧邻）显示「收集日志」卡片，两段式：
+ *    首次点击开始记录（[DiagLogger.entryCount] 起点偏移 + Snackbar），期间日志持续入内存缓冲；再次点击停止 →
+ *    [DiagLogger.entriesSince] 取起点后新增条目 → 脱敏（型号/别名/pwd/ssid 键值/MAC/IPv4/6 位 PIN）→ 写 txt
+ *    （自定义接收目录直接 SAF 落盘；未自定义则本次弹目录选择器选落盘位置，Downloads 初始，不改接收目录设置）
+ *    → Toast「已保存日志：…」；
+ * 7) 底部致谢区（DeepSeek / 王宝煲 / LocalSend / MacroDroid / Material 3 / GPL-3.0）。
  */
 @Composable
 private fun AboutPage(
     ui: BluelinkUiState,
     engine: BluelinkEngine?,
-    // v0.5.10：隐藏热区解锁态（MainScreen 持有；AboutPage 只读展示 + 上报解锁）
+    // v0.5.10（v0.5.10c 注释同步：连击目标为版本号行）：解锁态（MainScreen 持有；AboutPage 只读展示 + 上报解锁）
     logUnlocked: Boolean,
     onLogUnlocked: () -> Unit,
 ) {
@@ -1482,9 +1485,9 @@ private fun AboutPage(
     var collecting by remember { mutableStateOf(false) }
     var collectStart by remember { mutableStateOf(0L) }
     var pendingLogText by remember { mutableStateOf<String?>(null) }
-    // 隐藏热区连点计数（相邻间隔 >2s 清零）
-    var hotTaps by remember { mutableStateOf(0) }
-    var lastHotTapMs by remember { mutableStateOf(0L) }
+    // v0.5.10c：版本号行连点计数（相邻间隔 >2s 清零；原隐藏热区计数变量随热区删除改名迁移）
+    var versionTaps by remember { mutableStateOf(0) }
+    var lastVersionTapMs by remember { mutableStateOf(0L) }
 
     // 未自定义接收目录时「本次保存」的目录选择器（SAF OpenDocumentTree；初始 Downloads；不改接收目录设置）
     val logDirLauncher = rememberLauncherForActivityResult(
@@ -1500,13 +1503,14 @@ private fun AboutPage(
         }
     }
 
-    // 隐藏热区点击：五连击计数（相邻间隔 ≤ ABOUT_HOT_TAP_WINDOW_MS 递增，超时清零；达 5 次解锁）
-    fun onHotZoneTap() {
+    // v0.5.10c：版本号行连击（连击目标由隐藏热区迁至版本号行条目；原连击处理函数改名 onVersionTap，
+    // 计数逻辑零改动：相邻间隔 ≤ ABOUT_VERSION_TAP_WINDOW_MS 递增、超时清零、达 5 次解锁）
+    fun onVersionTap() {
         val now = SystemClock.elapsedRealtime()
-        hotTaps = if (now - lastHotTapMs <= ABOUT_HOT_TAP_WINDOW_MS) hotTaps + 1 else 1
-        lastHotTapMs = now
-        if (hotTaps >= ABOUT_HOT_TAPS_UNLOCK) {
-            hotTaps = 0
+        versionTaps = if (now - lastVersionTapMs <= ABOUT_VERSION_TAP_WINDOW_MS) versionTaps + 1 else 1
+        lastVersionTapMs = now
+        if (versionTaps >= ABOUT_VERSION_TAPS_UNLOCK) {
+            versionTaps = 0
             onLogUnlocked()
         }
     }
@@ -1555,21 +1559,27 @@ private fun AboutPage(
             TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
 
-        // 1-2) 顶部应用名居中（页面顶部留白）+ 版本号
-        // v0.5.10b 顶部留白压缩：SpaceXl(24dp)→SpaceMd(12dp)。本文件该写法仅 About 页一处（grep 唯一），
-        // 未影响其它页；目的：整页内容上移，隐藏热区 / 解锁「收集日志」行进入首屏可见区（不自动滚动）。
+        // 1-2) 顶部应用名居中（页面顶部留白，保持 v0.5.10b 紧凑值）+ 版本号行条目（v0.5.10c 连击目标）
+        // v0.5.10b 顶部留白压缩：SpaceXl(24dp)→SpaceMd(12dp)，本任务保持不回退。
+        // v0.5.10c：版本号小字 Text → AboutLinkRow 同款独立行条目（左「版本」+ 右 BuildConfig.VERSION_NAME、
+        // 整行可点带水波纹）——隐藏热区废弃后本行为新连击目标；原版本号下 SpaceMd 大空档随热区一并移除，
+        // 正常形态链接 Surface 与致谢 Surface 直接相邻、无留白。
         Spacer(Modifier.height(SpacingTokens.SpaceMd))
         Text(
             text = "蓝鲸·X",
             style = MaterialTheme.typography.headlineLarge,
             color = MaterialTheme.colorScheme.primary,
         )
-        Text(
-            text = "版本 ${BuildConfig.VERSION_NAME}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        AboutLinkRow(
+            title = "版本",
+            onClick = { onVersionTap() },
+            trailing = BuildConfig.VERSION_NAME,
         )
-        Spacer(Modifier.height(SpacingTokens.SpaceMd))
+        // v0.5.10c 条件间距（版本号行 ↔ 链接 Surface）：正常态 SpaceXs 分组留白；解锁态去掉额外 Spacer（仅
+        // 容器常规 spacedBy）→ 链接 Surface 与其正下方「收集日志」卡片整体上移、按钮进入首屏明显可见。
+        if (!logUnlocked) {
+            Spacer(Modifier.height(SpacingTokens.SpaceXs))
+        }
 
         // 3-5) 行式条目区（列表行样式，同设置页分组行风格；点击水波纹；ACTION_VIEW 外链）
         Surface(
@@ -1598,7 +1608,9 @@ private fun AboutPage(
             }
         }
 
-        // 6) 反馈行与致谢区之间：隐藏热区（未解锁） / 「收集日志」行（已解锁，同位置）
+        // 6) 链接 Surface 与致谢 Surface 之间（v0.5.10c）：正常形态无中间元素（两 Surface 直接相邻，仅容器
+        //    常规 spacedBy；原 60dp 淡条隐藏热区 else 分支已整段删除）；解锁态同槽位渲染「收集日志」卡片——
+        //    位于链接 Surface 正下方紧邻，随上方条件压缩整组上移、首屏可见。卡片两段式内容零改动（v0.5.10）。
         if (logUnlocked) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1633,24 +1645,9 @@ private fun AboutPage(
                     )
                 }
             }
-        } else {
-            // 隐藏热区：低调可点淡条（快速连点 5 次解锁「收集日志」）。
-            // v0.5.10b：alpha 0.25f→0.38f（浅/深色下可辨识为一条「可点淡条」，仍无文字无图标=正常无感知）；
-            // 高度 48→60dp（更大瞄准面；实测 0.25f 在浅色近不可见致连点点偏 = 未解锁主因）。
-            // 命中链核对：本 Box 是 AboutPage Column(verticalScroll) 直接子项，与上下 Surface 不重叠、无 clip/
-            // z 序遮挡；父级仅 verticalScroll（只消费拖拽、不吞 tap）→ 无点击被吞，无需结构性改动；
-            // clickable 默认 ripple 水波纹提供轻量点击反馈（保持无文字无图标）。
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = ABOUT_HOT_ZONE_MIN_HEIGHT)
-                    .clip(MaterialTheme.shapes.large)
-                    .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.38f))
-                    .clickable { onHotZoneTap() },
-            )
         }
 
-        // 8) 底部致谢区（小字号/多行，普通分组容器风格）
+        // 7) 底部致谢区（小字号/多行，普通分组容器风格；v0.5.10c 起正常形态与链接 Surface 直接相邻、无留白）
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surfaceContainerLowest,

@@ -7,18 +7,15 @@ import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback
 import android.net.wifi.WifiManager.LocalOnlyHotspotReservation
-import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
 import android.os.ResultReceiver
 import android.provider.Settings
 import android.widget.Toast
 import com.zglinus.bluelink.ble.RootDetector
 import com.zglinus.bluelink.diag.DiagLogger
-import java.lang.reflect.Field
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
@@ -108,6 +105,9 @@ interface HotspotListener {
      * App 侧不可读——请求 UI 弹出登记框（复用 ④ manualPwdDialog 登记框，模式置
      * systemHotspotPwdMode），请用户按本机热点信息登记 SSID+密码；回填后经
      * [HotspotManager.completeSystemHotspotPassword] 完成 ② 成功结果（ip 现采）。
+     * v0.5.14c：**预设模式（预设启用且 ssid 非空）下本回调不会被触发**——② 系统热点成功后
+     * [HotspotManager.systemTetherSuccess] 直接以预设 SSID/密码等效完成登记（不读实际/不登记），
+     * 仅预设未启用时才走本登记框路径。
      */
     fun onSystemHotspotPasswordRequest()
 
@@ -202,9 +202,11 @@ class HotspotManager(
 
     /**
      * v0.5.9 UI1b-C 热点预设存储（懒初始化：构造 context 可空，经 resolveContext 兜底取；
-     * 不可用（null）→ 预设不生效，完全维持现行为）。消费点：自设 SSID 路径（② 私有 API 反射降级）；
-     * v0.5.14b（Bug1 修复）起 ② startTethering（Binder 直呼/k1-c）系统热点路径亦消费——预设启用时把
-     * 预设 SSID/密码构造进 config 参数注入（见 [presetForTetherConfigInjection]）；
+     * 不可用（null）→ 预设不生效，完全维持现行为）。消费点：
+     * - ② 私有 API 反射 setWifiApEnabled 降级分支自设 SSID/密码（v0.5.9，[presetSsidOr]/[presetPasswordOr]）；
+     * - v0.5.14c 起 ② 系统热点成功路径（PUBLIC_TETHER_PENDING/登记前）：预设启用且 ssid 非空时
+     *   不再等待用户登记，直接以预设 SSID/密码等效完成登记、offer 携带预设值（不读实际 SSID，见
+     *   [presetForSystemTetherOffer]/[systemTetherSuccess]）；预设未启用 → 现行为（等待登记）。
      * ③ LocalOnly 系统生成 SSID/密码**不适用**（不消费预设）；手动④ 预设仅用于预填提示（UI 任务消费）。
      */
     private val presetStore: HotspotPresetStore? by lazy {
@@ -437,10 +439,17 @@ class HotspotManager(
     private fun tryPrivateApiHotspot(): HotspotResult {
         // v0.4.0：先快照热点启动前的旧 Wi-Fi 接口（collectHotspotIp 排除旧 Wi-Fi 网段用）
         snapshotPreHotspotInterfaces()
-        // v0.5.14 启用 ②（回归私有 API 反射路径）：DISABLE_PRIVATE_API=false 时本守卫恒 false
-        // （编译期常量折叠），正常走 k1/c 式按名枚举 Binder 直呼 → setWifiApEnabled 降级全链；
-        // 如需强制 LocalOnly 联调可临时置 true（② 直接失败，状态机既有降级链自动落 ③）
-        if (DISABLE_PRIVATE_API) return HotspotResult(success = false, error = "② 已经 DISABLE_PRIVATE_API 联调开关禁用，降级 ③")
+        // v0.5.14c：② 开关 prefs 化（取代 v0.5.14 编译期常量 DISABLE_PRIVATE_API——已删除，统一走设置页
+        // 「② 私有 API 热点」运行时开关，HotspotPresetStore.privateApiEnabled，默认开）——关闭 → ② 直接
+        // 失败降级 ③（状态机既有降级链自动落 ③，不重编译、改动即生效）；presetStore 不可用（Context
+        // 兜底失败）时按开处理（现行为，不误伤）
+        if (!(presetStore?.privateApiEnabled ?: true)) {
+            DiagLogger.log(
+                tag,
+                "L1_PRIVATE_API：② 已关闭（设置页「② 私有 API 热点」开关 off），返回失败降级 ③",
+            )
+            return HotspotResult(success = false, error = "② 已关闭(设置开关)，降级 ③")
+        }
         val ctx = resolveContext()
         if (ctx == null) {
             val err = "L1_PRIVATE_API：Context 不可用（注入与 ActivityThread.currentApplication() 兜底均失败）"
@@ -599,7 +608,9 @@ class HotspotManager(
      *   确认路径时 confirmBinderTether 兜底——回调错误码 0 即成功（AOSP TETHER_ERROR_NO_ERROR）；
      *   回调未达时轮询 `getWifiApState`（smali Lu3/a.a 归一化：>10 减 10）∈{2=ENABLING,3=ENABLED}
      *   即成功（smali b() 判定）；状态不可读（hidden 拦截）以「回调码 0」为准；8s 超时兜底；
-     * - 成功 → 系统预配热点已开（SSID/密码为系统配置、App 不可读）→ 主线程触发
+     * - 成功 → 系统预配热点已开（SSID/密码为系统配置、App 不可读）→ v0.5.14c 起预设分流
+     *   （见 [systemTetherSuccess]）：预设启用且 ssid 非空 → 不再登记，直接以预设 SSID/密码等效完成
+     *   登记（offer 携带预设值、不读实际 SSID）；预设未启用 → 现行为：主线程触发
      *   [HotspotListener.onSystemHotspotPasswordRequest]，返回 [PUBLIC_TETHER_PENDING] 标记，
      *   [completeSystemHotspotPassword] 登记后经 [dispatchBinderTetherResult] 收敛成功结果（登记机制不动）；
      * - 失败（快失败/枚举 find null/全部候选失败/异常/回调错误码非 0/8s 超时）→ 失败透传（不吞），
@@ -768,12 +779,11 @@ class HotspotManager(
      *    时 Proxy）+ `Handler(Looper.getMainLooper())`（若有 Handler 参）；
      * b. 参数是 (int, ResultReceiver, boolean) 或 (int, Executor, callback) → 对应实参
      *    （int=0 / 现 ResultReceiver / 单线程 Executor）；
-     * c. 参数含 TetheringRequestParcel → 无预设时记一次失败原因跳过（sdk31 构造不可行，保持兼容分支）；
-     * d. v0.5.14b（Bug1 修复）预设注入：预设启用（[presetForTetherConfigInjection] 非 null）时，config 签名
-     *    候选（参数含 TetherConfigParcel/TetheringRequestParcel，见 [isConfigCarryingMethod]）**排最前优先**
-     *    ——把预设 SSID/密码反射构造进 config parcel（[buildTetherArgsWithConfig]→[buildConfigParcel]）随
-     *    startTethering 注入；无 config 签名/构造或 invoke 失败 → 保持现状（系统热点）并记录
-     *    「② 系统热点路径不支持预设注入（sdk/签名限制）」；预设未启用 → 完全现行为（c. 原样）。
+     * c. 参数含 TetheringRequestParcel/TetherConfigParcel（config 携带签名）→ 记一次失败原因跳过
+     *    （sdk31+ 构造不可行，保持兼容分支）——v0.5.14b 曾把预设 SSID/密码反射构造进 config parcel
+     *    注入（config 签名候选排最前优先），v0.5.14c 废弃该注入（k1/c 12S 实测无 config 签名、
+     *    注入不可行）：startTethering 不再带 config、按声明序挑可调签名（回到 14b 前现状），
+     *    预设新语义移到 ② 系统热点成功后的 offer（见 [systemTetherSuccess]：不登记、直接携带预设值）。
      * 全部候选失败 → 返回失败原因（列出该方法签名与异常）；无该方法（find null）→ 失败
      * 「本 ROM 无 startTethering hidden 方法」→ 降级。
      *
@@ -831,49 +841,17 @@ class HotspotManager(
             }
             return null
         }
-        // v0.5.14b（Bug1 修复）：② startTethering 系统热点路径预设注入——预设启用（preset 非 null）时把
-        // 预设 SSID/密码构造进 config 参数（TetherConfigParcel/TetheringRequestParcel）注入：候选排序把
-        // 带 config 参数的签名排最前优先尝试（真机诊断根因：无 config 的签名在声明序中靠前，先被挑中
-        // invoke 成功 → 系统按默认配置开热点（MIUI AndroidShare_3746），带 config 签名从未被尝试）；
-        // 挑不到/构造或 invoke 失败 → 保持现状（系统热点）+ 记录；预设未启用 → 完全现行为（原声明序 +
-        // [buildTetherArgs]，config 签名照旧跳过）。
-        val preset = presetForTetherConfigInjection() // null=预设未启用/ssid 空/长度非法 → 不注入
-        var presetInjected = false // config 签名是否已成功 invoke（预设注入生效）
-        val orderedCandidates = if (preset != null) {
-            val (withConfig, withoutConfig) = candidates.partition { isConfigCarryingMethod(it) }
-            if (withConfig.isEmpty()) {
-                // 规格文案：挑不到 config 签名 → 保持现状（系统热点）并记录
-                DiagLogger.log(
-                    tag,
-                    "② 系统热点路径不支持预设注入（sdk=${Build.VERSION.SDK_INT}/签名限制）：枚举 ${candidates.size} 个 $name 候选均无 config 参数（TetherConfigParcel/TetheringRequestParcel），保持现状（系统热点）",
-                )
-                candidates
-            } else {
-                DiagLogger.log(
-                    tag,
-                    "② 预设启用：config 签名候选优先（${withConfig.size}/${candidates.size} 个），预设 SSID/密码构造进 config 注入（密码不回显）",
-                )
-                withConfig + withoutConfig
-            }
-        } else {
-            candidates
-        }
+        // v0.5.14c：移除 v0.5.14b 的 config 预设注入（k1/c 12S 实测无 config 签名、注入不可行）——
+        // 回到 14b 前现状：候选按声明序（candidates 原样）全部走原矩阵 [buildTetherArgs]（config 携带
+        // 签名不可构造 → 记失败原因跳过）；预设新语义只作用于 ② 系统热点成功后的 offer——
+        // [systemTetherSuccess] 内预设模式不登记、直接携带预设值上抛（见 [presetForSystemTetherOffer]）。
         // 候选矩阵：按 parameterTypes 构造实参逐一 invoke（全部 try/Catch）
         val failures = mutableListOf<String>()
         var parcelSkipped = false
-        for (c in orderedCandidates) {
-            // 预设启用且为 config 签名 → 带注入实参构造（预设 SSID/密码填进 config parcel）；
-            // 其余（无预设 / 非 config 签名）→ 原矩阵 [buildTetherArgs]（语义不变）
-            val args = if (preset != null && isConfigCarryingMethod(c)) {
-                buildTetherArgsWithConfig(c, binderCode, preset.first, preset.second)
-            } else {
-                buildTetherArgs(ctx, c, binderCode)
-            }
+        for (c in candidates) {
+            val args = buildTetherArgs(ctx, c, binderCode)
             if (args == null) {
-                if (preset != null && isConfigCarryingMethod(c)) {
-                    failures.add("${methodSignature(c)}：预设注入 config 构造/填值失败（该候选跳过）")
-                    DiagLogger.log(tag, "k1/c 预设注入候选跳过：${methodSignature(c)}（config parcel 构造/填值失败，转下一候选）")
-                } else if (c.parameterTypes.any { it.name == TETHER_REQUEST_PARCEL_CLASS }) {
+                if (c.parameterTypes.any { it.name == TETHER_REQUEST_PARCEL_CLASS }) {
                     if (!parcelSkipped) {
                         parcelSkipped = true
                         failures.add("${methodSignature(c)}：含 TetheringRequestParcel（sdk31 构造不可行，跳过）")
@@ -888,13 +866,6 @@ class HotspotManager(
                 c.isAccessible = true
                 c.invoke(cm, *args)
                 DiagLogger.log(tag, "k1/c invoke 成功：${methodSignature(c)}（实参 ${args.size} 个）")
-                if (preset != null && isConfigCarryingMethod(c)) {
-                    presetInjected = true
-                    DiagLogger.log(
-                        tag,
-                        "② 预设注入成功：config 参数已携带预设 SSID/密码（ssid=${preset.first} pwdLen=${preset.second.length}，密码不回显），等待热点启用确认",
-                    )
-                }
                 // invoke 成功后 2s 等待（smali 001a）→ mdWifiApEnabled 轮询确认（smali b() 判定）
                 try {
                     Thread.sleep(2_000L)
@@ -902,18 +873,13 @@ class HotspotManager(
                     Thread.currentThread().interrupt()
                 }
                 if (mdWifiApEnabled(wm)) {
-                    if (preset != null && !presetInjected) {
-                        DiagLogger.log(tag, "② 预设注入未生效（config 签名不可用/未调起），热点为系统配置，保持现状（等待用户登记）")
-                    }
-                    DiagLogger.log(tag, "k1/c 枚举启动成功：2s 后 mdWifiApEnabled 确认已开，走 systemTetherSuccess（登记复用）")
+                    DiagLogger.log(tag, "k1/c 枚举启动成功：2s 后 mdWifiApEnabled 确认已开，走 systemTetherSuccess（② 系统热点成功：预设模式 offer 预设值 / 预设未启用等待登记）")
                     return systemTetherSuccess()
                 }
                 // 失败 → mdTetherBinder 兜底（次选），未决返回 null（confirmBinderTether 继续收敛）
                 DiagLogger.log(
                     tag,
-                    "k1/c invoke 成功但 2s 后 mdWifiApEnabled 未确认" +
-                        (if (presetInjected) "（预设 config 已注入但热点未确认启用，可能系统忽略 config）" else "") +
-                        "，落 mdTetherBinder 兜底（次选）",
+                    "k1/c invoke 成功但 2s 后 mdWifiApEnabled 未确认，落 mdTetherBinder 兜底（次选）",
                 )
                 mdTetherBinder(ctx, turnOn, binderCode)
                 return null
@@ -948,14 +914,15 @@ class HotspotManager(
      *    （[instantiateTetherCallback]）+ `Handler(Looper.getMainLooper())`（若有 Handler 参）；
      * b. (int, ResultReceiver, boolean) / (int, Executor, callback) → int=0 / 现 ResultReceiver /
      *    单线程 Executor；
-     * c. 含 TetheringRequestParcel → null（sdk31 构造不可行，保持兼容分支，调用方记失败原因跳过；
-     *    v0.5.14b 预设启用时 config 签名改走 [buildTetherArgsWithConfig]）。
+     * c. 含 TetheringRequestParcel/TetherConfigParcel（config 携带签名）→ null（sdk31+ 构造不可行，
+     *    保持兼容分支，调用方记失败原因跳过；v0.5.14b 曾加 [buildTetherArgsWithConfig] config 注入分支，
+     *    v0.5.14c 已废弃移除，本矩阵不再有注入路径）。
      * 其余不可构造参数 → null（该候选跳过）。
      */
     private fun buildTetherArgs(ctx: Context, m: Method, binderCode: AtomicInteger): Array<Any?>? {
         val pts = m.parameterTypes
         if (pts.isEmpty()) return null
-        if (pts.any { it.name == TETHER_REQUEST_PARCEL_CLASS }) return null // c.（无预设注入的兼容分支）
+        if (pts.any { it.name == TETHER_REQUEST_PARCEL_CLASS }) return null // c.（config 携带签名不可构造的兼容分支）
         val args = arrayOfNulls<Any?>(pts.size)
         for (i in pts.indices) {
             val p = pts[i]
@@ -965,7 +932,7 @@ class HotspotManager(
         return args
     }
 
-    /** 候选矩阵单参数实参（[buildTetherArgs] / [buildTetherArgsWithConfig] 共用；不可构造 → null）。 */
+    /** 候选矩阵单参数实参（[buildTetherArgs] 用；不可构造 → null）。 */
     private fun buildSimpleTetherArg(p: Class<*>, binderCode: AtomicInteger): Any? = when {
         p == java.lang.Integer.TYPE -> Integer.valueOf(TETHERING_TYPE_WIFI) // int=0
         p == java.lang.Boolean.TYPE -> java.lang.Boolean.FALSE // boolean=false
@@ -976,140 +943,6 @@ class HotspotManager(
         } // b. 单线程 Executor
         p.simpleName == "OnStartTetheringCallback" -> instantiateTetherCallback(p) // a.（失败 null → 该候选跳过）
         else -> null // 其他不可构造参数
-    }
-
-    /**
-     * v0.5.14b（Bug1 修复）：② startTethering 预设注入的候选实参构造（仅带 config 参数的签名走本函数，
-     * 见 [isConfigCarryingMethod]；与 [buildTetherArgs] 平行）：
-     * - config 参数（TetherConfigParcel / TetheringRequestParcel）→ [buildConfigParcel] 反射实例化并
-     *   按运行时字段名填预设 SSID/密码（缺名/类型不符容错；构造失败 null → 该候选跳过、不注入）；
-     * - IBinder 参数（部分 ROM `startTethering(int, IBinder, IBinder, TetherConfigParcel)` 变体）→ `new Binder()`；
-     * - 其余参数复用 [buildSimpleTetherArg] 同款矩阵（int=0 / boolean=false / ResultReceiver /
-     *   Handler / Executor / OnStartTetheringCallback）。
-     * 任一参数不可构造 → null（该候选跳过）。
-     */
-    private fun buildTetherArgsWithConfig(m: Method, binderCode: AtomicInteger, ssid: String, pwd: String): Array<Any?>? {
-        val pts = m.parameterTypes
-        if (pts.isEmpty()) return null
-        val args = arrayOfNulls<Any?>(pts.size)
-        for (i in pts.indices) {
-            val p = pts[i]
-            val arg = when {
-                p.name == TETHER_CONFIG_PARCEL_CLASS || p.name == TETHER_REQUEST_PARCEL_CLASS ->
-                    buildConfigParcel(p, ssid, pwd)
-                p == IBinder::class.java -> Binder()
-                else -> buildSimpleTetherArg(p, binderCode)
-            }
-            if (arg == null) return null
-            args[i] = arg
-        }
-        return args
-    }
-
-    /** 候选方法是否携带 config parcel 参数（TetherConfigParcel / TetheringRequestParcel；② 预设注入目标签名）。 */
-    private fun isConfigCarryingMethod(m: Method): Boolean =
-        m.parameterTypes.any { it.name == TETHER_CONFIG_PARCEL_CLASS || it.name == TETHER_REQUEST_PARCEL_CLASS }
-
-    /**
-     * v0.5.14b（Bug1 修复）：反射构造 config parcel（TetherConfigParcel / TetheringRequestParcel，
-     * android.net 包 hidden parcel，无编译期类可用）并填预设 SSID/密码：实例化优先公开无参构造、失败经
-     * `sun.misc.Unsafe.allocateInstance` 免构造（[newParcelInstance]，与 [instantiateTetherCallback] 同款手法）
-     * → [fillConfigParcelFields] 按声明字段名/类型容错填值。成功返回实例；任一环节异常 → null
-     * （该候选跳过，不注入、保持现状系统热点）。
-     */
-    private fun buildConfigParcel(p: Class<*>, ssid: String, pwd: String): Any? = try {
-        val inst = newParcelInstance(p) ?: return null
-        DiagLogger.log(
-            tag,
-            "k1/c 预设注入：构造 ${p.name}（可见字段=${p.declaredFields.map { it.name }.sorted().joinToString(",")}）",
-        )
-        fillConfigParcelFields(inst, p, ssid, pwd)
-        inst
-    } catch (e: Exception) {
-        DiagLogger.log(tag, "k1/c 预设注入：构造 ${p.name} 失败（该候选跳过，不注入）: $e")
-        null
-    }
-
-    /** 实例化 hidden parcel 类：优先公开无参构造；无 → `sun.misc.Unsafe.allocateInstance` 免构造兜底。 */
-    private fun newParcelInstance(cls: Class<*>): Any? {
-        try {
-            val ctor = cls.getDeclaredConstructor()
-            ctor.isAccessible = true
-            return ctor.newInstance()
-        } catch (e: Exception) {
-            // 无公开无参构造（或调用被 hidden API 拦截）→ Unsafe 免构造兜底
-        }
-        return try {
-            val unsafeClass = Class.forName("sun.misc.Unsafe")
-            val theUnsafe = unsafeClass.getDeclaredField("theUnsafe")
-            theUnsafe.isAccessible = true
-            val unsafe = theUnsafe.get(null)
-            val alloc = unsafeClass.getMethod("allocateInstance", Class::class.java)
-            alloc.invoke(unsafe, cls)
-        } catch (e: Exception) {
-            DiagLogger.log(tag, "k1/c 预设注入：${cls.name} 实例化失败（该候选跳过，不注入）: $e")
-            null
-        }
-    }
-
-    /**
-     * v0.5.14b（Bug1 修复）：按声明字段名/类型填 config parcel（字段缺名/类型不符 → 跳过不崩；
-     * 每字段日志便于机型差异排查）：
-     * - 嵌套 TetherConfigParcel 类型字段（TetheringRequestParcel.config 等）→ 递归 [buildConfigParcel] 填值；
-     * - SSID 类字段（wifiSsid/ssid/mSsid/apSsid 等，String/String[]）→ 预设 ssid（不加引号，SoftAp 语义）；
-     * - 密码类字段（wifiPassphrase/passphrase/password/preSharedKey 等，String/String[]）→ 预设 pwd；
-     * - 安全类型字段（wifiSecurityType/securityType，int）→ [SOFTAP_SECURITY_WPA2_PSK]（=1，WPA2_PSK）；
-     * - isWifi（boolean）→ true；showProvisioningUi（boolean）→ false（不弹预配 UI）；type（int）→ 0（WIFI）。
-     */
-    private fun fillConfigParcelFields(inst: Any, cls: Class<*>, ssid: String, pwd: String) {
-        for (f in cls.declaredFields) {
-            try {
-                f.isAccessible = true
-                val t = f.type
-                when {
-                    t.name == TETHER_CONFIG_PARCEL_CLASS -> { // 嵌套 TetherConfigParcel（request 包裹 config 形态）
-                        val nested = buildConfigParcel(t, ssid, pwd)
-                        if (nested != null) {
-                            f.set(inst, nested)
-                            DiagLogger.log(tag, "k1/c 预设注入：${cls.simpleName}.${f.name} ← 嵌套 ${t.simpleName}（已填 SSID/密码）")
-                        }
-                    }
-                    isConfigSsidField(f) -> stringParcelValue(t, ssid)?.let { f.set(inst, it) }
-                    isConfigPassphraseField(f) -> stringParcelValue(t, pwd)?.let { f.set(inst, it) }
-                    f.name.equals("wifiSecurityType", ignoreCase = true) && t == java.lang.Integer.TYPE ->
-                        f.setInt(inst, SOFTAP_SECURITY_WPA2_PSK)
-                    f.name.equals("securityType", ignoreCase = true) && t == java.lang.Integer.TYPE ->
-                        f.setInt(inst, SOFTAP_SECURITY_WPA2_PSK)
-                    f.name.equals("isWifi", ignoreCase = true) && t == java.lang.Boolean.TYPE -> f.setBoolean(inst, true)
-                    f.name.equals("showProvisioningUi", ignoreCase = true) && t == java.lang.Boolean.TYPE -> f.setBoolean(inst, false)
-                    f.name.equals("type", ignoreCase = true) && t == java.lang.Integer.TYPE -> f.setInt(inst, TETHERING_TYPE_WIFI)
-                    else -> Unit
-                }
-            } catch (e: Exception) {
-                DiagLogger.log(tag, "k1/c 预设注入：${cls.simpleName}.${f.name} 填值失败（忽略）: ${e.javaClass.simpleName}")
-            }
-        }
-    }
-
-    /** SSID 类字段名判定（wifiSsid/ssid/mSsid/apSsid/softApSsid 等，忽略大小写；类型须 String 或 String[]）。 */
-    private fun isConfigSsidField(f: Field): Boolean {
-        val n = f.name.lowercase(Locale.US)
-        return n in setOf("wifissid", "ssid", "mssid", "apssid", "softapssid") &&
-            (f.type == String::class.java || (f.type.isArray && f.type.componentType == String::class.java))
-    }
-
-    /** 密码类字段名判定（wifiPassphrase/passphrase/password/preSharedKey/wpaPsk 等，忽略大小写；类型须 String 或 String[]）。 */
-    private fun isConfigPassphraseField(f: Field): Boolean {
-        val n = f.name.lowercase(Locale.US)
-        return n in setOf("wifipassphrase", "passphrase", "password", "psk", "presharedkey", "wpapsk") &&
-            (f.type == String::class.java || (f.type.isArray && f.type.componentType == String::class.java))
-    }
-
-    /** parcel 字符串字段值归一：String → 原值；String[] → 单元素数组；其它类型 → null（该字段跳过）。 */
-    private fun stringParcelValue(type: Class<*>, v: String): Any? = when {
-        type == String::class.java -> v
-        type.isArray && type.componentType == String::class.java -> arrayOf(v)
-        else -> null
     }
 
     /**
@@ -1415,18 +1248,37 @@ class HotspotManager(
     }
 
     /**
-     * ② 系统预配热点成功收敛（Binder 直呼回调码 0）：
-     * 系统预配热点已开启（SSID/密码为系统配置、App 不可读）——主线程触发
-     * [HotspotListener.onSystemHotspotPasswordRequest] 请用户登记本机系统热点 SSID+密码；
-     * 返回 [PUBLIC_TETHER_PENDING] 标记（startAsync 持有异步闸，等待
-     * [completeSystemHotspotPassword] 经 [dispatchBinderTetherResult] 收敛成功结果，ip 现采）。
+     * ② 系统预配热点成功收敛（Binder 直呼回调码 0）——v0.5.14c 起预设分流：
+     * 系统预配热点已开启，SSID/密码为系统配置、App 不可读（预设未启用时）——主线程触发
+     * [HotspotListener.onSystemHotspotPasswordRequest] 请用户按本机系统热点登记 SSID+密码；
+     * **预设模式（预设启用且 ssid 非空，见 [presetForSystemTetherOffer]）：用户已按预设名称+密码手动
+     * 开好系统热点——不再等待登记**，直接以预设 SSID/密码等效完成登记（主线程
+     * [completeSystemHotspotPassword]，offer 携带预设值、不读实际 SSID；预设密码留空 → 随机生成，
+     * 与既有语义一致）。
+     * 返回 [PUBLIC_TETHER_PENDING] 标记（startAsync 持有异步闸；预设模式经登记完成的
+     * [completeSystemHotspotPassword] → [dispatchBinderTetherResult] 收敛成功结果，ip 现采）。
      */
     private fun systemTetherSuccess(): HotspotResult {
-        DiagLogger.log(
-            tag,
-            "系统预配热点已开启（SSID/密码为系统配置、App 不可读），请求用户登记本机系统热点 SSID+密码",
-        )
-        mainHandler.post { listener.onSystemHotspotPasswordRequest() }
+        val preset = presetForSystemTetherOffer()
+        if (preset != null) {
+            val (ssid, pwd) = preset
+            DiagLogger.log(
+                tag,
+                "② 系统热点：预设模式开启，offer 携带预设 SSID（不读实际/不登记）：ssid=$ssid pwdLen=${pwd.length}（密码不回显）",
+            )
+            // 主线程等效完成登记（与引擎回填 [completeSystemHotspotPassword] 同一条收敛链；pendingBinderTetherCb
+            // 已由 startAsync 预留，收敛后状态机 onPrivateApiAsyncResult → buildOffer 携带预设 SSID/密码）。
+            // v0.5.14c 小决策：postDelayed 略等热点接口 IP 就绪再采集（同 v0.4.1 L2 onStarted 时机接口未起的
+            // 延迟枚举思路；登记框路径因用户手动输入天然有数秒缓冲，预设模式需主动让出）；期间被中止 →
+            // completeSystemHotspotPassword 见 pending=null 自动忽略，幂等安全。
+            mainHandler.postDelayed({ completeSystemHotspotPassword(ssid, pwd) }, SYSTEM_TETHER_PRESET_COMPLETE_DELAY_MS)
+        } else {
+            DiagLogger.log(
+                tag,
+                "系统预配热点已开启（SSID/密码为系统配置、App 不可读），请求用户登记本机系统热点 SSID+密码",
+            )
+            mainHandler.post { listener.onSystemHotspotPasswordRequest() }
+        }
         return HotspotResult(success = false, error = PUBLIC_TETHER_PENDING)
     }
 
@@ -2086,29 +1938,23 @@ class HotspotManager(
     }
 
     /**
-     * v0.5.14b（Bug1 修复）：② startTethering（Binder 直呼/k1-c）系统热点路径的预设注入取值——
-     * 预设启用（[HotspotPresetStore.enabled]）且 ssid 非空（1..32 合法）时返回 (ssid, pwd)：pwd 为预设
-     * 密码，留空沿用随机生成（与降级 setWifiApEnabled 分支 [presetPasswordOr] 同语义）；ssid 空/超长或
-     * 密码长度非法（WPA2 需 8..63，防注入被系统拒）→ null（不注入，② 完全保持现行为/系统热点）。
+     * v0.5.14c：② 系统热点成功路径的预设 offer 取值（取代 v0.5.14b 的 config 注入取值
+     * [presetForTetherConfigInjection]，已废弃移除）——预设启用（[HotspotPresetStore.enabled]）且
+     * ssid 非空时返回 (ssid, pwd)：pwd 为预设密码，留空沿用随机生成（与降级 setWifiApEnabled 分支
+     * [presetPasswordOr] 同语义）；预设未启用 / ssid 空 → null（② 完全保持现行为：等待用户登记）。
+     * 仅影响 offer 载荷（不再注入系统 config，无系统拒绝风险）——ssid/密码长度不再校验：热点由用户
+     * 手动按预设名开好，offer 原样携带预设值即可（供对端按预设名加入）。
      */
-    private fun presetForTetherConfigInjection(): Pair<String, String>? {
+    private fun presetForSystemTetherOffer(): Pair<String, String>? {
         val store = presetStore
         if (store == null || !store.enabled()) return null
         val ssid = store.ssid()
         if (ssid.isBlank()) return null
-        if (ssid.length > 32) {
-            DiagLogger.log(tag, "② 预设 SSID 长度非法（${ssid.length}>32），不注入（保持现状系统热点）")
-            return null
-        }
         val presetPwd = store.password()
-        val pwd = presetPwd ?: generatePassword() // 留空随机（与降级分支同语义；登记框按系统显示回填）
-        if (pwd.length !in 8..63) {
-            DiagLogger.log(tag, "② 预设密码长度非法（${pwd.length}，WPA2 需 8..63），不注入（保持现状系统热点）")
-            return null
-        }
+        val pwd = presetPwd ?: generatePassword() // 留空随机（与降级分支同语义）
         DiagLogger.log(
             tag,
-            "② startTethering 预设注入生效：ssid=$ssid pwdLen=${pwd.length}" +
+            "② 系统热点预设模式生效：ssid=$ssid pwdLen=${pwd.length}" +
                 "（预设密码${if (presetPwd != null) "启用" else "留空→随机生成"}，密码不回显）",
         )
         return ssid to pwd
@@ -2129,13 +1975,6 @@ class HotspotManager(
     }
 
     companion object {
-        /**
-         * ② 私有 API 路径联调开关：v0.5.14 起置 false（启用 ②，回归私有 API 反射路径——
-         * k1/c 式按名枚举 Binder 直呼第一手段 + setWifiApEnabled 降级全链，见 [tryPrivateApiHotspot]）；
-         * 如需强制 LocalOnly（③）联调可临时置 true（② 直接失败、走状态机既有降级链落 ③）。
-         */
-        private const val DISABLE_PRIVATE_API = false
-
         /** SSID 前缀。 */
         private const val SSID_PREFIX = "Bluelink-"
 
@@ -2196,14 +2035,11 @@ class HotspotManager(
         /** ② startTethering 成功回调码（AOSP TetherErrorCode NO_ERROR=0 / IConnectivityManager TETHER_ERROR_NO_ERROR=0）。 */
         private const val TETHER_ERROR_NO_ERROR = 0
 
-        /** ② 预设注入 config parcel 类名（android.net 包 hidden parcel，无编译期类，运行时按名反射；Android 11+/部分 ROM startTethering 的 config 参数）。 */
-        private const val TETHER_CONFIG_PARCEL_CLASS = "android.net.TetherConfigParcel"
-
-        /** ② 预设注入 request parcel 类名（sdk31 起 ConnectivityManager/IConnectivityManager 新签名携带；内含 config）。 */
+        /** ② k1/c 候选签名中的 request parcel 类名（sdk31 起 ConnectivityManager/IConnectivityManager 新签名携带 config；含该类参数的签名不可构造 → 候选跳过，保持兼容分支；v0.5.14b 的 config 预设注入（TetherConfigParcel/SOFTAP_SECURITY_WPA2_PSK 等）已废弃移除）。 */
         private const val TETHER_REQUEST_PARCEL_CLASS = "android.net.TetheringRequestParcel"
 
-        /** ② 预设注入 config 的安全类型（SoftApConfiguration.SECURITY_TYPE_WPA2_PSK=1 语义，填 wifiSecurityType/securityType 字段；0=开放）。 */
-        private const val SOFTAP_SECURITY_WPA2_PSK = 1
+        /** v0.5.14c：② 系统热点预设模式完成登记的 postDelayed 等待（等效登记前略等热点接口 IP 就绪再采集；同 v0.4.1 L2 onStarted 延迟枚举思路——登记框路径因用户手动输入天然有数秒缓冲，预设模式需主动让出；期间被中止 → completeSystemHotspotPassword 见 pending=null 自动忽略）。 */
+        private const val SYSTEM_TETHER_PRESET_COMPLETE_DELAY_MS: Long = 1_500L
 
         /** ② k1/c 串（md-in/hotspot-symbols.txt k1/c 段，dex 1888568）：startTethering 按名枚举 find null 时的日志（只记日志不崩）。 */
         private const val K1C_START_TETHERING_NOT_FOUND = "ConnectivityManager.startTetheringMethod() is not found"

@@ -2465,6 +2465,57 @@ class BluelinkEngine(private val context: Context) {
     /** 组网/同网直连前置判定：模式非「关」且本会话尚未验证通过 → 需先完成 PIN 验证。 */
     fun pinRequired(): Boolean = pinStore.getMode() != PinStore.MODE_OFF && !ui.pinVerifyOk
 
+    // ============ v0.5.14c：扫描消失自动移除（防误清缓冲） ============
+
+    /** 扫描运行期各设备最后出现时间戳（address → epoch ms；handleScanResult 每收到一次广播即刷新——与
+     *  DeviceEntry.lastSeen 的「rssi 变化或 >5s 才更新」节流解耦，作消失判定的准确基准）。 */
+    private val scanLastSeen = mutableMapOf<String, Long>()
+
+    /**
+     * 扫描消失自动移除定时器（v0.5.14c）：扫描运行期每 [STALE_SCAN_CHECK_INTERVAL_MS]（10s）周期检查——
+     * 列表内设备最后出现距今 > [STALE_DEVICE_REMOVE_THRESHOLD_MS]（30s ≈ 连续 3 个周期未见）→ 自动
+     * [removeDevice]（复用既有清除副作用：清弹层/对端卡）并 DiagLogger 记录「扫描消失自动移除」；
+     * 防误清缓冲：① 30s 阈值（BLE 偶发丢包不触发）；② 当前会话对端（已配对/组网中 peer）/ 对端卡选中 /
+     * 弹层打开中的设备不清除（保护期内顺延其 lastSeen 缓冲，解除保护后再给完整 30s 窗口）；
+     * 扫描停止（stopAllBle）时取消；run 内 ui.scanning=false 自停双保险（无扫描时无空跑）。
+     */
+    private val staleScanPruner = object : Runnable {
+        override fun run() {
+            if (!ui.scanning) {
+                mainHandler.removeCallbacks(this)
+                return
+            }
+            val now = System.currentTimeMillis()
+            val peer = sessionManager.currentPeer()
+            val selected = ui.selectedDevice?.address
+            val detail = ui.detailDevice?.address
+            ui.devices.keys.toList().forEach { addr ->
+                val entry = ui.devices[addr] ?: return@forEach
+                // 防误清：会话对端 / 对端卡选中 / 弹层打开中不清除；保护期内顺延缓冲
+                if (addr == peer || addr == selected || addr == detail) {
+                    scanLastSeen[addr] = now
+                    return@forEach
+                }
+                // 基准 lastSeen：优先扫描侧 map（广播级精度）；握手补入等未在扫描 map 的条目回退
+                // DeviceEntry.lastSeen（握手/刷新时刻），杜绝「从未广播过即被秒清」误判
+                val lastSeen = scanLastSeen[addr] ?: entry.lastSeen
+                val idleMs = now - lastSeen
+                if (idleMs > STALE_DEVICE_REMOVE_THRESHOLD_MS) {
+                    DiagLogger.log(TAG, "扫描消失自动移除: $addr（最后出现 ${idleMs / 1000} s 前）")
+                    removeDevice(addr)
+                    scanLastSeen.remove(addr)
+                }
+            }
+            mainHandler.postDelayed(this, STALE_SCAN_CHECK_INTERVAL_MS)
+        }
+    }
+
+    /** v0.5.14c：扫描消失自动移除定时器随扫描启停（startBleIfNeeded/rescan 扫描启动 → 起；stopAllBle → 取消；幂等）。 */
+    private fun scheduleStaleScanPruner() {
+        mainHandler.removeCallbacks(staleScanPruner)
+        mainHandler.postDelayed(staleScanPruner, STALE_SCAN_CHECK_INTERVAL_MS)
+    }
+
     // ---------- 内部 ----------
 
     private fun startBleIfNeeded() {
@@ -2477,6 +2528,7 @@ class BluelinkEngine(private val context: Context) {
         scanner.start(a)
         bluetoothManager?.let { gattServer.start(it) }
         ui.scanning = true
+        scheduleStaleScanPruner() // v0.5.14c：扫描启动 → 消失自动移除定时器随启
     }
 
     private fun stopAllBle() {
@@ -2487,6 +2539,7 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         // T3：停止/关停时停止 LocalSend 服务（服务端停止；已收文件保留）并停接收轮询、清接收态
         mainHandler.removeCallbacks(receivePoller)
+        mainHandler.removeCallbacks(staleScanPruner) // v0.5.14c：扫描消失自动移除定时器随扫描停止取消（幂等）
         localsendServer.stop()
         if (ui.transferState?.startsWith("接收中") == true) ui.transferState = null
         transportPeerIp = ""
@@ -2520,6 +2573,7 @@ class BluelinkEngine(private val context: Context) {
         val addr = device.address ?: return
         if (addr == adapter?.address) return // 跳过本机
         val now = System.currentTimeMillis()
+        scanLastSeen[addr] = now // v0.5.14c：消失判定基准——每次广播都刷新（含同 rssi 重复广播），与条目 5s 节流解耦
         val existing = ui.devices[addr]
         ui.devices[addr] = when {
             existing == null -> DeviceEntry(
@@ -2610,6 +2664,7 @@ class BluelinkEngine(private val context: Context) {
     /** 从扫描列表移除设备（清除失效设备；同时清关联弹层/对端卡并重算组网入口）。 */
     fun removeDevice(address: String) {
         ui.devices.remove(address)
+        scanLastSeen.remove(address) // v0.5.14c：消失判定时间戳随设备清除回收（手动/自动同路径，防泄漏/防误判）
         if (ui.detailDevice?.address == address) {
             ui.detailDevice = null
             updateNetBtnVisibility()
@@ -2632,6 +2687,7 @@ class BluelinkEngine(private val context: Context) {
         scanner.stop()
         scanner.start(a)
         ui.scanning = true
+        scheduleStaleScanPruner() // v0.5.14c：重扫（扫描器重启）→ 消失自动移除定时器随启（幂等防残留旧周期）
         logUiEvent(EVT_INFO, "重新扫描已触发")
     }
 
@@ -2789,6 +2845,12 @@ class BluelinkEngine(private val context: Context) {
 
         /** T3 接收进度轮询间隔。 */
         private const val RECEIVE_POLL_INTERVAL_MS = 1000L
+
+        /** v0.5.14c 扫描消失自动移除：周期检查间隔（扫描运行期每 10s 一次）。 */
+        private const val STALE_SCAN_CHECK_INTERVAL_MS: Long = 10_000L
+
+        /** v0.5.14c 扫描消失自动移除：消失阈值（30s ≈ 连续 3 个检查周期未见才清——防误清缓冲，BLE 偶发丢包不触发）。 */
+        private const val STALE_DEVICE_REMOVE_THRESHOLD_MS: Long = 30_000L
 
         /** v0.5.9 UI1b-C 接收目录存储：prefs 名与键（自定义 SAF 目录持久化；恢复默认=清除该项）。 */
         private const val PREFS_RECEIVE_DIR = "bluelink_receive_dir"

@@ -65,7 +65,8 @@ import com.zglinus.bluelink.ui.theme.extended
  *    removePaired 逐项移除，空态文案）/ 重置本端指纹（确认弹窗 + resetLocalFingerprint +
  *    Snackbar；指纹不对用户展示）/ 清空全部配对（确认弹窗 + clearAll）；
  * 2. 热点：SSID/密码预设草稿 + 自动使用开关 + 「保存预设」（HotspotPresetStore.save；1–32 / 8–63
- *    校验；密码留空=开热点随机）；LocalOnly 场景系统生成不受预设影响（说明）；
+ *    校验；密码留空=开热点随机）+ 「② 私有 API 热点」运行时开关（v0.5.14c，HotspotPresetStore.
+ *    privateApiEnabled 直驱；关 → 组网 ② 直接降级 ③）；LocalOnly 场景系统生成不受预设影响（说明）；
  * 3. 传输：接收目录行——当前目录名（engine.receiveDirUri → DocumentFile 取 name，失败回退 uri
  *    尾段/「默认（Download/Bluelink）」）+ [更改]（页内 OpenDocumentTree launcher →
  *    engine.onReceiveDirPicked）+ [恢复默认]（engine.resetReceiveDir + Snackbar）；
@@ -113,6 +114,8 @@ fun SettingsPage(
     var ssidInput by remember { mutableStateOf(presetStore.ssid().ifBlank { HotspotPresetStore.defaultSsid(alias) }) }
     var pwdInput by remember { mutableStateOf(presetStore.password() ?: "") }
     var presetEnabled by remember { mutableStateOf(presetStore.enabled()) }
+    // v0.5.14c：② 私有 API 热点开关（运行时 prefs 直驱，默认开；Switch 改动即写 privateApiEnabled，不依赖「保存预设」）
+    var privateApiEnabled by remember { mutableStateOf(presetStore.privateApiEnabled) }
     fun savePreset() {
         val ssid = ssidInput.trim()
         val pwd = pwdInput.trim()
@@ -352,6 +355,37 @@ fun SettingsPage(
                 onClick = { savePreset() },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("保存预设") }
+            // v0.5.14c：② 私有 API 热点运行时开关（HotspotPresetStore.privateApiEnabled 直驱，默认开）——
+            // 关闭 → HotspotManager ② 入口守卫直接失败降级 ③（LocalOnly），不重编译即生效；
+            // 样式对齐上方「组网时自动用预设」Switch 行（含 A3 读屏语义 contentDescription）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = SpacingTokens.SpaceXs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "② 私有 API 热点",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = "关闭后组网直接用 LocalOnly（③）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // A3（同「组网时自动用预设」行）：Switch 语义名称——左侧标题/说明文字为独立文本节点
+                // 未绑定，读屏孤立播「开关」；补 contentDescription「② 私有 API 热点」（role/checked 由 Switch 自带）
+                Switch(
+                    checked = privateApiEnabled,
+                    onCheckedChange = { v ->
+                        privateApiEnabled = v
+                        presetStore.privateApiEnabled = v
+                    },
+                    modifier = Modifier.semantics { contentDescription = "② 私有 API 热点" },
+                )
+            }
         }
 
         // ============ 3. 传输 ============

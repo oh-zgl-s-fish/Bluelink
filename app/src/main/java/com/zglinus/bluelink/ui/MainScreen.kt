@@ -1445,8 +1445,8 @@ private fun LogPage(ui: BluelinkUiState) {
 private const val ABOUT_HOT_TAP_WINDOW_MS = 2000L
 private const val ABOUT_HOT_TAPS_UNLOCK = 5
 
-/** v0.5.10 关于页：隐藏热区最小可点高度（≥48dp 触达下限）。 */
-private val ABOUT_HOT_ZONE_MIN_HEIGHT = 48.dp
+/** v0.5.10b 关于页：隐藏热区最小可点高度（v0.5.10 为 48dp → v0.5.10b 提至 60dp：更大瞄准面，降低连点点偏率）。 */
+private val ABOUT_HOT_ZONE_MIN_HEIGHT = 60.dp
 
 /** v0.5.10 关于页行式条目外链目标。 */
 private const val ABOUT_GITHUB_URL = "https://github.com/zglinus"
@@ -1556,7 +1556,9 @@ private fun AboutPage(
         }
 
         // 1-2) 顶部应用名居中（页面顶部留白）+ 版本号
-        Spacer(Modifier.height(SpacingTokens.SpaceXl))
+        // v0.5.10b 顶部留白压缩：SpaceXl(24dp)→SpaceMd(12dp)。本文件该写法仅 About 页一处（grep 唯一），
+        // 未影响其它页；目的：整页内容上移，隐藏热区 / 解锁「收集日志」行进入首屏可见区（不自动滚动）。
+        Spacer(Modifier.height(SpacingTokens.SpaceMd))
         Text(
             text = "蓝鲸·X",
             style = MaterialTheme.typography.headlineLarge,
@@ -1632,13 +1634,18 @@ private fun AboutPage(
                 }
             }
         } else {
-            // 隐藏热区：极淡低可见点击区（快速连点 5 次解锁「收集日志」）
+            // 隐藏热区：低调可点淡条（快速连点 5 次解锁「收集日志」）。
+            // v0.5.10b：alpha 0.25f→0.38f（浅/深色下可辨识为一条「可点淡条」，仍无文字无图标=正常无感知）；
+            // 高度 48→60dp（更大瞄准面；实测 0.25f 在浅色近不可见致连点点偏 = 未解锁主因）。
+            // 命中链核对：本 Box 是 AboutPage Column(verticalScroll) 直接子项，与上下 Surface 不重叠、无 clip/
+            // z 序遮挡；父级仅 verticalScroll（只消费拖拽、不吞 tap）→ 无点击被吞，无需结构性改动；
+            // clickable 默认 ripple 水波纹提供轻量点击反馈（保持无文字无图标）。
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = ABOUT_HOT_ZONE_MIN_HEIGHT)
                     .clip(MaterialTheme.shapes.large)
-                    .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.25f))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.38f))
                     .clickable { onHotZoneTap() },
             )
         }

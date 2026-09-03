@@ -197,6 +197,15 @@ class HotspotManager(
 
     private val tag = "HotspotManager"
 
+    /**
+     * v0.5.9 UI1b-C 热点预设存储（懒初始化：构造 context 可空，经 resolveContext 兜底取；
+     * 不可用（null）→ 预设不生效，完全维持现行为）。消费点：自设 SSID 路径（② 私有 API 反射降级）；
+     * ③ LocalOnly 系统生成 SSID/密码**不适用**（不消费预设）；手动④ 预设仅用于预填提示（UI 任务消费）。
+     */
+    private val presetStore: HotspotPresetStore? by lazy {
+        resolveContext()?.let { HotspotPresetStore(it) }
+    }
+
     /** ④ 用户手动配网密码登记（App 不生成不指定，仅登记，供后续 offer 使用）。 */
     @Volatile
     private var manualPwd: String? = null
@@ -489,8 +498,11 @@ class HotspotManager(
         )
 
         // ★ 第二手段（降级）：原反射 setWifiApEnabled（现状逻辑原样；失败透传附加 Binder 直呼失败原因）
-        val ssid = generateSsid()
-        val pwd = generatePassword()
+        // v0.5.9 UI1b-C 热点预设消费点：预设启用且 ssid 非空 → 自设 SSID/密码用预设值（password 空沿用
+        // 随机生成）；enabled=false/未设 → 完全现行为（generateSsid/generatePassword）。offer 随
+        // HotspotResult.ssid/pwd 自然携带实际值（状态机既有通道），无需另改 offer 构造。
+        val ssid = presetSsidOr { generateSsid() }
+        val pwd = presetPasswordOr { generatePassword() }
         DiagLogger.log(
             tag,
             "L1_PRIVATE_API：sdk=${Build.VERSION.SDK_INT} ssid=$ssid pwdLen=${pwd.length}（密码不回显），反射尝试 setWifiApEnabled",
@@ -1321,6 +1333,9 @@ class HotspotManager(
      *
      * 线程：startSyncInternal 由 [startAsync] 后台 executor 调用，startLocalOnlyHotspot 的系统回调
      * 经 mainHandler 回主线程；onLocalOnlyPasswordRequest / completeLocalOnlyPassword 亦在主线程。
+     *
+     * 注（v0.5.9 UI1b-C）：LocalOnly 的 SSID/密码由系统生成，**不消费热点预设**（HotspotPresetStore）——
+     * 预设仅用于自设 SSID 路径（② 私有 API 反射降级，见 [presetSsidOr]/[presetPasswordOr]）与手动④预填展示。
      */
     @Suppress("DEPRECATION") // startLocalOnlyHotspot(callback, handler) 自 API 33 起弃用（改无 handler 重载），26+ 统一走此重载
     private fun tryLocalOnlyHotspot(): HotspotResult {
@@ -1835,6 +1850,37 @@ class HotspotManager(
     private fun prefixToMaskInt(prefix: Int): Int {
         val bits = prefix.coerceIn(0, 32)
         return if (bits == 0) 0 else (0xFFFFFFFFL shl (32 - bits)).toInt()
+    }
+
+    /**
+     * v0.5.9 UI1b-C：预设 SSID 取值（自设 SSID 分支统一入口）——预设启用（[HotspotPresetStore.enabled]）
+     * 且 ssid 非空时返回预设值；否则 [fallback]（原随机生成 [generateSsid]）。
+     * ③ LocalOnly 系统生成 SSID 不消费预设（系统生成，App 不可指定）。
+     */
+    private fun presetSsidOr(fallback: () -> String): String {
+        val store = presetStore
+        if (store != null && store.enabled() && store.ssid().isNotBlank()) {
+            DiagLogger.log(tag, "热点预设生效：自设 SSID 用预设（${store.ssid()}）")
+            return store.ssid()
+        }
+        return fallback()
+    }
+
+    /**
+     * v0.5.9 UI1b-C：预设密码取值——预设启用且 ssid 非空时取预设密码；预设密码为空（null/空白，
+     * 留空随机语义）→ [fallback]（原随机生成 [generatePassword]）；预设未启用 → [fallback]（现行为）。
+     */
+    private fun presetPasswordOr(fallback: () -> String): String {
+        val store = presetStore
+        if (store != null && store.enabled() && store.ssid().isNotBlank()) {
+            val preset = store.password()
+            if (!preset.isNullOrBlank()) {
+                DiagLogger.log(tag, "热点预设生效：自设密码用预设（长度=${preset.length}，密码不回显）")
+                return preset
+            }
+            DiagLogger.log(tag, "热点预设：预设密码留空 → 沿用原随机生成")
+        }
+        return fallback()
     }
 
     /** SSID = "Bluelink-" + 4 位随机数字（如 Bluelink-0831）。 */

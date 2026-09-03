@@ -251,9 +251,9 @@ class BluelinkUiState {
     /**
      * 抽屉路由当前页（v0.5.6 UI1b-A 导航重排后取值见 companion PAGE_* 常量，调用处勿再写数字字面量）：
      * [PAGE_HOME]=主页面（默认页，不列抽屉项）/ [PAGE_LOG]=文件传输记录（记录页/全屏事件流）/
-     * [PAGE_PERSONAL]=个性化（v0.5.7 UI1b-B 真页，见 ui/personalize/PersonalizePage.kt）/ [PAGE_SETTINGS]=设置（后续扩展设备项）/
-     * [PAGE_ABOUT]=关于（占位页：App 名/版本/README 摘要）。旧 1=发送 2=接收 5=权限 已移除——
-     * 发送/接收已并入主页面操作与设置页、权限并入设置页（后续）。
+     * [PAGE_PERSONAL]=个性化（v0.5.7 UI1b-B 真页，见 ui/personalize/PersonalizePage.kt）/ [PAGE_SETTINGS]=设置（v0.5.9 UI1b-C 五区真页，见 ui/SettingsPage.kt）/
+     * [PAGE_ABOUT]=关于（v0.5.9 UI1b-C 扩展：基础信息 + 开发者区自测）。旧 1=发送 2=接收 5=权限 已移除——
+     * 发送/接收已并入主页面操作与设置页、权限并入设置页权限检测区（v0.5.9）。
      */
     var currentPage by mutableStateOf(PAGE_HOME)
 
@@ -298,10 +298,10 @@ class BluelinkUiState {
         /** 抽屉路由：个性化（v0.5.7 UI1b-B 真页，ui/personalize/PersonalizePage.kt：三壁纸槽/遮罩/取色/预览 + 主页面背景应用）。 */
         const val PAGE_PERSONAL = 2
 
-        /** 抽屉路由：设置（SettingsPage，后续扩展设备项）。 */
+        /** 抽屉路由：设置（v0.5.9 UI1b-C 五区真页，ui/SettingsPage.kt：安全/热点/传输/外观/权限检测；外观区消费 themeMode 三态）。 */
         const val PAGE_SETTINGS = 3
 
-        /** 抽屉路由：关于（新占位页：App 名「蓝鲸·X」/版本/README 摘要）。 */
+        /** 抽屉路由：关于（v0.5.9 UI1b-C 扩展页：基础信息 + 开发者区——信令自测/LocalOnly 自测/诊断入口迁自旧设置页）。 */
         const val PAGE_ABOUT = 4
     }
 }

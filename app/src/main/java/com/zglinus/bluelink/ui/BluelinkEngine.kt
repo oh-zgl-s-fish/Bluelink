@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -107,7 +108,7 @@ import kotlin.random.Random
  * 发送文件；「发送文件」SAF 选文件 → [confirmSend] 后台线程 [LocalSendClient.send]，进度/结果写
  * transferState + DiagLogger（内容不回显）；服务端每文件完整落盘（[LocalSendServer.onFileReceived]，
  * 语义 = 文件已入**暂存** filesDir/localsend/，v0.4.5 不再自建收件列表/私有目录常态化展示）→ 接收侧经
- * 用户 SAF OpenDocumentTree 选择的目录转存：已选（[receiveDirUri]，[onReceiveDirPicked]）→ 后台
+ * 用户 SAF OpenDocumentTree 选择的目录转存：已选（[receiveDirUri()]，[onReceiveDirPicked]）→ 后台
  * DocumentFile.createFile 拷贝后删暂存原件；未选 → 提示「请选择保存位置」（MainScreen 弹目录选择器），
  * 选定后再补存（[pendingStagedFiles] 排队）；轮询 getActiveSessions 映射「接收中 …」到 transferState；
  * 中止/停止时停服务与轮询（暂存文件保留在磁盘）。
@@ -244,9 +245,13 @@ class BluelinkEngine(private val context: Context) {
     @Volatile
     private var pendingPin: Int? = null
 
-    /** 本次待验证对端指纹（deviceAddress；配对表以指纹记）。 */
+    /** 本次待验证对端指纹（v0.5.9：对端握手 fp 优先，缺失回落 deviceAddress；配对表以指纹记）。 */
     @Volatile
     private var pendingPinFingerprint: String? = null
+
+    /** 本次待验证对端别名（配对表条目别名；来源=对端握手 alias，无则 null）。v0.5.9 UI1b-C */
+    @Volatile
+    private var pendingPeerAlias: String? = null
 
     /** 发起方比对失败计数（3 次失败中止会话）。 */
     private var pinFailCount = 0
@@ -302,9 +307,16 @@ class BluelinkEngine(private val context: Context) {
 
     // ============ v0.4.5 接收侧：SAF 保存目录（暂存 → 用户目录转存） ============
 
-    /** 接收保存目录（SAF OpenDocumentTree tree uri；null=未选择，收到文件时提示点选后补存）。 */
+    /**
+     * v0.5.9 UI1b-C：接收目录存储（SharedPreferences，自定义 SAF 目录跨重启保持；[resetReceiveDir] 清除该项）。
+     */
+    private val receiveDirPrefs: SharedPreferences by lazy {
+        appContext.getSharedPreferences(PREFS_RECEIVE_DIR, Context.MODE_PRIVATE)
+    }
+
+    /** 自定义接收保存目录（SAF OpenDocumentTree tree uri；null=默认/未选择，收到文件时提示点选后补存；随 [receiveDirPrefs] 持久化）。 */
     @Volatile
-    private var receiveDirUri: Uri? = null
+    private var customReceiveDirUri: Uri? = null
 
     /** 已完整落盘到暂存目录、等待转存用户目录的文件（key=暂存绝对路径，天然去重；线程安全）。 */
     private val pendingStagedFiles = ConcurrentHashMap<String, StagedFile>()
@@ -715,6 +727,8 @@ class BluelinkEngine(private val context: Context) {
         // v0.4.9 PIN 配对验证：启动时同步模式与配对数量（PinStore 持久化）
         ui.pinMode = pinStore.getMode()
         ui.pairedCount = pinStore.pairedCount
+        // v0.5.9 UI1b-C：恢复自定义接收目录（重启保持；权限失效/无可访问回落默认）
+        restoreReceiveDir()
         instance = this // A5：供详情弹层（MainScreen.kt）读取 engine/ui，保持 BluelinkRoot 零改动
         // 持久信令会话（A2）：engine 作为唯一接线点，把 GattClient/GattServer 的信令与断线
         // 回调统一转发给 SessionManager；SessionManager 上抛的信令（onRemoteSignal）落库到 ui。
@@ -1661,12 +1675,67 @@ class BluelinkEngine(private val context: Context) {
     // ============ v0.4.5 接收侧：SAF 目录选择 / 暂存转存用户目录 ============
 
     /**
+     * v0.5.9 UI1b-C 设置页「接收目录」读取：当前自定义接收目录（读存储返回；null=默认回退——
+     * 未自定义时收到文件按默认逻辑提示选择（Downloads 初始目录），文件入暂存不删）。
+     */
+    fun receiveDirUri(): Uri? = customReceiveDirUri
+
+    /**
+     * v0.5.9 UI1b-C 设置页「恢复默认」：清除自定义接收目录存储（恢复默认 Download 回退逻辑），
+     * **不删已存文件**；已入暂存未转存文件保留磁盘（重新选择目录后补存，[pendingStagedFiles] 排队语义不变）。
+     */
+    fun resetReceiveDir() {
+        customReceiveDirUri = null
+        receiveDirPrefs.edit().remove(KEY_RECEIVE_DIR_URI).apply()
+        ui.receiveDirName = null
+        DiagLogger.log(TAG, "接收目录已恢复默认（自定义存储已清除；已存文件不删）")
+        logUiEvent(EVT_INFO, "接收目录已恢复默认")
+        // 已入暂存未转存文件 → 提示选择新保存位置（复用「未选择 → 弹目录选择器」通道）
+        if (pendingStagedFiles.isNotEmpty()) {
+            mainHandler.post {
+                ui.receiveDirPrompt = true
+                DiagLogger.log(TAG, "恢复默认后存在待补存暂存文件 ${pendingStagedFiles.size} 个，提示重新选择保存位置")
+            }
+        }
+    }
+
+    /** 持久化自定义接收目录 uri（[onReceiveDirPicked] 写入；[resetReceiveDir] 清除）。 */
+    private fun persistReceiveDirUri(uri: Uri) {
+        receiveDirPrefs.edit().putString(KEY_RECEIVE_DIR_URI, uri.toString()).apply()
+    }
+
+    /** 启动恢复：读存储回填自定义目录（SAF 持久权限仍有效 → 恢复展示；权限失效/不可访问 → 清存储回落默认）。 */
+    private fun restoreReceiveDir() {
+        val saved = receiveDirPrefs.getString(KEY_RECEIVE_DIR_URI, null)?.takeIf { it.isNotBlank() }
+        if (saved == null) return
+        val uri = try {
+            Uri.parse(saved)
+        } catch (e: Exception) {
+            null
+        }
+        if (uri == null) {
+            receiveDirPrefs.edit().remove(KEY_RECEIVE_DIR_URI).apply()
+            return
+        }
+        val name = queryTreeDisplayName(uri) // 权限失效（重启后未持久授权）→ 查询失败回落默认
+        if (name == null) {
+            DiagLogger.log(TAG, "恢复接收目录失败（目录权限失效/不可访问），回落默认：$uri")
+            receiveDirPrefs.edit().remove(KEY_RECEIVE_DIR_URI).apply()
+            return
+        }
+        customReceiveDirUri = uri
+        ui.receiveDirName = name
+        DiagLogger.log(TAG, "已恢复自定义接收目录：$uri（$name）")
+    }
+
+    /**
      * SAF OpenDocumentTree 目录选择回调（主线程，MainScreen launcher 触发）：记录 tree uri →
      * 持久化目录权限（[takePersistableUriPermission] 尽力；失败仅本次运行有效）→ 展示目录显示名 →
      * 补存排队中的暂存文件（后台线程逐个 DocumentFile 转存）。
      */
     fun onReceiveDirPicked(uri: Uri) {
-        receiveDirUri = uri
+        customReceiveDirUri = uri
+        persistReceiveDirUri(uri) // v0.5.9 UI1b-C：自定义目录持久化（重启保持；恢复默认清除）
         ui.receiveDirPrompt = false
         try {
             appContext.contentResolver.takePersistableUriPermission(
@@ -1696,7 +1765,7 @@ class BluelinkEngine(private val context: Context) {
      * （防断连丢数据）→ 已选保存目录则立即后台转存；未选则排队并提示 UI 发起目录选择（选定后补存）。
      */
     private fun handleFileReceived(fileName: String, path: String, mimeType: String) {
-        val uri = receiveDirUri
+        val uri = customReceiveDirUri
         if (uri != null) {
             persistInFlight.incrementAndGet() // B4：转存计数（与 persistStagedFile 完成递减配对，判定「全部转存完成」）
             Thread({ persistStagedFile(StagedFile(fileName, path, mimeType), uri) }, "localsend-persist")
@@ -2118,12 +2187,15 @@ class BluelinkEngine(private val context: Context) {
     /**
      * 握手完成 → PIN 校验（组网/同网直连前置拦截点，在 [applyRemoteHandshake] 内调用）：
      * - mode=0（关）→ 直接放行（pinVerifyOk=true，现状）；
-     * - mode=1（仅首次）且 [PinStore.isPaired]（fp=对端握手指纹 deviceAddress）→ 放行（「已配对免验」）；
+     * - mode=1（仅首次）且 [PinStore.isPaired]（fp=对端握手指纹：握手 fp 优先，缺失回落 deviceAddress）→ 放行（「已配对免验」）；
      * - 否则 → 弹 PIN 验证 UI：发起方（本端主动连接）生成 4-6 位数字配对码展示，等待对端 pin 信令回传；
      *   对端弹输入框，用户输入经信令回发 pin，等待发起方放行/中止（对端不自己判）；
      * - 自动重连（sessionResume，会话未 detach）且已验 → 保持放行不重验（会话内不再验）。
+     *
+     * @param fp 对端指纹（对端握手信令携带的本端指纹 fp；缺失回落 deviceAddress——旧版对端兼容）。
+     * @param peerAlias 对端别名（握手 alias；配对成功记入配对表条目 `指纹|别名`，v0.5.9）。
      */
-    private fun beginPinVerification(fp: String, sessionResume: Boolean) {
+    private fun beginPinVerification(fp: String, sessionResume: Boolean, peerAlias: String? = null) {
         // iAmInitiator 由握手入口维护：openDevice（本端发起连接）置 true / Server 收到对端连接置 false（本端为被验证方）
         if (sessionResume && ui.pinVerifyOk) {
             // 自动重连恢复会话：PIN 已验（会话内不再验），保持放行状态
@@ -2150,6 +2222,7 @@ class BluelinkEngine(private val context: Context) {
                 ui.pinVerifyOk = false
                 ui.pinVerifyActive = true
                 pendingPinFingerprint = fp
+                pendingPeerAlias = peerAlias // v0.5.9：配对成功时记入配对表条目（别名随条目持久化）
                 pinFailCount = 0
                 // v0.5.4a：PIN 校验阶段（含对端被邀请输入——握手由对方发起、本端未走 openDevice）→ 保持/开启配网弹窗
                 ui.pairingDialog = true
@@ -2180,6 +2253,7 @@ class BluelinkEngine(private val context: Context) {
         ui.pinError = null
         pendingPin = null
         pendingPinFingerprint = null
+        pendingPeerAlias = null // v0.5.9：随会话状态一并复位
         pinFailCount = 0
     }
 
@@ -2220,6 +2294,7 @@ class BluelinkEngine(private val context: Context) {
                 ui.pinShow = null
                 pendingPin = null
                 pendingPinFingerprint = null
+                pendingPeerAlias = null // v0.5.9：对端放行分支一并复位（与 resetPinVerifyState 对齐）
                 pinFailCount = 0
                 ui.pinStatus = "✅ PIN 验证通过（对端已确认），可组建局域网"
                 DiagLogger.log(TAG, "PIN 验证：收到对端放行确认，本会话已解锁（配对码不回显）")
@@ -2245,8 +2320,9 @@ class BluelinkEngine(private val context: Context) {
     private fun onPinMatch() {
         val fp = pendingPinFingerprint
         DiagLogger.log(TAG, "PIN 比对成功（内容不回显）")
-        // 仅首次模式：匹配后按指纹记入配对表（指纹=对端握手指纹 deviceAddress）
-        if (pinStore.getMode() == PinStore.MODE_FIRST && fp != null && pinStore.addPaired(fp)) {
+        // 仅首次模式：匹配后按指纹记入配对表（指纹=对端握手指纹：握手 fp 优先，缺失回落 deviceAddress；
+        // v0.5.9 UI1b-C：携带对端别名记 `指纹|别名` 条目，配对列表展示/免验判定按指纹段匹配）
+        if (pinStore.getMode() == PinStore.MODE_FIRST && fp != null && pinStore.addPaired(fp, pendingPeerAlias)) {
             ui.pairedCount = pinStore.pairedCount
             DiagLogger.log(TAG, "PIN 验证：首次配对已记录 fp=$fp（后续同指纹免验）")
         }
@@ -2262,6 +2338,7 @@ class BluelinkEngine(private val context: Context) {
         DiagLogger.log(TAG, "PIN 验证通过：已发送放行通知 ok=$ok")
         pendingPin = null
         pendingPinFingerprint = null
+        pendingPeerAlias = null // v0.5.9：配对条目已写入，会话内别名随之复位
         pinFailCount = 0
     }
 
@@ -2374,6 +2451,17 @@ class BluelinkEngine(private val context: Context) {
         DiagLogger.log(TAG, "PIN 配对列表已清空（原 $n 条）")
     }
 
+    /** 设置区/身份（v0.5.9 UI1b-C）：本端指纹（PinStore 持久化，首次读取自动生成；随握手 fp 携带给对端）。 */
+    fun localFingerprint(): String = pinStore.localFingerprint()
+
+    /** 设置区/身份（v0.5.9 UI1b-C）：重置本端指纹（旧值作废——已配对的对端需重新互认；返回新指纹）。 */
+    fun resetLocalFingerprint(): String {
+        val fresh = pinStore.resetLocalFingerprint()
+        DiagLogger.log(TAG, "本端指纹已重置：$fresh（旧值作废，对端需重新互认）")
+        logUiEvent(EVT_INFO, "本端指纹已重置（对端需重新互认）")
+        return fresh
+    }
+
     /** 组网/同网直连前置判定：模式非「关」且本会话尚未验证通过 → 需先完成 PIN 验证。 */
     fun pinRequired(): Boolean = pinStore.getMode() != PinStore.MODE_OFF && !ui.pinVerifyOk
 
@@ -2471,8 +2559,12 @@ class BluelinkEngine(private val context: Context) {
         mainHandler.removeCallbacks(takeoverAckTimeoutRunnable)
         // 信令自测（验证包）：attach 成功后自动开始 120s 心跳收发（每 5s 一条 ping，对端回 pong）
         signalTest.start()
-        // v0.4.9 PIN 配对验证：握手完成即触发校验（组网/同网直连前置拦截点；fingerprint=对端握手指纹 deviceAddress）
-        beginPinVerification(deviceAddress, sessionResume)
+        // v0.4.9 PIN 配对验证：握手完成即触发校验（组网/同网直连前置拦截点）。
+        // v0.5.9 UI1b-C：对端指纹优先取对端握手信令携带的本端指纹 fp（握手扩展）；对端未带
+        // （旧版/缺字段）回落 deviceAddress（向后兼容）；配对别名随握手 alias 一并携带。
+        val peerFp = handshake.fp?.takeIf { it.isNotBlank() } ?: deviceAddress
+        val peerAlias = handshake.alias.takeIf { it.isNotBlank() }
+        beginPinVerification(peerFp, sessionResume, peerAlias)
         // v0.5.0 UI-1：握手后刷新本机卡 + 配对视图（PIN 关/已验 → 对端卡视图）+ 事件时间流
         refreshSelfCard()
         refreshPairedView()
@@ -2697,6 +2789,10 @@ class BluelinkEngine(private val context: Context) {
 
         /** T3 接收进度轮询间隔。 */
         private const val RECEIVE_POLL_INTERVAL_MS = 1000L
+
+        /** v0.5.9 UI1b-C 接收目录存储：prefs 名与键（自定义 SAF 目录持久化；恢复默认=清除该项）。 */
+        private const val PREFS_RECEIVE_DIR = "bluelink_receive_dir"
+        private const val KEY_RECEIVE_DIR_URI = "receive_dir_uri"
 
         /** 接管路径从机等 ack 超时：120s，对齐状态机 JOINED 等 ack（MANUAL_TIMEOUT_MS 同一值；v0.4.4）。 */
         private const val TAKEOVER_ACK_TIMEOUT_MS: Long = 120_000L

@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.zglinus.bluelink.ui.theme.THEME_MODE_SYSTEM
 
 /**
  * 所需运行时权限（按版本分轨，docs/ui-design.md §2 权限矩阵）：
@@ -39,11 +40,17 @@ fun neededRuntimePermissions(): Array<String> =
  * v0.5.8 UI1b-B2：新增 [onAccentSaved]——个性化页「保存」回调（保存的强调色 ARGB Long？null=清除/未选）。
  * MainActivity 持主题强调色 state（theme 层之上）：保存后经此更新 → BluelinkTheme(accent) 重算；
  * 主页面背景刷新走既有 ui.wallpaperTick（本层不处理）。
+ *
+ * v0.5.9 UI1b-C：新增 [themeMode]/[onThemeModeChange]——深浅三态链（MainActivity 主题层持 state，
+ * 设置页外观区三态 chips 经此读/改；本层透传 MainScreen → SettingsPage，同 accent 回调链路）。
  */
 @Composable
 fun BluelinkRoot(
     engine: BluelinkEngine,
     onAccentSaved: (Long?) -> Unit = {},
+    // v0.5.9 UI1b-C：深浅三态（SYSTEM/LIGHT/DARK；MainActivity 持久化持有，设置页外观区消费）
+    themeMode: Int = THEME_MODE_SYSTEM,
+    onThemeModeChange: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
     var advertisingWanted by rememberSaveable { mutableStateOf(true) }
@@ -98,6 +105,9 @@ fun BluelinkRoot(
         onRequestPermissions = { permissionLauncher.launch(neededRuntimePermissions()) },
         // v0.5.8 UI1b-B2：个性化页保存 → MainActivity 主题强调色 state
         onAccentSaved = onAccentSaved,
+        // v0.5.9 UI1b-C：深浅三态链 → MainScreen → 设置页外观区
+        themeMode = themeMode,
+        onThemeModeChange = onThemeModeChange,
     )
 
     engine.ui.detailDevice?.let { selected ->

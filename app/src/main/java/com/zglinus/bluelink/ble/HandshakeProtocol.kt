@@ -7,6 +7,7 @@ import android.util.Log
 import com.zglinus.bluelink.diag.DiagLogger
 import com.zglinus.bluelink.net.NetworkInfoProvider
 import com.zglinus.bluelink.net.NetworkSummary
+import com.zglinus.bluelink.security.PinStore
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -21,6 +22,8 @@ import java.util.concurrent.TimeUnit
  *   "model": "<Build.MODEL>",
  *   "root": <Boolean 本机 Magisk 探测结果: 可执行 su -c id 校验 uid=0；探测失败/未授权=false>,
  *   "battery": <Int? 本机电量百分比 0-100；BatteryManager 不可用/异常时为 null>,
+ *   "fp": <String? 本端指纹，v0.5.9 UI1b-C 可选字段——本机安装级随机标识（PinStore.localFingerprint，16 hex 大写）>,
+ *         对端解析优先取 fp 作「对端指纹」；对端未带/旧版（缺字段）回落对端 deviceAddress/MAC（向后兼容）,
  *   "net": {
  *     "wifi": <bool>, "ssid": "<可空>", "ip": "<IPv4 地址,可空>",
  *     "mask": "<子网掩码,可空>", "cellular": <bool>
@@ -41,6 +44,7 @@ data class HandshakeMessage(
     val model: String = "",
     val root: Boolean = false,
     val battery: Int? = null,
+    val fp: String? = null,
     val net: NetworkSummary = NetworkSummary(),
 )
 
@@ -53,6 +57,7 @@ object HandshakeProtocol {
     private const val F_MODEL = "model"
     private const val F_ROOT = "root"
     private const val F_BATTERY = "battery"
+    private const val F_FP = "fp"
     private const val F_NET = "net"
     private const val F_WIFI = "wifi"
     private const val F_SSID = "ssid"
@@ -60,7 +65,10 @@ object HandshakeProtocol {
     private const val F_MASK = "mask"
     private const val F_CELLULAR = "cellular"
 
-    /** 构造本机握手消息（网络信息实时采集；root 用缓存探测结果，不阻塞）。 */
+    /** 构造本机握手消息（网络信息实时采集；root 用缓存探测结果，不阻塞）。
+     * v0.5.9 UI1b-C：携带本端指纹 fp（PinStore.localFingerprint，首次读取自动生成并持久化），
+     * 对端解析优先取 fp 作对端指纹（配对表/免验依据），缺失回落 deviceAddress（旧版对端兼容）。
+     */
     fun buildLocal(context: Context): HandshakeMessage {
         val net = NetworkInfoProvider.collect(context)
         return HandshakeMessage(
@@ -69,6 +77,7 @@ object HandshakeProtocol {
             model = Build.MODEL,
             root = RootDetector.isRoot(),
             battery = readBattery(context),
+            fp = PinStore(context).localFingerprint(),
             net = net,
         )
     }
@@ -97,6 +106,8 @@ object HandshakeProtocol {
         o.put(F_MODEL, m.model)
         o.put(F_ROOT, m.root)
         o.put(F_BATTERY, m.battery ?: JSONObject.NULL)
+        // fp 可选字段：null 时序列化为 JSONObject.NULL，解析还原 null（旧版对端缺失回落 deviceAddress）
+        o.put(F_FP, m.fp ?: JSONObject.NULL)
         o.put(F_NET, net)
         return o.toString()
     }
@@ -130,6 +141,8 @@ object HandshakeProtocol {
                 .takeIf { it.isNotBlank() && it != "null" }
                 ?.toIntOrNull()
                 ?.takeIf { it in 0..100 },
+            // fp 可选字段：缺失/null → null（引擎回落 deviceAddress 作对端指纹，旧版对端兼容）
+            fp = o.optString(F_FP).takeIf { it.isNotBlank() && it != "null" },
             net = NetworkSummary(
                 wifi = net?.optBoolean(F_WIFI, false) ?: false,
                 ssid = net?.optString(F_SSID)?.takeIf { it.isNotBlank() && it != "null" },

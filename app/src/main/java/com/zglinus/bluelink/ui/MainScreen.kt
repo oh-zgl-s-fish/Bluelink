@@ -111,6 +111,7 @@ import com.zglinus.bluelink.ui.personalize.WallpaperStore
 import com.zglinus.bluelink.ui.theme.MetricTokens
 import com.zglinus.bluelink.ui.theme.MotionTokens
 import com.zglinus.bluelink.ui.theme.SpacingTokens
+import com.zglinus.bluelink.ui.theme.THEME_MODE_SYSTEM
 import com.zglinus.bluelink.ui.theme.extended
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -125,7 +126,10 @@ import java.util.Locale
  * v0.5.6 UI1b-A 导航重排：顶栏左侧应用名「蓝鲸·X」/右侧 ☰（原左 ☰ 位移）；抽屉改 4 栏
  * （文件传输记录/个性化/设置/关于，PAGE_* 常量路由）；个性化页于 v0.5.7 UI1b-B 实现真页
  * （三壁纸槽/遮罩/取色/预览 + 主页面背景应用，见 ui/personalize/PersonalizePage.kt 与 WallpaperBackdrop.kt）；
- * 关于仍为新占位页（App 名+版本+README 摘要）；主页面仍为默认页（不列抽屉项））:
+ * v0.5.9 UI1b-C 设置页五区真页 + 关于页扩展：设置（安全/热点/传输/外观/权限检测，见 ui/SettingsPage.kt）
+ * 与个性化已实现；关于页扩展为「基础信息 + 开发者区」（信令/LocalOnly 自测与诊断入口自旧设置页迁入，
+ * 见下方 AboutPage）；深浅三态（themeMode）经 MainScreen 参数传入设置页外观区，全局联动见
+ * MainActivity/BluelinkTheme（effectiveDark 判定源 Provide）。主页面仍为默认页（不列抽屉项）。
  * v0.5.4a（基线）全 App 扁平化：无任何内容型卡片/阴影，内容平铺 surface 背景，区块靠留白与分组标题分层。
  * v0.5.4b 保持「无 elevation（不设阴影）/无边框」的扁平观感，改以 surfaceContainer 系列容器分层表达各内容区：
  * - surfaceContainerLowest（最贴近背景、弱层次）：设置分组容器、设备详情弹层正文、底部动作行/流程信息行（页内常规内容块）；
@@ -144,8 +148,8 @@ import java.util.Locale
  *   中止/失败保留弹窗显错误态 + 关闭；时间流仍记录全部事件。
  * - 抽屉（[ModalNavigationDrawer]，v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+
  *   入口（文件传输记录/个性化/设置/关于）→ 设 [BluelinkUiState.currentPage]（companion PAGE_* 常量，勿写数字）；
- *   主页面为默认页不列项（子页「返回」回主页面）；发送/接收入口已并入主页面操作行与设置页、
- *   权限检测并入设置页（后续）；个性化已实现（v0.5.7 UI1b-B），关于为占位页。
+ *   主页面为默认页不列项（子页「返回」回主页面）；发送/接收入口已并入主页面操作行与设置页；
+ *   权限检测并入设置页（v0.5.9 UI1b-C 权限检测区）；个性化已实现（v0.5.7 UI1b-B），关于为扩展页。
  * - v0.5.7 UI1b-B 主页面背景应用：根背景 Box（纯色 background 打底）→ WallpaperBackdrop（壁纸+遮罩，
  *   按当前系统深浅模式取槽）→ ModalNavigationDrawer/Scaffold（containerColor Transparent）；
  * - v0.5.8 UI1b-B2 主页面浮层化（修真机「背景不变」）+ 强调色运行态应用：HOME 内容容器（两态左右卡/
@@ -154,10 +158,11 @@ import java.util.Locale
  *   表面，壁纸只垫主页面）；无壁纸（三槽全空）时背景回纯色，浮层化复合结果≈原色无副作用；
  *   强调色（accent）保存后经 MainActivity 主题 state → BluelinkTheme(accent) 运行态重算
  *   （个性化页新交互见 ui/personalize/PersonalizePage.kt）。
- * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 设置/信令自测/LocalOnly 自测移入
- *   抽屉设置页；发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
+ * - 控件：广播/扫描开关置顶栏；发送/收尾按钮进底部动作行；PIN 配对验证/热点预设/接收目录/深浅三态/
+ *   权限检测入设置页（ui/SettingsPage.kt）；信令自测/LocalOnly 自测/诊断入口入关于页开发者区（v0.5.9 UI1b-C）；
+ *   发送/接收 SAF launcher、诊断/组网/发送确认等弹层与设备详情弹层原样保留。
  *
- * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页；
+ * 历史（v0.3.x）：本机状态卡「LocalOnly 自测」独立入口自 v0.5.0 起移入抽屉设置页，v0.5.9 随设置页重构迁入关于页；
  * sdk 33+ 密码登记框（[LoTestPwdDialog]）仍在 MainScreen 顶层渲染（不依赖设备详情弹层）。
  */
 
@@ -199,6 +204,9 @@ fun MainScreen(
     onRequestPermissions: () -> Unit,
     // v0.5.8 UI1b-B2：个性化页「保存」回调（保存的强调色 ARGB Long？null=清除/未选）→ MainActivity 主题 state
     onAccentSaved: (Long?) -> Unit = {},
+    // v0.5.9 UI1b-C：深浅三态（themeMode 当前值 + 变更回调）→ 设置页外观区；state 由 MainActivity 主题层持有（持久化）
+    themeMode: Int = THEME_MODE_SYSTEM,
+    onThemeModeChange: (Int) -> Unit = {},
 ) {
     val engine = BluelinkEngine.current()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -294,7 +302,7 @@ fun MainScreen(
             ) {
                 // 抽屉路由（v0.5.6 UI1b-A 4 栏重排；取值 BluelinkUiState.PAGE_*，勿写数字）：
                 // PAGE_HOME=主页面（默认） PAGE_LOG=文件传输记录 PAGE_PERSONAL=个性化（v0.5.7 UI1b-B 真页）
-                // PAGE_SETTINGS=设置 PAGE_ABOUT=关于（占位）
+                // PAGE_SETTINGS=设置（v0.5.9 UI1b-C 五区真页，ui/SettingsPage.kt） PAGE_ABOUT=关于（v0.5.9 扩展：基础信息+开发者区）
                 when (ui.currentPage) {
                     BluelinkUiState.PAGE_HOME -> MainPage(
                         ui = ui,
@@ -308,8 +316,15 @@ fun MainScreen(
                     BluelinkUiState.PAGE_LOG -> LogPage(ui)
                     // v0.5.8 UI1b-B2：个性化页整页重做（无滚动一屏 + 右上保存）；保存回调上抛主题强调色
                     BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(ui = ui, onSaved = onAccentSaved)
-                    BluelinkUiState.PAGE_SETTINGS -> SettingsPage(ui, engine)
-                    BluelinkUiState.PAGE_ABOUT -> AboutPage(ui)
+                    // v0.5.9 UI1b-C：设置页五区真页（ui/SettingsPage.kt：安全/热点/传输/外观/权限检测 + 深浅三态）
+                    BluelinkUiState.PAGE_SETTINGS -> SettingsPage(
+                        ui = ui,
+                        engine = engine,
+                        themeMode = themeMode,
+                        onThemeModeChange = onThemeModeChange,
+                    )
+                    // v0.5.9 UI1b-C：关于页扩展（基础信息 + 开发者区：自测三块迁自旧设置页）
+                    BluelinkUiState.PAGE_ABOUT -> AboutPage(ui, engine)
                     else -> MainPage(
                         ui = ui,
                         onDeviceClick = onDeviceClick,
@@ -343,7 +358,7 @@ fun MainScreen(
         )
     }
 
-    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（入口已移至抽屉设置页；登记框仍在顶层渲染，
+    // ③ LocalOnly 自测（v0.3.9）：sdk 33+ 密码登记框（入口在关于页开发者区（v0.5.9 随设置页重构迁入）；登记框仍在顶层渲染，
     // 经 BluelinkEngine.current() 取引擎，与设备详情弹层无关）
     engine?.let {
         if (ui.loTestPwdDialog) LoTestPwdDialog(it)
@@ -1421,213 +1436,10 @@ private fun LogPage(ui: BluelinkUiState) {
     }
 }
 
-/** 设置页（抽屉 3 / BluelinkUiState.PAGE_SETTINGS，v0.5.6 UI1b-A 重排后位次（原 4）；v0.5.4b 设置分组容器＝surfaceContainerLowest）：
- *  PIN 配对验证 + 信令自测 + LocalOnly 自测 + 诊断（原本机状态卡控件搬迁至此；后续扩展设备项）。 */
-@Composable
-private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
-    // 破坏性动作显式确认（audit K12/P1-1）：清除配对列表先弹确认框，确认后才执行
-    var showClearPairedDialog by remember { mutableStateOf(false) }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(SpacingTokens.SpaceLg),
-        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "设置",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
-        }
-        Spacer(Modifier.height(SpacingTokens.SpaceMd)) // v0.5.4b：页面标题与分组容器间距（区块 ≥12dp）
-        // v0.5.4b 映射：设置分组容器＝页内常规内容块 → surfaceContainerLowest；
-        // 无 elevation（不设阴影）、无边框；块级圆角 10（MaterialTheme.shapes.large = ShapeTokens.Modal）；
-        // 组内各分节（PIN/信令自测/LocalOnly 自测/诊断）仍以 HorizontalDivider 分隔（audit K11 容器内分节）
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = MaterialTheme.colorScheme.surfaceContainerLowest,
-            shape = MaterialTheme.shapes.large,
-        ) {
-        Column(
-            modifier = Modifier.padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
-        ) {
-        if (engine == null) {
-            Text(
-                text = "引擎未就绪",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            return@Column
-        }
-
-        // ============ v0.4.9 PIN 配对验证（从原本机状态卡移入抽屉设置页） ============
-        Text("PIN 配对验证", style = MaterialTheme.typography.titleSmall)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = "模式：${pinModeName(ui.pinMode)}",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = if (ui.pairedCount > 0) "已配对 ${ui.pairedCount} 台" else "未配对",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        // 单选互斥（audit K4/P1-1）：3×OutlinedButton → RadioButton 组（selected 语义 + 整行 48dp 触达）
-        listOf(
-            0 to "关",
-            1 to "仅首次",
-            2 to "每次",
-        ).forEach { (m, label) ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .selectable(
-                        selected = ui.pinMode == m,
-                        role = Role.RadioButton,
-                        onClick = { engine.setPinMode(m) },
-                    )
-                    .padding(vertical = SpacingTokens.SpaceXs),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = ui.pinMode == m, onClick = null)
-                Spacer(Modifier.width(SpacingTokens.SpaceSm))
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        }
-        Text(
-            text = "关=不校验；仅首次=首配后按指纹免验；每次=每会话必验（对端输入配对码）",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        ui.pinStatus?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall)
-        }
-        ui.pinError?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        // 破坏性动作（audit P1-1/K12）：TextButton → OutlinedButton error 色系；执行须经确认框（见文件尾）
-        OutlinedButton(
-            onClick = { showClearPairedDialog = true },
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = MaterialTheme.colorScheme.error,
-            ),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-        ) { Text("清除配对列表") }
-        HorizontalDivider()
-
-        // ============ 信令自测（验证包） ============
-        Text("信令自测（验证包）", style = MaterialTheme.typography.titleSmall)
-        ui.signalTestStatus?.let { status ->
-            Text(
-                text = status,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (ui.signalTestRunning) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-        }
-        TextButton(
-            onClick = {
-                if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
-            },
-        ) {
-            Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测")
-        }
-        HorizontalDivider()
-
-        // ============ ③ LocalOnly 自测（v0.3.9 独立入口） ============
-        Text("LocalOnly 自测（③）", style = MaterialTheme.typography.titleSmall)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(
-                onClick = {
-                    if (ui.localOnlyTestRunning) {
-                        engine.closeLocalOnlySelfTest()
-                    } else {
-                        engine.localOnlySelfTest()
-                    }
-                },
-            ) {
-                Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测")
-            }
-            if (ui.localOnlyTestRunning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(14.dp),
-                    strokeWidth = 2.dp,
-                )
-            }
-        }
-        ui.localOnlyTestInfo?.let { info ->
-            // 状态行 icon+label（audit P1-4）：密码已登记(✅)加 success 语义点；色不单独表达状态
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (ui.localOnlyTestPasswordSet) {
-                    StatusDot(color = MaterialTheme.extended.success)
-                    Spacer(Modifier.width(SpacingTokens.SpaceSm))
-                }
-                Text(
-                    text = info,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (ui.localOnlyTestRunning) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
-        }
-        HorizontalDivider()
-
-        // ============ 诊断 ============
-        Text("诊断", style = MaterialTheme.typography.titleSmall)
-        TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
-        }
-        }
-    }
-
-    // 清除配对列表确认框（audit K12/P1-1）：破坏性操作显式、防误触；确认才执行 engine.clearPairedDevices()
-    if (showClearPairedDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearPairedDialog = false },
-            title = { Text("清除配对列表？") },
-            text = {
-                Text(
-                    text = if (ui.pairedCount > 0) {
-                        "将清除已配对的 ${ui.pairedCount} 台设备（含仅首次免验记忆），此操作不可撤销。"
-                    } else {
-                        "将清除全部配对记录（含仅首次免验记忆），此操作不可撤销。"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        engine?.clearPairedDevices()
-                        showClearPairedDialog = false
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                ) { Text("清除") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showClearPairedDialog = false }) { Text("取消") }
-            },
-        )
-    }
-}
+// 设置页（抽屉 3 / PAGE_SETTINGS）自 v0.5.9 UI1b-C 起移至 ui/SettingsPage.kt 实现：
+// 五区（安全 / 热点 / 传输 / 外观 / 权限检测）分组容器 + 深浅三态联动（themeMode 经 MainScreen 参数传入）；
+// 旧页 PIN 配对验证区能力并入新页安全区（PinStore 直驱：模式三态/已配对列表/重置指纹/清空配对），
+// 信令自测 / LocalOnly 自测 / 诊断三块迁入关于页「开发者」区（见下方 AboutPage）。
 
 // 个性化页（抽屉 2 / PAGE_PERSONAL）自 v0.5.7 UI1b-B 起移至 ui/personalize/PersonalizePage.kt 实现：
 // 三壁纸槽（统一/深色/浅色）+ 遮罩滑块（0–80%）+ 取色区（API27+ 从壁纸取色 + 8 色板 + 选中色 chip）+
@@ -1638,14 +1450,20 @@ private fun SettingsPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
 //（或后续开启 buildConfig 后改引 BuildConfig.VERSION_NAME）。
 private const val APP_VERSION_NAME = "0.1.0"
 
-/** 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT；v0.5.6 UI1b-A 新占位页）：App 名「蓝鲸·X」+
- *  版本（[APP_VERSION_NAME]，BuildConfig 不可引 → 常量）+ 一句简介（README 摘要文案）+ 返回。 */
+/**
+ * 关于页（抽屉 4 / BluelinkUiState.PAGE_ABOUT）：v0.5.6 UI1b-A 占位页 → v0.5.9 UI1b-C 扩展——
+ * 基础信息块（App 名「蓝鲸·X」/ 版本 [APP_VERSION_NAME] / GPL-3.0 / 简介 / 致谢）+「开发者」区
+ * （信令自测 / LocalOnly 自测 / 诊断日志入口——自旧设置页迁入，行为等价原实现；诊断日志弹层仍由
+ * MainScreen 顶层渲染，dump/刷新/清空/复制/导出见 DiagnosticLogDialog）。
+ */
 @Composable
-private fun AboutPage(ui: BluelinkUiState) {
+private fun AboutPage(ui: BluelinkUiState, engine: BluelinkEngine?) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(SpacingTokens.SpaceLg),
+        verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceMd),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1655,8 +1473,8 @@ private fun AboutPage(ui: BluelinkUiState) {
             )
             TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
         }
-        Spacer(Modifier.height(SpacingTokens.SpaceMd))
-        // v0.5.4b 映射：关于正文容器＝页内常规内容块 → surfaceContainerLowest；无 elevation、无边框；块级圆角 10
+
+        // ===== 基础信息块（v0.5.4b 容器分层：页内常规内容块 → surfaceContainerLowest；无 elevation、无边框；块级圆角 10）=====
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.surfaceContainerLowest,
@@ -1674,7 +1492,7 @@ private fun AboutPage(ui: BluelinkUiState) {
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
-                    text = "版本 $APP_VERSION_NAME",
+                    text = "版本 $APP_VERSION_NAME · GPL-3.0",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1684,6 +1502,100 @@ private fun AboutPage(ui: BluelinkUiState) {
                         "经 LocalSend 直传文件；无需服务器、不依赖蜂窝网络。",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                HorizontalDivider()
+                Text(
+                    text = "致谢：Material Design 3 语义配色；传输互通采用 LocalSend 协议（v2）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        // ===== 开发者区（v0.5.9 UI1b-C：自旧设置页迁入的自测三块；仅供验证链路，行为等价原实现）=====
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
+                verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm),
+            ) {
+                Text("开发者", style = MaterialTheme.typography.titleMedium)
+                if (engine == null) {
+                    Text(
+                        text = "引擎未就绪（自测入口暂不可用）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    return@Column
+                }
+
+                // ---- 信令自测（验证包；迁自旧设置页，等价） ----
+                HorizontalDivider()
+                Text("信令自测（验证包）", style = MaterialTheme.typography.titleSmall)
+                ui.signalTestStatus?.let { status ->
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (ui.signalTestRunning) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        if (ui.signalTestRunning) engine.stopSignalTest() else engine.startSignalTest()
+                    },
+                ) { Text(if (ui.signalTestRunning) "停止信令自测" else "开始信令自测") }
+
+                // ---- ③ LocalOnly 自测（迁自旧设置页，等价） ----
+                HorizontalDivider()
+                Text("LocalOnly 自测（③）", style = MaterialTheme.typography.titleSmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = {
+                            if (ui.localOnlyTestRunning) {
+                                engine.closeLocalOnlySelfTest()
+                            } else {
+                                engine.localOnlySelfTest()
+                            }
+                        },
+                    ) { Text(if (ui.localOnlyTestRunning) "关闭 LocalOnly" else "LocalOnly 自测") }
+                    if (ui.localOnlyTestRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
+                ui.localOnlyTestInfo?.let { info ->
+                    // 状态行 icon+label（audit P1-4）：密码已登记(✅)加 success 语义点；色不单独表达状态
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (ui.localOnlyTestPasswordSet) {
+                            StatusDot(color = MaterialTheme.extended.success)
+                            Spacer(Modifier.width(SpacingTokens.SpaceSm))
+                        }
+                        Text(
+                            text = info,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (ui.localOnlyTestRunning) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
+
+                // ---- 诊断（dump/清空等动作在 MainScreen 顶层 DiagnosticLogDialog 内） ----
+                HorizontalDivider()
+                Text("诊断", style = MaterialTheme.typography.titleSmall)
+                TextButton(onClick = { ui.diagVisible = true }) { Text("打开诊断日志") }
             }
         }
     }
@@ -1692,7 +1604,7 @@ private fun AboutPage(ui: BluelinkUiState) {
 /** 抽屉（v0.5.6 UI1b-A 4 栏重排）：头部（应用名「蓝鲸·X」/本机 alias）+ 入口列表
  *  （文件传输记录/个性化/设置/关于）→ 设 currentPage（BluelinkUiState.PAGE_* 常量）；
  *  主页面为默认页不列项（子页「返回」回主页面）；旧发送/接收/权限栏已移除（发送/接收并入主页面
- *  操作与设置、权限并入设置页后续）。 */
+ *  操作与设置、权限检测并入设置页权限检测区（v0.5.9 UI1b-C））。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppDrawer(ui: BluelinkUiState, onNavigate: (Int) -> Unit) {
@@ -2523,9 +2435,3 @@ private fun PinStageColumn(ui: BluelinkUiState, engine: BluelinkEngine) {
     }
 }
 
-/** v0.4.9：PIN 验证模式 → 展示文本。 */
-private fun pinModeName(mode: Int): String = when (mode) {
-    1 -> "仅首次"
-    2 -> "每次"
-    else -> "关"
-}

@@ -1,6 +1,6 @@
 # Bluelink · 待办清单
 
-> 2026-09-02 快照（v0.5.8d 时点：组网+LocalSend 闭环 ✅ / UI 经 MD3 重构至扁平分层 / 广播钮呼吸定版 / 个性化页 UI1b-B 三槽壁纸 + UI1b-B2 重做（一屏无滚动布局+1:5 取色+右上保存+主页面浮层化+强调色主题）✅ / 品牌蓝鲸·X+图标 / GPL-3.0 开源 / GitHub 远端 oh-zgl-s-fish/Bluelink）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
+> 2026-09-02 快照（v0.5.9 时点：组网+LocalSend 闭环 ✅ / UI 经 MD3 重构至扁平分层 / 广播钮呼吸定版 / 个性化页 UI1b-B 三槽壁纸 + UI1b-B2 重做（一屏无滚动布局+1:5 取色+右上保存+主页面浮层化+强调色主题）✅ / 品牌蓝鲸·X+图标 / GPL-3.0 开源 / GitHub 远端 oh-zgl-s-fish/Bluelink）。配套：README（路线）、docs/networking.md（组网设计）、docs/troubleshooting.md（排障）。
 > 代码约定：编码/编译修复一律 pi 子 agent，主管负责构建/验收/文档/归档；**每次出包/修复同步更新文档**。
 
 ## A. 组网链路（修复批次）

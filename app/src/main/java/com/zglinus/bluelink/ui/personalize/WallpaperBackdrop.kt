@@ -10,19 +10,18 @@ import android.os.Handler
 import android.os.Looper
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.zglinus.bluelink.ui.theme.rememberEffectiveDark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -31,7 +30,8 @@ import kotlinx.coroutines.withContext
  * WallpaperManager，无 coil 等新依赖；回收/缓存单例简单化——不建全局缓存，按需解码、换槽时
  * 经 mainHandler 延后回收旧位图）。
  *
- * - [WallpaperBackdrop]：MainScreen 根背景（Scaffold 之下）。按当前深浅模式（isSystemInDarkTheme）
+ * - [WallpaperBackdrop]：MainScreen 根背景（Scaffold 之下）。按当前全局生效深浅（[rememberEffectiveDark]，
+ *   v0.5.9 UI1b-C 起由 themeMode 推导 Provide——不再直读 isSystemInDarkTheme）
  *   → [WallpaperStore.effectiveSlot] 取槽 → [rememberSlotBitmap] 异步解码（produceState +
  *   Dispatchers.IO + BitmapFactory downsample 防 OOM）→ [WallpaperEffect] 绘制「壁纸 + surfaceVariant
  *   遮罩（mask%）」。无壁纸时不绘制任何内容（露出底层纯色 background，维持现状）；
@@ -67,19 +67,14 @@ fun WallpaperBackdrop(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    // isSystemInDarkTheme() 为 Compose 状态：系统深浅切换自动重取槽（本版无手动模式开关）
-    val dark = isSystemInDarkTheme()
-    // v0.5.8c：tick 显式参与 remember 与解码 key——保存（wallpaperTick++）后强制重读 store 重取槽并重启解码，
-    // 消除「保存后主页面背景不同步」的 Compose 跳过歧义（tick 曾仅作参数未在函数体生效）
-    val slot = remember(tick, dark) { store.effectiveSlot(dark) }
-    val dec = rememberSlotDecode(
-        context = context,
-        slot = slot,
-        maxDim = BACKDROP_MAX_DIM,
-        tick = tick,
-    )
+    // 全局生效深浅（v0.5.9 UI1b-C 判定源：themeMode 手动模式 / 跟随系统；不再直读 isSystemInDarkTheme）——
+    // 深浅切换（系统或手动）自动重取槽；themeMode 变化时 BluelinkTheme 重算 → 本读取点随重组合刷新
+    val dark = rememberEffectiveDark()
+    // 每次 recomposition 重读 prefs（tick 变化驱动本层重绘；遮罩/强调色变化走同路径）
+    val slot = store.effectiveSlot(dark)
+    val wallpaper = rememberSlotBitmap(context = context, slot = slot, maxDim = BACKDROP_MAX_DIM)
     WallpaperEffect(
-        wallpaper = dec.bitmap,
+        wallpaper = wallpaper,
         maskAlpha = store.maskAlpha,
         modifier = modifier,
     )
@@ -137,13 +132,8 @@ internal fun rememberSlotDecode(
     context: Context,
     slot: WallpaperSlot,
     maxDim: Int,
-    tick: Int = 0,
 ): SlotDecode {
-    return produceState<SlotDecode>(
-        initialValue = SlotDecode(bitmap = null, failed = false),
-        key1 = slot,
-        key2 = tick,
-    ) {
+    return produceState<SlotDecode>(initialValue = SlotDecode(bitmap = null, failed = false), key1 = slot) {
         val old = value
         if (!slot.isSet) {
             value = SlotDecode(bitmap = null, failed = false)

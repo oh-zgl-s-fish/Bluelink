@@ -272,7 +272,7 @@ fun SettingsPage(
         // ============ 2. 热点 ============
         SettingsGroup(title = "热点") {
             Text(
-                text = "预设 SSID/密码：热点方自设 SSID 路径消费；LocalOnly 本地热点（③）由系统生成，不受预设影响",
+                text = "预设名称与密码：请先在手机系统设置中把你的热点名称和密码设为这里的值，组网时自动告知对方，对方按此连接",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -338,7 +338,7 @@ fun SettingsPage(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        text = "开启后 offer 自动携带预设 SSID/密码；关闭=沿用现行为（随机生成）",
+                        text = "开启后：组网时自动告知对方预设的名称与密码；关闭=沿用现行为（随机生成）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -366,24 +366,24 @@ fun SettingsPage(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "② 私有 API 热点",
+                        text = "自动开热点（系统级）",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
-                        text = "关闭后组网直接用 LocalOnly（③）",
+                        text = "开启=用系统能力自动开热点；关闭=改用更轻量的临时热点（兼容更好但部分机型不支持）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 // A3（同「组网时自动用预设」行）：Switch 语义名称——左侧标题/说明文字为独立文本节点
-                // 未绑定，读屏孤立播「开关」；补 contentDescription「② 私有 API 热点」（role/checked 由 Switch 自带）
+                // 未绑定，读屏孤立播「开关」；补 contentDescription「自动开热点（系统级）」（role/checked 由 Switch 自带）
                 Switch(
                     checked = privateApiEnabled,
                     onCheckedChange = { v ->
                         privateApiEnabled = v
                         presetStore.privateApiEnabled = v
                     },
-                    modifier = Modifier.semantics { contentDescription = "② 私有 API 热点" },
+                    modifier = Modifier.semantics { contentDescription = "自动开热点（系统级）" },
                 )
             }
         }
@@ -717,7 +717,7 @@ private fun buildPermChecks(context: Context): List<PermCheckItem> {
                     title = "通知",
                     applicable = true,
                     granted = ok,
-                    note = "13+ 运行时权限（传输状态/自测通知）",
+                    note = "13+ 运行时权限（预留，用于传输状态提示等）",
                     settingsAction = appNotificationIntent(context),
                 ),
             )

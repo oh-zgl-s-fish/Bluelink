@@ -1,4 +1,18 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.FileInputStream
+import java.util.Properties
+
+// v1.0.0 收尾：release 签名信息外置（不入 git）。主管放置 signing/keystore.properties 于工程根
+// （rootProject 即 bluelink/，app 模块经 settings.gradle.kts include；用 rootProject.file 最稳）。
+// 字段：storeFile（相对工程根路径字符串）/storePassword/keyAlias/keyPassword。
+// properties 不存在 → 各字段留空且 release 不引用该 signingConfig（signingConfig null，保持构建
+// 可过）；assembleDebug 不受影响，assembleRelease 产物缺签名配置（见 buildTypes.release 注释）。
+val keystorePropertiesFile = rootProject.file("signing/keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
+}
 
 plugins {
     alias(libs.plugins.android.application)
@@ -15,13 +29,32 @@ android {
         applicationId = "com.zglinus.bluelink"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.5.10"
+        // v1.0.0：正式发布版本号（里程碑收尾）
+        versionCode = 100
+        versionName = "1.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+            // keystore.properties 缺失时字段为空：该 signingConfig 不被 release 引用 → 无副作用
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            isShrinkResources = false
+            // properties 存在 → 启用 release 签名；缺失 → signingConfig null（构建可过，
+            // 仅尝试 assembleRelease 时产物无签名配置/提示缺签名）
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

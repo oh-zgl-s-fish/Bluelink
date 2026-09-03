@@ -1,7 +1,7 @@
 # 蓝鲸·X（Bluelink）
 
 > **离线 · 端到端 · 无服务器文件传输**：BLE 发现握手 → 同网判定 → 异网自动组网 → LocalSend 协议直传。
-> 状态快照：v0.5.14d（2026-09-02）· 仓库：`github.com/oh-zgl-s-fish/Bluelink`
+> 状态快照：v1.0.0（2026-09-03）· 仓库：`github.com/oh-zgl-s-fish/Bluelink`
 
 Android 8+（API 26+）设备间文件传输客户端。两台设备**不需要任何服务器/账号/互联网**：打开 App 即可被 BLE 发现，扫描握手交换网络信息，自动判断双方是否同网——同网直接传输，异网则由一方自动开启热点（系统预配热点 / LocalOnlyHotspot / 手动四级兜底），另一方自动接入，随后经 **LocalSend v2 协议**（HTTP 53317）完成文件收发。
 
@@ -14,7 +14,7 @@ Android 8+（API 26+）设备间文件传输客户端。两台设备**不需要�
 - 📤 **LocalSend v2 传输**：HTTP 53317、multipart 流式、进度/取消、SAF 选文件与保存目录
 - 🧹 **温和收尾**：传输完可选关热点/断网，BLE 保留可续传
 - 🎨 Material 3 语义化 UI（MD3 Skill 驱动重构）+ 全版本权限矩阵适配
-- 🔒 密码/PIN 全程不回显；内置诊断日志（App 内查看/复制/导出）
+- 🔒 密码/PIN 全程不回显；诊断日志支持脱敏导出（关于页隐藏入口，两段式收集）
 
 ## 工作流
 
@@ -71,15 +71,13 @@ LocalSend v2：发送（SAF 选文件 → prepare-upload → multipart 流式）
 
 - `docs/networking.md` — 组网设计定稿（仲裁/热点等级/同网判定/超时语义）
 - `docs/ui-design.md` — UI 设计（两态左右布局/抽屉/个性化规格）
-- `docs/md3-audit.md` — Material 3 审计与落地（语义 token/组件行为/无障碍）
+- `docs/md3-audit-2.md` — Material 3 审计与落地（语义 token/组件行为/无障碍，v0.5.12-0.5.14 已实施 P0-P2）
 - `docs/troubleshooting.md` — 真机排障档案
 - `docs/TODO.md` — 任务看板（未完成项见下）
 
 ## 未完成（TODO 摘要）
 
-- **UI1b-C**：设置-设备页（PIN 管理/重置指纹、热点密码预设、下载目录、权限检测）+ 全局深浅切换
-- **工程收尾**：release 签名（正式 keystore）
-- **迭代候选**：PIN 短时窗过期/失败锁定；直连加密（握手指纹互认）；8-9 段机型回归（荣耀 8）
+- **迭代候选**：PIN 短时窗过期/失败锁定；直连加密（握手指纹互认）；8-9 段机型回归（荣耀 8）；文件浏览器页（近期/收藏/浏览）；前台服务状态行
 - 详细见 `docs/TODO.md`
 
 ## 构建

@@ -2591,7 +2591,7 @@ private fun SystemHotspotPwdDialog(engine: BluelinkEngine) {
     val ui = engine.ui
     AlertDialog(
         onDismissRequest = { ui.manualPwdDialog = false },
-        title = { Text("系统热点登记（②）") },
+        title = { Text("系统热点登记") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
@@ -2634,7 +2634,7 @@ private fun ManualPwdDialogV4(engine: BluelinkEngine) {
     val ui = engine.ui
     AlertDialog(
         onDismissRequest = { ui.manualPwdDialog = false },
-        title = { Text("手动配网（④）") },
+        title = { Text("手动配网") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(
@@ -2680,7 +2680,7 @@ private fun LocalOnlyPwdDialog(engine: BluelinkEngine) {
     val ui = engine.ui
     AlertDialog(
         onDismissRequest = { ui.localOnlyPwdDialog = false },
-        title = { Text("本地热点密码登记（③）") },
+        title = { Text("本地热点密码登记") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceSm)) {
                 Text(

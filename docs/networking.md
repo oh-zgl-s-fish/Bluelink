@@ -96,13 +96,13 @@ IDLE ──用户确认──▶ NEGOTIATING(角色裁定/可切换)
 ## 11. 热点最终方案（2026-09-01 决策定稿）
 
 - **主优先级（2026-09-01 定案）**：
-  1. **②' 系统预配热点自动开**（Binder 直呼 `ITetheringConnector.startTethering`，sdk 26-33，无条件直连+NEARBY/写设置前置+密码登记一次）——最高级（v0.3.4 落实中）
+  1. **② 系统预配热点自动开**（Binder 直呼 `startTethering`，k1/c 按名枚举签名，sdk 26-33，无条件直连+NEARBY/写设置前置；密码登记一次，v0.5.14c 起预设模式 offer 直带预设）——最高级 ✅（v0.3.8 落实，v0.5.14 默认启用）
   2. **③ LocalOnlyHotspot**——8-9 自动读密码（全自动）；13+ 系统弹窗+App 登记回填（自动开+抄密码一次）；10-12 密码盲区禁用
 - **兜底**：④ 手动系统热点（全版本；10-12 现实出口）
-- **② 私有 API**：仅保留「开启/关闭」能力，可用版本（8-9，targetSdk27 legacy 豁免）直接反射；其余版本 try 失败即降级（Android 12 blacklist 无条件拦截已实测）
+- **② 私有 API**：k1/c Binder 直呼 startTethering（按名枚举签名，sdk26-33 首手段）+ 降级反射 setWifiApEnabled；设置页「自动开热点（系统级）」开关可关（降③）；失败即降级（v0.5.14 起默认启用）
 - **root 路线废弃**（A15/KernelSU 上 cmd wifi 残缺+反射方法移除，已删 B1）
 - **Shizuku / Binder 直呼 connectivity.startTethering：暂不引入**（MacroDroid 逆向作为技术档案；结论存档于 docs/macrodroid-notes.md）
-- targetSdk=27 保留（② 8-9 路径需要 legacy 豁免；对 ③ ④ 无副作用）
+- targetSdk=34（小版本演进，NEARBY_WIFI_DEVICES 分轨；旧 targetSdk27 legacy 豁免方案已被 k1/c Binder 直呼取代）
 - **③ 实测定案（v0.3.9.1/0.3.9.2）**：onStarted 统一先试读 preSharedKey（不按 sdk 分开）——**A15 自动读密码成功**（NEARBY 33+ 授权前置做过即读得到）；29-32 由「盲区禁用」改为**放行调用+先试读**（A12 实测定案）；读空才回填（33+）/降 ④（26-32）。
 - **OFFER_SENT 等 joined 120s**（v0.3.9.2，PEER_JOIN_TIMEOUT_MS）：对端接入含系统 Specifier 确认弹窗，15s 必不够。
 - **同网复核放宽（v0.4.0）**：子网一致即通过；probeTcp(53317) 降辅助（服务监听前不阻塞）。

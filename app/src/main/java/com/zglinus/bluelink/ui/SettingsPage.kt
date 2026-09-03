@@ -41,6 +41,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
@@ -325,9 +327,12 @@ fun SettingsPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // v0.5.12 md3-audit-2 A3：Switch 语义名称——左侧标题/说明文字为独立文本节点未绑定，读屏孤立
+                // 播「开关」；给 Switch 自身补 contentDescription「组网时自动用预设」（role/checked 由 Switch 自带）
                 Switch(
                     checked = presetEnabled,
                     onCheckedChange = { presetEnabled = it },
+                    modifier = Modifier.semantics { contentDescription = "组网时自动用预设" },
                 )
             }
             Button(

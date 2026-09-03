@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +37,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zglinus.bluelink.ui.BluelinkUiState
 import com.zglinus.bluelink.ui.theme.SpacingTokens
+import com.zglinus.bluelink.ui.theme.extended
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
@@ -130,14 +133,18 @@ import kotlinx.coroutines.withContext
  * `ui.wallpaperTick++`（主页面背景 WallpaperBackdrop 与浮层容器 alpha（MainScreen 以 tick 为 key 重读
  * containerAlpha()）一并刷新，见 [BluelinkUiState.wallpaperTick]）
  * → [onSaved] 上抛强调色（MainActivity 主题 state → BluelinkTheme(accent) 重算 primary 系）
- * → Snackbar「已保存」。离开页面未保存 = 丢弃草稿（remember 随页面出组合失效，重进从 prefs 重读；
- * 首版不做未保存提示）。强调色未选/null → 主题用默认 M3 品牌蓝派生，不覆写。
+ * → Snackbar「已保存」。离开页面未保存 = 丢弃草稿（remember 随页面出组合失效，重进从 prefs 重读）；
+ * v0.5.12 md3-audit-2 FI2：离开时（返回钮 / 抽屉切页 / 顶栏返回主页）若草稿 ≠ store 已存值 → Snackbar
+ * 「有未保存的改动」提示（只提示不阻断离开；dirty 判定见 [dirty] 计算块，经 onDirtyChange 上报 MainScreen）。
+ * 强调色未选/null → 主题用默认 M3 品牌蓝派生，不覆写。
  */
 @Composable
 fun PersonalizePage(
     ui: BluelinkUiState,
     // v0.5.8 UI1b-B2：保存回调（保存的强调色 ARGB Long？null=未选/清除）→ MainActivity 主题强调色 state
     onSaved: (Long?) -> Unit = {},
+    // v0.5.12 md3-audit-2 FI2：未保存草稿 dirty 上报（MainScreen 持有 personalDirty，离开个性化页前提示）
+    onDirtyChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val store = remember { WallpaperStore(context.applicationContext) }
@@ -153,6 +160,20 @@ fun PersonalizePage(
     // v0.5.11 UI1b-E 改④：容器透明度草稿（初值 store.containerTransparency；拖动只改本地态，保存才写 store；
     // 离开未保存 = 丢弃，与 mask 草稿同语义；v0.5.11b 起预览区按草稿实时叠容器色层（见 PreviewSection））
     var transparencyDraft by remember { mutableStateOf(store.containerTransparency) }
+
+    // v0.5.12 md3-audit-2 FI2：未保存草稿判定（三槽 / 遮罩 / 容器透明度 / 强调色 任一 ≠ store 已存值）。
+    // dirty=true → 离开页面（返回钮直判 + MainScreen 侧拦截抽屉/顶栏路由经 onDirtyChange 上报）时
+    // Snackbar「有未保存的改动」提示（防调色半天点返回全丢无提示；只提示不阻断离开，保持简单）。
+    val dirty = remember(unifiedDraft, darkDraft, lightDraft, maskDraft, transparencyDraft, accentDraft) {
+        unifiedDraft != store.slot(WallpaperStore.SLOT_UNIFIED) ||
+            darkDraft != store.slot(WallpaperStore.SLOT_DARK) ||
+            lightDraft != store.slot(WallpaperStore.SLOT_LIGHT) ||
+            maskDraft != store.maskAlpha ||
+            transparencyDraft != store.containerTransparency ||
+            accentDraft != store.accentColor
+    }
+    // 上报 MainScreen.personalDirty：进页初值/保存后 = false；任何改动 = true（页面每次进出自动复位）
+    LaunchedEffect(dirty) { onDirtyChange(dirty) }
     // 当前场景（场景三按钮高亮 + 预览区渲染该槽草稿）
     var sceneSlot by remember { mutableStateOf(WallpaperStore.SLOT_UNIFIED) }
     // 色系展开态：false=右区显示当前色系具体色行；true=右区展开色系列表大圆点行（v0.5.8d 同款切换，
@@ -260,7 +281,12 @@ fun PersonalizePage(
             )
             // 规格图顶部条只画 [保存]；本页为抽屉子页（主页面不列抽屉项、无 BackHandler）——
             // 无返回即无法回主页面（死胡同），与 LOG/设置/关于页同款「返回」放保存左侧，保存保持最右上角。
-            TextButton(onClick = { ui.currentPage = BluelinkUiState.PAGE_HOME }) { Text("返回") }
+            // v0.5.12 md3-audit-2 FI2：返回离开时有未保存草稿 → Snackbar 提示（抽屉/顶栏路由离开由
+            // MainScreen navigateFrom 拦截提示；此处直判——两处均只提示不阻断离开，保持简单）
+            TextButton(onClick = {
+                if (dirty) ui.showSnack("有未保存的改动")
+                ui.currentPage = BluelinkUiState.PAGE_HOME
+            }) { Text("返回") }
             TextButton(onClick = { save() }) { Text("保存") }
         }
         Spacer(Modifier.height(SpacingTokens.SpaceSm))
@@ -456,7 +482,8 @@ private fun ColorSectionRow(
  * 左 1/6 色系入口**圆形按钮**（v0.5.8d 去文字定稿）：填充当前色系的代表色**双色半彩示意**（左半 =
  * 代表色 [familySwatch] / 右半 = 其加深半彩 [familyEntryDuo]，左右分半同场景「统一壁纸」圆钮语言），
  * 无任何文字；展开态（右区 = 色系列表模式）= primary 2dp 外环高亮（同具体色点选中态样式 [AccentSwatch]），
- * 收拢态 = outlineVariant 1dp 细环（浅/白系色面可见描边）。触达 48dp / 视觉 40dp 圆 + 外环。
+ * 收拢态 = outline 2dp 外环（v0.5.12 md3-audit-2 C2：outlineVariant 1dp → outline 2dp，浅/白系色面在浅
+ * 表面上的可辨描边 ≥3:1）。触达 48dp / 视觉 40dp 圆 + 外环。
  * 读屏 contentDescription 带色系名（视觉无字，无障碍仍可辨）；点按 = 色系行/具体色行 toggle。
  */
 @Composable
@@ -478,19 +505,23 @@ private fun FamilyEntryStrip(
                 .clickable(onClick = onClick)
                 .semantics {
                     selected = expanded
+                    // v0.5.12 md3-audit-2 K1/A2：自制无字圆钮补单选 role（读屏报「单选按钮…已选中/未选中」）
+                    role = Role.RadioButton
                     contentDescription = "色系入口：当前${family.name}色系（点按切换色系列表/具体色列表）"
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // 外环底衬（先画，被半彩圆盖住中心、露外圈环）：展开 primary 2dp / 收拢 outlineVariant 1dp
+            // 外环底衬（先画，被半彩圆盖住中心、露外圈环）：展开（=选中）primary 2dp / 收拢 outline 2dp
+            // （v0.5.12 md3-audit-2 C2 环档：收拢态 outlineVariant 1dp → outline 2dp——浅色主题浅色系双色半彩
+            // 直贴浅底时的可辨描边，两主题 ≥3:1 图形；与 [AccentSwatch]/[SceneDotButton] 共用同款环档）
             Box(
                 modifier = Modifier
-                    .size(if (expanded) 44.dp else 42.dp)
+                    .size(44.dp)
                     .background(
                         color = if (expanded) {
                             MaterialTheme.colorScheme.primary
                         } else {
-                            MaterialTheme.colorScheme.outlineVariant
+                            MaterialTheme.colorScheme.outline
                         },
                         shape = CircleShape,
                     ),
@@ -520,8 +551,8 @@ private fun FamilyEntryStrip(
 
 /**
  * 色系列表（展开态，v0.5.8d 同款切换）：一排**色系代表色大圆点**横滑行——圆点视觉/触达与具体色点
- * [AccentSwatch] 完全同款（40dp 视觉圆点 + 选中 2dp primary 环 / 未选 1dp outlineVariant 细环，无卡片、
- * 无边框容器、无文字，LazyRow 可左右滑动），圆点色 = 各色系代表色 [familySwatch]，选中环高亮 = 当前
+ * [AccentSwatch] 完全同款（40dp 视觉圆点 + 选中 2dp primary 环 / 未选 2dp outline 环（v0.5.12
+ * md3-audit-2 C2，原 outlineVariant 1dp 升档），无卡片、无边框容器、无文字，LazyRow 可左右滑动），圆点色 = 各色系代表色 [familySwatch]，选中环高亮 = 当前
  * 色系；点选某色系 → 收拢并切回该色系的具体色横滑行（[onFamilySelected]；同款切换，无过渡动画，简单
  * 状态切换）。取代 v0.5.8「点左入口向右展开 FilterChip 行」交互。
  */
@@ -532,7 +563,8 @@ private fun FamilyDotsRow(
     modifier: Modifier = Modifier,
 ) {
     LazyRow(
-        modifier = modifier,
+        // v0.5.12 md3-audit-2 K1/A2：色系代表色大圆点行 = 单选组容器（selectableGroup；子圆点 role=RadioButton）
+        modifier = modifier.selectableGroup(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
     ) {
@@ -558,7 +590,8 @@ private fun ConcreteColorRow(
     modifier: Modifier = Modifier,
 ) {
     LazyRow(
-        modifier = modifier,
+        // v0.5.12 md3-audit-2 K1/A2：具体色大圆色点行 = 单选组容器（selectableGroup；子圆点 role=RadioButton）
+        modifier = modifier.selectableGroup(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
     ) {
@@ -574,8 +607,9 @@ private fun ConcreteColorRow(
 
 /**
  * 具体颜色**大圆色点**（v0.5.8b：视觉 40dp / 触达 48dp，纯色无文字）：选中态 = 2dp primary 圆环描边；
- * 未选 = 1dp outlineVariant 细环（浅/白系色点在浅表面上的可见描边）。环以「大圆底衬 + 色点覆盖中心」
- * 实现——色点外缘正好露环宽，无需描边半宽换算。
+ * 未选 = 2dp outline 环（v0.5.12 md3-audit-2 C2：outlineVariant 1dp 环 1.66:1 → outline 2dp，浅
+ * #74777F 3.39:1 / 深 #8F9099 4.29:1 ≥3:1 图形，修浅色主题白/浅灰系色点 1.06:1 盲选）。
+ * 环以「大圆底衬 + 色点覆盖中心」实现——色点外缘正好露环宽，无需描边半宽换算。
  *
  * v0.5.8d：色系代表色圆点行 [FamilyDotsRow] 复用本件（保证与具体色点同尺寸同视觉）——仅读屏文案可经
  * [semanticLabel] 换色系名；具体色调用不传 → 默认 hex 文案（v0.5.8b 不变）。
@@ -600,18 +634,22 @@ private fun AccentSwatch(
                     "强调色 ${accentHex(argb)}"
                 }
                 selected = isSelected
+                // v0.5.12 md3-audit-2 K1/A2：自制单选点补 role（读屏报「单选按钮…已选中/未选中」）
+                role = Role.RadioButton
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 外环底衬（先画，被色点盖住中心、露外圈环）：选中 primary 2dp / 未选 outlineVariant 1dp
+        // 外环底衬（先画，被色点盖住中心、露外圈环）：选中 primary 2dp / 未选 outline 2dp（同 2dp 环宽，
+        // 档位差异只在颜色——v0.5.12 md3-audit-2 C2 环档：未选 outlineVariant 1dp → outline 2dp，浅色主题
+        // 白/浅灰系色点 1.06:1、环 1.66:1 → outline 环浅 #74777F 3.39:1 / 深 #8F9099 4.29:1，图形 ≥3:1）
         Box(
             modifier = Modifier
-                .size(if (isSelected) 44.dp else 42.dp)
+                .size(44.dp)
                 .background(
                     color = if (isSelected) {
                         MaterialTheme.colorScheme.primary
                     } else {
-                        MaterialTheme.colorScheme.outlineVariant
+                        MaterialTheme.colorScheme.outline
                     },
                     shape = CircleShape,
                 ),
@@ -671,7 +709,8 @@ private fun SceneSwitchRow(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier,
+        // v0.5.12 md3-audit-2 K1/A2：场景三钮行 = 单选组容器（selectableGroup；子钮 role=RadioButton）
+        modifier = modifier.selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceLg, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -693,8 +732,11 @@ private fun SceneSwitchRow(
     }
 }
 
-/** 场景无字圆钮（视觉 52dp 圆 + 外环，触达 56dp）：选中 = primary 2dp 外环高亮；未选 = outlineVariant
- *  1dp 细环（深灰圆在深表面 / 浅灰圆在浅表面上的可见描边）。无文字，读屏 contentDescription =「场景：…」。 */
+/** 场景无字圆钮（视觉 52dp 圆 + 外环，触达 56dp）：选中 = primary 2dp 外环高亮；未选 = outline 2dp 外环
+ * （v0.5.12 md3-audit-2 C1 修复：outlineVariant 1dp → outline 2dp——浅主题浅灰钮 on 浅底 1.19:1 / 深主题
+ * 深灰钮 on 深底 1.63:1 的「同色调钮」兜底可辨，outline 环浅 #74777F 3.39:1 / 深 #8F9099 4.29:1 ≥3:1；
+ * 两主题同加保持视觉一致；填充数据灰阶保留，见 [SceneDotFill] 注释）。无文字，读屏
+ * contentDescription =「场景：…」。 */
 @Composable
 private fun SceneDotButton(
     slotId: Int,
@@ -708,19 +750,22 @@ private fun SceneDotButton(
             .clickable(onClick = onClick)
             .semantics {
                 selected = isSelected
+                // v0.5.12 md3-audit-2 K1/A2：场景三钮 = 单选组（读屏报「单选按钮…已选中/未选中」）
+                role = Role.RadioButton
                 contentDescription = "场景：${sceneName(slotId)}"
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 外环底衬（先画，被填充圆盖住中心、露外圈环）：选中 primary 2dp / 未选 outlineVariant 1dp
+        // 外环底衬（先画，被填充圆盖住中心、露外圈环）：选中 primary 2dp / 未选 outline 2dp（同 2dp 环宽，
+        // 档位差异只在颜色——C1 方案② outline 2dp 外环兜底；选中环 primary 不变）
         Box(
             modifier = Modifier
-                .size(if (isSelected) 56.dp else 54.dp)
+                .size(56.dp)
                 .background(
                     color = if (isSelected) {
                         MaterialTheme.colorScheme.primary
                     } else {
-                        MaterialTheme.colorScheme.outlineVariant
+                        MaterialTheme.colorScheme.outline
                     },
                     shape = CircleShape,
                 ),
@@ -745,7 +790,10 @@ private fun SceneDotFill(slotId: Int, modifier: Modifier = Modifier) {
     }
 }
 
-/** 场景圆钮图形灰阶（v0.5.8b 无字圆钮数据色，非语义 token；规格：#3A3A3A 深灰 / #E8E8E8 浅灰）。 */
+/** 场景圆钮图形灰阶（v0.5.8b 无字圆钮数据色，非语义 token；规格：#3A3A3A 深灰 / #E8E8E8 浅灰）。
+ * 对比说明（v0.5.12 md3-audit-2 C1）：填充数据灰阶保留（数据色豁免语义 token）——浅灰 #E8E8E8 直贴浅底
+ * 1.19:1、深灰 #3A3A3A 直贴深底 1.63:1，两主题各有「同色调钮」贴近背景；可辨性由 [SceneDotButton]
+ * 未选态 outline 2dp 外环兜底（浅 #74777F 3.39:1 / 深 #8F9099 4.29:1 ≥3:1 图形），不靠改填充灰阶。 */
 private val SCENE_DARK_GRAY = Color(0xFF3A3A3A)
 
 private val SCENE_LIGHT_GRAY = Color(0xFFE8E8E8)
@@ -909,37 +957,56 @@ private fun MaskRow(
  * （5% 步进，显示百分比；同遮罩行样式）。语义 = 主页浮层容器「透明程度」：容器实际 alpha = 1−值/100
  * （5→0.95 … 50→0.50，默认 20 → 0.80 与 v0.5.8d 顶栏浮层规格一致）；拖动只改本地草稿
  * transparencyDraft（v0.5.11b 起上方壁纸预览区同步实时叠容器色层预览），保存写
- * store.containerTransparency 后主页生效。 */
+ * store.containerTransparency 后主页生效。
+ * v0.5.12 md3-audit-2 C4：透明度 ≥40%（容器 alpha ≤0.60）为文字可读风险区（深壁纸 + 低遮罩下容器文字
+ * 对比可跌破 4.5:1 且无自动钳制）——滑杆下方动态显示 warning 色风险提示（50% 档 = alpha 0.50 下限提示
+ * 最强；阈值常量见 [WallpaperStore.RISK_TRANSPARENCY_THRESHOLD]）。 */
 @Composable
 private fun ContainerTransparencyRow(
     transparency: Int,
     onTransparencyChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "容器透明度",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.width(96.dp),
-        )
-        Slider(
-            value = transparency.toFloat(),
-            onValueChange = { onTransparencyChange(it.toInt()) },
-            valueRange = WallpaperStore.TRANSPARENCY_MIN.toFloat()..WallpaperStore.TRANSPARENCY_MAX.toFloat(),
-            // 5% 步进（5/10/…/50）：steps = 中间离散点数 = (50−5)/5 − 1 = 8
-            steps = (WallpaperStore.TRANSPARENCY_MAX - WallpaperStore.TRANSPARENCY_MIN) / 5 - 1,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = "$transparency%",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(44.dp),
-            maxLines = 1,
-        )
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "容器透明度",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.width(96.dp),
+            )
+            Slider(
+                value = transparency.toFloat(),
+                onValueChange = { onTransparencyChange(it.toInt()) },
+                valueRange = WallpaperStore.TRANSPARENCY_MIN.toFloat()..WallpaperStore.TRANSPARENCY_MAX.toFloat(),
+                // 5% 步进（5/10/…/50）：steps = 中间离散点数 = (50−5)/5 − 1 = 8
+                steps = (WallpaperStore.TRANSPARENCY_MAX - WallpaperStore.TRANSPARENCY_MIN) / 5 - 1,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "$transparency%",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(44.dp),
+                maxLines = 1,
+            )
+        }
+        // v0.5.12 md3-audit-2 C4：风险提示行（透明度 ≥40% = alpha ≤0.60 风险区时动态出现；50% 档 = alpha
+        // 0.50 下限，提示最强；文案随档切换——取审计轻量组合①，不引入联动钳制机制）
+        if (transparency >= WallpaperStore.RISK_TRANSPARENCY_THRESHOLD) {
+            Text(
+                text = if (transparency >= WallpaperStore.TRANSPARENCY_MAX) {
+                    "50% 时文字可读性下降风险较高"
+                } else {
+                    "较高透明度可能影响文字可读"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.extended.warning,
+                modifier = Modifier.padding(start = 96.dp, top = SpacingTokens.SpaceXs),
+            )
+        }
     }
 }
 

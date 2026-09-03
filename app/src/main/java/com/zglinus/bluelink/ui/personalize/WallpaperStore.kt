@@ -48,6 +48,9 @@ data class WallpaperSlot(
  *   容器实际 alpha = 1f − value/100f（[containerAlpha]；默认 20 → alpha 0.80，范围 alpha 0.95–0.50）
  *   ——v0.5.11 UI1b-E 改③ 新增：HOME 顶栏/两态卡/底部动作行/时间流/横幅等浮层 alpha 由固定常量
  *   0.80 改为本值运行态可调（MainScreen 读本 store，个性化页「容器透明度」滑块保存后生效）；
+ *   （v0.5.12 md3-audit-2 C4 风险区文档化：默认 0.80 = 文字可读基线；透明度 ≥40%（容器 alpha ≤0.60）
+ *   起文字可读性下降，50%（alpha 0.50）为下限风险档——极端组合（深壁纸 + 遮罩低）容器文字对比可跌至
+ *   ~2:1 不可读且无自动钳制，仅个性化页滑杆风险提示兜底，见 [RISK_TRANSPARENCY_THRESHOLD]）；
  * - [effectiveSlot]：背景取槽规则——按当前深浅模式取对应槽（深→深槽 / 浅→浅槽），槽未设 → 统一槽（兜底）；
  *   统一槽也未设 → [WallpaperSlot.NONE]（App 根背景回纯色，维持现状）。
  */
@@ -97,7 +100,9 @@ class WallpaperStore(context: Context) {
         }
 
     /** 容器透明度（5–[TRANSPARENCY_MAX]%，越界写入自动收拢；v0.5.11 UI1b-E 改③）。
-     * 语义 = 透明程度 %（数值越大容器越透明）；主页浮层容器实际 alpha 见 [containerAlpha]。 */
+     * 语义 = 透明程度 %（数值越大容器越透明）；主页浮层容器实际 alpha 见 [containerAlpha]。
+     * 可读性下限（v0.5.12 md3-audit-2 C4 注释文档化）：默认 20%（alpha 0.80）为可读基线；
+     * ≥ [RISK_TRANSPARENCY_THRESHOLD]%（40%，alpha ≤0.60）为风险区——个性化页滑杆动态风险提示。 */
     var containerTransparency: Int
         get() = prefs.getInt(KEY_TRANSPARENCY, DEFAULT_TRANSPARENCY)
             .coerceIn(TRANSPARENCY_MIN, TRANSPARENCY_MAX)
@@ -106,7 +111,9 @@ class WallpaperStore(context: Context) {
         }
 
     /** 主页浮层容器实际 alpha = 1f − 透明度/100f（默认 20 → 0.80，范围 0.95–0.50；
-     * 默认 0.80 与 v0.5.8d 顶栏浮层规格一致）。 */
+     * 默认 0.80 与 v0.5.8d 顶栏浮层规格一致——可读基线，勿下调默认值）。
+     * 风险区（v0.5.12 md3-audit-2 C4）：alpha < 0.60（透明度 > 40%）容器文字可读性明显下降、
+     * alpha 0.50（透明度 50%）为下限档——仅个性化页滑杆有风险提示，无其它自动钳制。 */
     fun containerAlpha(): Float = 1f - containerTransparency / 100f
 
     /** 背景取槽 helper：当前深浅模式槽未设 → 统一槽兜底；仍未设 → 空槽（纯色）。 */
@@ -138,11 +145,17 @@ class WallpaperStore(context: Context) {
         /** 容器透明度下限（5%；对应容器 alpha 0.95，下限保护：不透明上限 95%）。 */
         const val TRANSPARENCY_MIN = 5
 
-        /** 容器透明度上限（50%；对应容器 alpha 0.50，至少保持半透明基底可读）。 */
+        /** 容器透明度上限（50%；对应容器 alpha 0.50）。风险档说明（v0.5.12 md3-audit-2 C4）：
+         * alpha 0.50 = 下限档——深色壁纸 + 低遮罩时容器文字对比可跌至 ~2:1 不可读；无自动钳制，
+         * 仅个性化页滑杆风险提示兜底（见 [RISK_TRANSPARENCY_THRESHOLD]），默认值勿下调。 */
         const val TRANSPARENCY_MAX = 50
 
-        /** 容器透明度默认值（20% → 容器 alpha 0.80，同 v0.5.8d 顶栏浮层规格 0.80）。 */
+        /** 容器透明度默认值（20% → 容器 alpha 0.80，同 v0.5.8d 顶栏浮层规格 0.80——可读基线，勿下调）。 */
         const val DEFAULT_TRANSPARENCY = 20
+
+        /** 容器透明度风险阈值（40% → 容器 alpha 0.60）：透明度 ≥ 此值进入可读风险区（alpha < 0.60）；
+         * 个性化页容器透明度滑杆 ≥40% 动态显示 warning 风险提示（md3-audit-2 C4 轻量组合①）。 */
+        const val RISK_TRANSPARENCY_THRESHOLD = 40
 
         private const val KEY_MASK = "mask_alpha"
 

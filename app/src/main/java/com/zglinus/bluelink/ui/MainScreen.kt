@@ -224,6 +224,28 @@ fun MainScreen(
     // v0.5.10 关于页：隐藏热区解锁态上提 MainScreen——AboutPage 随路由切页离开组合，解锁需本会话内保持
     var aboutLogUnlocked by remember { mutableStateOf(false) }
 
+    // v0.5.12 md3-audit-2 FI2：个性化页未保存草稿标记（PersonalizePage 经 onDirtyChange 上报、进页/保存后
+    // 复位 false）——离开个性化页（抽屉切页 / 顶栏应用名返回 / 页内返回）时若有未保存草稿 → Snackbar 提示
+    var personalDirty by remember { mutableStateOf(false) }
+
+    // v0.5.12 md3-audit-2 F4：关于页「收集日志」两段式状态提升——collecting / 起点偏移 / 待落盘文本 原为
+    // AboutPage 局部 remember（随路由切页出组合即丢：再进入点「收集日志」需重新开始，窗口静默丢失）；
+    // 上提 MainScreen（与 aboutLogUnlocked 同级）后跨页不丢；logExporting = 导出中 busy（IO/SAF 选目录
+    // 期间收集行禁点 + 文案「导出中…」，见 onLogCollectClick）
+    var logCollecting by remember { mutableStateOf(false) }
+    var logCollectStart by remember { mutableStateOf(0L) }
+    var logPendingText by remember { mutableStateOf<String?>(null) }
+    var logExporting by remember { mutableStateOf(false) }
+
+    // v0.5.12 md3-audit-2 FI2：路由离开统一出口——从个性化页离开且草稿未保存 → Snackbar「有未保存的改动」
+    // （只提示不阻断离开；抽屉切页与顶栏应用名返回主页均经此，个性化页内「返回」在页内自行直判）
+    fun navigateFrom(page: Int) {
+        if (ui.currentPage == BluelinkUiState.PAGE_PERSONAL && personalDirty) {
+            ui.showSnack("有未保存的改动")
+        }
+        ui.currentPage = page
+    }
+
     // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）
     val sendFileLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -257,6 +279,62 @@ fun MainScreen(
         mutableStateOf(containerStore.containerAlpha())
     }
 
+    // v0.5.12 md3-audit-2 F4：收集日志导出目录选择器上提 MainScreen（与状态提升配套——AboutPage 出组合
+    // 不丢 launcher/待落盘文本；未自定义接收目录时弹 SAF 选落盘位置，Downloads 初始、不改接收目录设置）
+    val logDirLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        val text = logPendingText
+        logPendingText = null
+        if (uri == null || text == null) {
+            // 取消选择 / 无待存文本：结束导出 busy（本次放弃保存，不误报）
+            logExporting = false
+        } else {
+            // 选定目录：MainScreen scope 落盘（不随 AboutPage 出组合取消 IO）；写完结束 busy + Toast 结果
+            scope.launch {
+                val msg = withContext(Dispatchers.IO) {
+                    writeLogTextToTree(wallpaperCtx, uri, text)
+                }
+                logExporting = false
+                Toast.makeText(wallpaperCtx, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // v0.5.12 md3-audit-2 F4：收集行点击状态机（开始记录 / 停止并导出；导出中 busy 禁点）。逻辑放 MainScreen
+    // 层——scope（IO 不随 AboutPage 出组合取消）、目录选择器、状态同层；AboutPage 只展示 + 回调本函数
+    fun onLogCollectClick() {
+        if (logExporting) return // busy：导出中（含 SAF 选目录期间）禁点，防 IO 期间重入
+        if (!logCollecting) {
+            // 开始记录：起点偏移 = 当前已入缓冲条数（停止时导出起点后新增）；Snackbar 起始提示
+            logCollecting = true
+            logCollectStart = DiagLogger.entryCount()
+            ui.showSnack("已开始收集，操作复现后再次点击保存")
+        } else {
+            // 停止并导出：脱敏 txt 落盘——自定义接收目录直接 SAF 写入；未自定义则弹目录选择器（本次保存）
+            logCollecting = false
+            val text = buildLogExportText(
+                alias = ui.selfCard.alias.ifBlank { Build.MODEL },
+                startCount = logCollectStart,
+            )
+            val tree = engine?.receiveDirUri()
+            if (tree == null) {
+                logPendingText = text
+                logExporting = true // busy 档开启（SAF 选目录期间禁点 + 「导出中…」文案）
+                logDirLauncher.launch(initialReceiveDirUri())
+            } else {
+                logExporting = true
+                scope.launch {
+                    val msg = withContext(Dispatchers.IO) {
+                        writeLogTextToTree(wallpaperCtx, tree, text)
+                    }
+                    logExporting = false
+                    Toast.makeText(wallpaperCtx, msg, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     // v0.5.7 UI1b-B 主页面背景应用（App 根背景）：RootWallpaperLayer（自订阅 ui.wallpaperTick）垫在
     // ModalNavigationDrawer/Scaffold 之下；根背景 Box = 纯色 background 打底（无壁纸回纯色现状）→
     // WallpaperBackdrop（壁纸 + surfaceVariant 遮罩，按当前深浅模式取槽：深→深槽/浅→浅槽，槽未设→统一槽兜底）；
@@ -276,7 +354,8 @@ fun MainScreen(
             AppDrawer(
                 ui = ui,
                 onNavigate = { page ->
-                    ui.currentPage = page
+                    // v0.5.12 md3-audit-2 FI2：抽屉切页统一走 navigateFrom（离开个性化页且有未保存草稿 → Snackbar）
+                    navigateFrom(page)
                     scope.launch { drawerState.close() }
                 },
             )
@@ -308,7 +387,8 @@ fun MainScreen(
                     // v0.5.11 UI1b-E 改①/改③：非主页时点应用名「蓝鲸·X」返回主页（主页时 null=不可点无操作）；
                     // 顶栏浮层 alpha 同主页容器透明度（containerAlpha = store 运行态重读值）
                     onAppNameClick = if (ui.currentPage != BluelinkUiState.PAGE_HOME) {
-                        { ui.currentPage = BluelinkUiState.PAGE_HOME }
+                        // v0.5.12 md3-audit-2 FI2：应用名返回主页同样过 navigateFrom（个性化页未保存草稿提示）
+                        { navigateFrom(BluelinkUiState.PAGE_HOME) }
                     } else {
                         null
                     },
@@ -337,7 +417,12 @@ fun MainScreen(
 
                     BluelinkUiState.PAGE_LOG -> LogPage(ui)
                     // v0.5.8 UI1b-B2：个性化页整页重做（无滚动一屏 + 右上保存）；保存回调上抛主题强调色
-                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(ui = ui, onSaved = onAccentSaved)
+                    BluelinkUiState.PAGE_PERSONAL -> PersonalizePage(
+                        ui = ui,
+                        onSaved = onAccentSaved,
+                        // v0.5.12 md3-audit-2 FI2：草稿 dirty 上报（离开页面前提示未保存改动用）
+                        onDirtyChange = { personalDirty = it },
+                    )
                     // v0.5.9 UI1b-C：设置页五区真页（ui/SettingsPage.kt：安全/热点/传输/外观/权限检测 + 深浅三态）
                     BluelinkUiState.PAGE_SETTINGS -> SettingsPage(
                         ui = ui,
@@ -346,11 +431,14 @@ fun MainScreen(
                         onThemeModeChange = onThemeModeChange,
                     )
                     // v0.5.10：关于页重做（新布局 + 隐藏收集日志两段式，见下方 AboutPage）
+                    // v0.5.12 md3-audit-2 F4：收集状态/导出状态机在 MainScreen（跨路由不丢 + 导出 busy）
                     BluelinkUiState.PAGE_ABOUT -> AboutPage(
                         ui = ui,
-                        engine = engine,
                         logUnlocked = aboutLogUnlocked,
                         onLogUnlocked = { aboutLogUnlocked = true },
+                        collecting = logCollecting,
+                        exporting = logExporting,
+                        onCollectRowClick = { onLogCollectClick() },
                     )
                     else -> MainPage(
                         ui = ui,
@@ -640,6 +728,9 @@ private fun BroadcastBreathButton(
                 onAdvertisingWantedChange(!advertisingWanted)
             }
             .semantics {
+                // v0.5.12 md3-audit-2 A3：开关名称补位（此前只有 role=Switch + stateDescription，读屏孤立
+                // 节点无名；旁边「广播/停止」状态字为独立文本节点未绑定——名称 =「广播」）
+                contentDescription = "广播"
                 // audit A2/P2-2：状态描述保持原 Switch 语义（读屏「广播开启/广播停止」）
                 stateDescription = if (advertisingWanted) "广播开启" else "广播停止"
             },
@@ -1520,40 +1611,28 @@ private const val ABOUT_WANGBAOBAO_URL = "https://space.bilibili.com/1978636705/
  *    [DiagLogger.entriesSince] 取起点后新增条目 → 脱敏（型号/别名/pwd/ssid 键值/MAC/IPv4/6 位 PIN）→ 写 txt
  *    （自定义接收目录直接 SAF 落盘；未自定义则本次弹目录选择器选落盘位置，Downloads 初始，不改接收目录设置）
  *    → Toast「已保存日志：…」；
+ *    v0.5.12 md3-audit-2 F4：两段式状态机（collecting / 起点 / 待落盘文本）与导出目录选择器、导出 IO 已
+ *    上提 MainScreen（logCollect / onLogCollectClick/logDirLauncher，与 logUnlocked 同级）——AboutPage 只读
+ *    展示并上报点击，随路由切页不丢收集窗口；导出中 logExporting busy（收集行禁点 + 「导出中…」文案）。
  * 7) 底部致谢区（DeepSeek / 王宝煲 / LocalSend / MacroDroid / Material 3 / GPL-3.0）。
  */
 @Composable
 private fun AboutPage(
     ui: BluelinkUiState,
-    engine: BluelinkEngine?,
     // v0.5.10（v0.5.10c 注释同步：连击目标为版本号行）：解锁态（MainScreen 持有；AboutPage 只读展示 + 上报解锁）
     logUnlocked: Boolean,
     onLogUnlocked: () -> Unit,
+    // v0.5.12 md3-audit-2 F4：收集两段式状态/导出由 MainScreen 层持有执行（collecting / 起点 / 待落盘文本 /
+    // 导出 busy 随路由切页不丢；本页只展示状态并上报「收集行点击」，状态机见 MainScreen logCollect / onLogCollectClick）
+    collecting: Boolean,
+    exporting: Boolean,
+    onCollectRowClick: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
-    // 「收集日志」两段式（本页局部状态；解锁态不随本页离开丢失）
-    var collecting by remember { mutableStateOf(false) }
-    var collectStart by remember { mutableStateOf(0L) }
-    var pendingLogText by remember { mutableStateOf<String?>(null) }
     // v0.5.10c：版本号行连点计数（相邻间隔 >2s 清零；原隐藏热区计数变量随热区删除改名迁移）
     var versionTaps by remember { mutableStateOf(0) }
     var lastVersionTapMs by remember { mutableStateOf(0L) }
-
-    // 未自定义接收目录时「本次保存」的目录选择器（SAF OpenDocumentTree；初始 Downloads；不改接收目录设置）
-    val logDirLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri: Uri? ->
-        val text = pendingLogText
-        pendingLogText = null
-        if (uri != null && text != null) {
-            scope.launch {
-                val msg = withContext(Dispatchers.IO) { writeLogTextToTree(context, uri, text) }
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-            }
-        }
-    }
 
     // v0.5.10c：版本号行连击（连击目标由隐藏热区迁至版本号行条目；原连击处理函数改名 onVersionTap，
     // 计数逻辑零改动：相邻间隔 ≤ ABOUT_VERSION_TAP_WINDOW_MS 递增、超时清零、达 5 次解锁）
@@ -1564,33 +1643,6 @@ private fun AboutPage(
         if (versionTaps >= ABOUT_VERSION_TAPS_UNLOCK) {
             versionTaps = 0
             onLogUnlocked()
-        }
-    }
-
-    // 「收集日志」两段式状态机：未开始 → 开始记录；收集中 → 停止并保存（脱敏 txt → 接收目录 → Toast）
-    fun onCollectRowClick() {
-        if (!collecting) {
-            collecting = true
-            collectStart = DiagLogger.entryCount()
-            ui.showSnack("已开始收集，操作复现后再次点击保存")
-        } else {
-            collecting = false
-            val text = buildLogExportText(
-                alias = ui.selfCard.alias.ifBlank { Build.MODEL },
-                startCount = collectStart,
-            )
-            val tree = engine?.receiveDirUri()
-            if (tree == null) {
-                // 默认接收目录（未自定义）：本次弹目录选择器（Downloads 初始）选落盘位置；不改接收目录设置
-                pendingLogText = text
-                logDirLauncher.launch(initialReceiveDirUri())
-            } else {
-                // 自定义接收目录：直接经 SAF 写入该目录（与引擎收文件落盘同机制）
-                scope.launch {
-                    val msg = withContext(Dispatchers.IO) { writeLogTextToTree(context, tree, text) }
-                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                }
-            }
         }
     }
 
@@ -1673,24 +1725,29 @@ private fun AboutPage(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(MaterialTheme.shapes.large)
-                        .clickable { onCollectRowClick() }
+                        // v0.5.12 md3-audit-2 F4：导出中 busy——收集行禁点（IO/SAF 选目录期间防重入）
+                        .clickable(enabled = !exporting, onClick = onCollectRowClick)
                         .padding(horizontal = SpacingTokens.SpaceLg, vertical = SpacingTokens.SpaceMd),
                     verticalArrangement = Arrangement.spacedBy(SpacingTokens.SpaceXs),
                 ) {
                     Text(
-                        text = if (collecting) "收集日志（收集中）" else "收集日志",
+                        text = when {
+                            exporting -> "收集日志（导出中…）"
+                            collecting -> "收集日志（收集中）"
+                            else -> "收集日志"
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (collecting) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when {
+                            exporting -> MaterialTheme.colorScheme.onSurfaceVariant
+                            collecting -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
                     Text(
-                        text = if (collecting) {
-                            "已开始记录——操作复现后再次点击停止并保存"
-                        } else {
-                            "点击开始记录；再次点击停止并脱敏保存为 txt"
+                        text = when {
+                            exporting -> "正在脱敏并保存为 txt，请稍候…"
+                            collecting -> "已开始记录——操作复现后再次点击停止并保存"
+                            else -> "点击开始记录；再次点击停止并脱敏保存为 txt"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

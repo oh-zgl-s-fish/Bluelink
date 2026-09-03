@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
@@ -238,12 +239,25 @@ fun MainScreen(
     var logExporting by remember { mutableStateOf(false) }
 
     // v0.5.12 md3-audit-2 FI2：路由离开统一出口——从个性化页离开且草稿未保存 → Snackbar「有未保存的改动」
-    // （只提示不阻断离开；抽屉切页与顶栏应用名返回主页均经此，个性化页内「返回」在页内自行直判）
+    // （只提示不阻断离开；抽屉切页、顶栏应用名返回主页与 v0.5.13 系统返回键均经此，个性化页内「返回」在页内自行直判）
     fun navigateFrom(page: Int) {
         if (ui.currentPage == BluelinkUiState.PAGE_PERSONAL && personalDirty) {
             ui.showSnack("有未保存的改动")
         }
         ui.currentPage = page
+    }
+
+    // v0.5.13 md3-audit-2 系统返回键：路由在子页（LOG/个性化/设置/关于）时按返回 → 走统一出口 navigateFrom 回主页。
+    // - 语义与现有返回路径一致：个性化页 dirty → Snackbar「有未保存的改动」后仍回主页（只提示不阻断离开）；
+    //   其它子页直接回主页；主页（PAGE_HOME）onSubPage=false → 回调禁用（等同不注册）→ 保持系统默认返回退出；
+    // - 弹窗层不误拦截：pairingDialog/sendDialog/detailDevice 等浮层在独立弹窗窗口内由系统弹窗栈/各自返回
+    //   处理接管（AlertDialog/ModalBottomSheet 返回 = 收弹层），此处再按状态 enabled 排除兜底——有弹窗时不回主页；
+    // - 抽屉拉开时不抢返回：抽屉自带返回收拢处理（M3 内部 BackHandler，本回调禁用让位）→ 先关抽屉再回主页。
+    val onSubPage = ui.currentPage != BluelinkUiState.PAGE_HOME
+    BackHandler(
+        enabled = onSubPage && !ui.pairingDialog && !ui.sendDialog && ui.detailDevice == null && !drawerState.isOpen,
+    ) {
+        navigateFrom(BluelinkUiState.PAGE_HOME)
     }
 
     // T3 发送入口：SAF OpenDocument 文件选择器（系统 picker；结果 → engine.onSendFilePicked）

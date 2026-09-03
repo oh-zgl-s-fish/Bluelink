@@ -1014,8 +1014,9 @@ private fun MaskRow(
  * 表面块，卡 alpha 随草稿即时变化），保存写
  * store.containerTransparency 后主页生效。
  * v0.5.12 md3-audit-2 C4：透明度 ≥40%（容器 alpha ≤0.60）为文字可读风险区（深壁纸 + 低遮罩下容器文字
- * 对比可跌破 4.5:1 且无自动钳制）——滑杆下方动态显示 warning 色风险提示（50% 档 = alpha 0.50 下限提示
- * 最强；阈值常量见 [WallpaperStore.RISK_TRANSPARENCY_THRESHOLD]）。 */
+ * 对比可跌破 4.5:1 且无自动钳制）——滑杆下方常驻固定高度留白位内显示 warning 色风险提示（v0.5.13
+ * 改固定留白位：动态出现 → 原位填入、行高不变；50% 档 = alpha 0.50 下限提示最强；阈值常量见
+ * [WallpaperStore.RISK_TRANSPARENCY_THRESHOLD]）。 */
 @Composable
 private fun ContainerTransparencyRow(
     transparency: Int,
@@ -1048,19 +1049,32 @@ private fun ContainerTransparencyRow(
                 maxLines = 1,
             )
         }
-        // v0.5.12 md3-audit-2 C4：风险提示行（透明度 ≥40% = alpha ≤0.60 风险区时动态出现；50% 档 = alpha
-        // 0.50 下限，提示最强；文案随档切换——取审计轻量组合①，不引入联动钳制机制）
-        if (transparency >= WallpaperStore.RISK_TRANSPARENCY_THRESHOLD) {
-            Text(
-                text = if (transparency >= WallpaperStore.TRANSPARENCY_MAX) {
-                    "50% 时文字可读性下降风险较高"
-                } else {
-                    "较高透明度可能影响文字可读"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.extended.warning,
-                modifier = Modifier.padding(start = 96.dp, top = SpacingTokens.SpaceXs),
-            )
+        // v0.5.12 md3-audit-2 C4（v0.5.13 改固定留白位）：风险提示行——滑杆行下方常驻固定高度留白区
+        // （20dp ≈ SpaceXs 顶距 4dp + labelSmall 单行 16sp 行高；无风险时空白保留）→ 透明度 ≥40%
+        // （alpha ≤0.60 风险区）时提示文字原地填入该固定区（50% 档 = alpha 0.50 下限，提示最强；文案随档
+        // 切换——取审计轻量组合①，不引入联动钳制机制）。提醒出现/消失/长短文案切换均不改变行高 →
+        // 页面其它元素位置零变动。
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(20.dp),
+        ) {
+            if (transparency >= WallpaperStore.RISK_TRANSPARENCY_THRESHOLD) {
+                Text(
+                    text = if (transparency >= WallpaperStore.TRANSPARENCY_MAX) {
+                        "50% 时文字可读性下降风险较高"
+                    } else {
+                        "较高透明度可能影响文字可读"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.extended.warning,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 96.dp, top = SpacingTokens.SpaceXs),
+                )
+            }
         }
     }
 }
